@@ -1,50 +1,41 @@
 #!/usr/bin/env python3
 """
-Enhanced NFL Coaching Analytics System with Player Grade Context
-Integrates player performance grades to provide roster-adjusted coaching evaluations
+Fixed NFL Roster-Aware Coaching Analytics System
+Addresses issues with player grade alignment and roster evaluation logic
 """
 
 import pandas as pd
 import numpy as np
 import nfl_data_py as nfl
-import matplotlib.pyplot as plt
-import seaborn as sns
 from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
 
-# Import the player grading system
-# from ..players.grading import EnhancedNFLPlayerGrader
-from ..players.grading import EnhancedNFLPlayerGrader
-
 class RosterAwareCoachingAnalytics:
-    """Enhanced coaching analytics that considers roster quality and player performance"""
+    """Fixed coaching analytics system with proper roster evaluation"""
     
     def __init__(self, years=None):
-        """Initialize the enhanced coaching analytics system"""
         if years is None:
-            years = [2023, 2024]
+            years = [2023]
         self.years = years
         self.pbp_data = None
         self.schedule_data = None
         self.coaching_data = {}
-        self.player_grader = None
         self.player_grades = None
-        self.roster_data = None
         
+        print("NFL Roster-Aware Coaching Analytics System (FIXED)")
+        print("=" * 60)
+    
     def load_data(self):
-        """Load all necessary data including player grading system"""
-        print("Loading NFL data for roster-aware coaching analytics...")
+        """Load all necessary data"""
+        print("Loading NFL data...")
         
         # Load play-by-play data
         print("- Loading play-by-play data...")
         pbp_list = []
         for year in self.years:
             try:
-                if year >= 2024:
-                    year_pbp = nfl.import_pbp_data([year], include_participation=False)
-                else:
-                    year_pbp = nfl.import_pbp_data([year])
+                year_pbp = nfl.import_pbp_data([year])
                 pbp_list.append(year_pbp)
                 print(f"  - {year}: {len(year_pbp)} plays loaded")
             except Exception as e:
@@ -52,7 +43,6 @@ class RosterAwareCoachingAnalytics:
         
         if pbp_list:
             self.pbp_data = pd.concat(pbp_list, ignore_index=True)
-            print(f"Total plays loaded: {len(self.pbp_data)}")
         
         # Load schedule data
         print("- Loading schedule data...")
@@ -68,76 +58,272 @@ class RosterAwareCoachingAnalytics:
         if schedule_list:
             self.schedule_data = pd.concat(schedule_list, ignore_index=True)
         
-        # Initialize and load player grading system
-        print("- Initializing player grading system...")
-        try:
-            self.player_grader = EnhancedNFLPlayerGrader(years=self.years)
-            print("  - Player grading system initialized successfully")
-        except Exception as e:
-            print(f"  - Error initializing player grader: {e}")
-            self.player_grader = None
-        
-        print("Data loading complete!\n")
+        print("Data loading complete!")
     
-    def calculate_player_grades(self, min_games=3):
-        """Calculate player grades for roster analysis"""
-        if self.player_grader is None:
-            print("Player grading system not available")
-            return None
-        
+    def calculate_player_grades(self):
+        """Calculate simplified but properly scaled player grades"""
         print("Calculating player grades for roster analysis...")
-        try:
-            # Get all player grades
-            all_grades = self.player_grader.calculate_all_grades(min_games=min_games)
-            
-            if all_grades.empty:
-                print("No player grades calculated")
-                return None
-            
-            # Get roster data
-            self.roster_data = self.player_grader.rosters
-            
-            # Calculate average grades by player for the season
-            player_season_grades = all_grades.groupby(['player_id', 'player_name', 'position', 'position_group', 'player_type']).agg({
-                'numeric_grade': 'mean',
-                'week': 'count'
-            }).reset_index()
-            
-            player_season_grades.columns = ['player_id', 'player_name', 'position', 'position_group', 'player_type', 'avg_grade', 'games_played']
-            
-            # Merge with roster data to get team assignments
-            if self.roster_data is not None and not self.roster_data.empty:
-                roster_teams = self.roster_data.groupby(['player_id', 'season']).agg({
-                    'team': 'first',
-                    'week': 'count'
-                }).reset_index()
-                roster_teams.columns = ['player_id', 'season', 'primary_team', 'weeks_on_roster']
+        
+        # Load weekly data for offensive players
+        weekly_data = nfl.import_weekly_data(self.years)
+        
+        # Filter to meaningful performances
+        weekly_data = weekly_data[
+            (weekly_data['attempts'] > 0) |
+            (weekly_data['carries'] > 0) |
+            (weekly_data['targets'] > 0)
+        ]
+        
+        grades_list = []
+        
+        # Process each player-game
+        for _, row in weekly_data.iterrows():
+            try:
+                # Determine position group
+                if row['position'] in ['QB']:
+                    grade = self._calculate_simple_qb_grade(row)
+                    pos_group = 'QB'
+                elif row['position'] in ['RB', 'FB']:
+                    grade = self._calculate_simple_rb_grade(row)
+                    pos_group = 'RB'
+                elif row['position'] in ['WR', 'TE']:
+                    grade = self._calculate_simple_wr_te_grade(row)
+                    pos_group = 'WR_TE'
+                else:
+                    continue
                 
-                player_season_grades = pd.merge(
-                    player_season_grades,
-                    roster_teams,
-                    on='player_id',
-                    how='left'
-                )
+                grades_list.append({
+                    'player_id': row['player_id'],
+                    'player_name': row.get('player_name', row.get('player_display_name')),
+                    'team': row.get('recent_team'),
+                    'position': row['position'],
+                    'position_group': pos_group,
+                    'player_type': 'OFFENSE',
+                    'season': row['season'],
+                    'week': row['week'],
+                    'numeric_grade': grade
+                })
+            except Exception as e:
+                continue
+        
+        # Add defensive players with simplified grading
+        defensive_grades = self._calculate_simple_defensive_grades()
+        grades_list.extend(defensive_grades)
+        
+        # Convert to DataFrame
+        self.player_grades = pd.DataFrame(grades_list)
+        
+        # Filter to players with minimum games (3+)
+        if not self.player_grades.empty:
+            game_counts = self.player_grades.groupby('player_id').size()
+            qualified_players = game_counts[game_counts >= 3].index
+            self.player_grades = self.player_grades[
+                self.player_grades['player_id'].isin(qualified_players)
+            ]
+        
+        print(f"Player grades calculated for {self.player_grades['player_id'].nunique()} players")
+        
+        # Debug: Show grade distribution and position breakdown
+        if not self.player_grades.empty:
+            print(f"Grade distribution:")
+            print(f"  Mean: {self.player_grades['numeric_grade'].mean():.1f}")
+            print(f"  Median: {self.player_grades['numeric_grade'].median():.1f}")
+            print(f"  Min: {self.player_grades['numeric_grade'].min():.1f}")
+            print(f"  Max: {self.player_grades['numeric_grade'].max():.1f}")
             
-            self.player_grades = player_season_grades
-            print(f"Player grades calculated for {len(player_season_grades)} players")
-            return player_season_grades
+            print(f"Position breakdown:")
+            pos_counts = self.player_grades['position_group'].value_counts()
+            for pos, count in pos_counts.items():
+                avg_grade = self.player_grades[self.player_grades['position_group'] == pos]['numeric_grade'].mean()
+                print(f"  {pos}: {count} players (avg: {avg_grade:.1f})")
             
-        except Exception as e:
-            print(f"Error calculating player grades: {e}")
-            return None
+            print(f"Team breakdown (top 10):")
+            team_counts = self.player_grades['team'].value_counts().head(10)
+            for team, count in team_counts.items():
+                print(f"  {team}: {count} player-games")
+    
+    def _calculate_simple_qb_grade(self, row):
+        """Simplified QB grading that produces reasonable 50-90 range"""
+        base_score = 50
+        
+        # Passing yards (0-15 points)
+        yards_score = min(row['passing_yards'] / 20, 15)
+        
+        # Completion percentage (0-15 points)
+        if row['attempts'] > 0:
+            comp_pct = row['completions'] / row['attempts']
+            comp_score = max(0, (comp_pct - 0.5) * 30)
+        else:
+            comp_score = 0
+        
+        # Touchdowns (0-15 points)
+        td_score = min(row['passing_tds'] * 5, 15)
+        
+        # Interception penalty (0 to -10 points)
+        int_penalty = min(row['interceptions'] * -3, 0)
+        
+        total_score = base_score + yards_score + comp_score + td_score + int_penalty
+        return max(min(total_score, 95), 25)
+    
+    def _calculate_simple_rb_grade(self, row):
+        """Simplified RB grading"""
+        base_score = 50
+        
+        # Rushing yards (0-20 points)
+        rush_score = min(row['rushing_yards'] / 8, 20)
+        
+        # Yards per carry bonus (0-10 points)
+        if row['carries'] > 0:
+            ypc = row['rushing_yards'] / row['carries']
+            ypc_score = max(0, (ypc - 3.5) * 5)
+        else:
+            ypc_score = 0
+        
+        # Touchdowns (0-15 points)
+        td_score = min((row['rushing_tds'] + row['receiving_tds']) * 7, 15)
+        
+        # Receiving contribution (0-10 points)
+        rec_score = min(row['receiving_yards'] / 15 + row['receptions'], 10)
+        
+        total_score = base_score + rush_score + ypc_score + td_score + rec_score
+        return max(min(total_score, 95), 25)
+    
+    def _calculate_simple_wr_te_grade(self, row):
+        """Simplified WR/TE grading"""
+        base_score = 50
+        
+        # Receiving yards (0-25 points)
+        yards_score = min(row['receiving_yards'] / 6, 25)
+        
+        # Receptions (0-15 points)
+        rec_score = min(row['receptions'] * 2.5, 15)
+        
+        # Touchdowns (0-15 points)
+        td_score = min(row['receiving_tds'] * 8, 15)
+        
+        # Catch rate bonus (0-5 points)
+        if row['targets'] > 0:
+            catch_rate = row['receptions'] / row['targets']
+            catch_score = max(0, (catch_rate - 0.6) * 12.5)
+        else:
+            catch_score = 0
+        
+        total_score = base_score + yards_score + rec_score + td_score + catch_score
+        return max(min(total_score, 95), 25)
+    
+    def _calculate_simple_defensive_grades(self):
+        """Calculate simplified defensive grades from play-by-play data"""
+        if self.pbp_data is None:
+            return []
+        
+        defensive_stats = {}
+        
+        # Process sacks (full and half sacks)
+        sacks = self.pbp_data[self.pbp_data['sack'] == 1]
+        for _, play in sacks.iterrows():
+            # Full sacks
+            if pd.notna(play.get('sack_player_name')):
+                key = (play['sack_player_id'], play['sack_player_name'], 
+                      play['season'], play['week'], play.get('defteam', 'UNK'))
+                if key not in defensive_stats:
+                    defensive_stats[key] = {'sacks': 0, 'tackles': 0, 'ints': 0, 'pds': 0, 'ff': 0}
+                defensive_stats[key]['sacks'] += 1.0
+            
+            # Half sacks
+            for half_sack_col in ['half_sack_1_player_name', 'half_sack_2_player_name']:
+                if pd.notna(play.get(half_sack_col)):
+                    id_col = half_sack_col.replace('_name', '_id')
+                    key = (play[id_col], play[half_sack_col], 
+                          play['season'], play['week'], play.get('defteam', 'UNK'))
+                    if key not in defensive_stats:
+                        defensive_stats[key] = {'sacks': 0, 'tackles': 0, 'ints': 0, 'pds': 0, 'ff': 0}
+                    defensive_stats[key]['sacks'] += 0.5
+        
+        # Process interceptions
+        ints = self.pbp_data[self.pbp_data['interception'] == 1]
+        for _, play in ints.iterrows():
+            if pd.notna(play.get('interception_player_name')):
+                key = (play['interception_player_id'], play['interception_player_name'],
+                      play['season'], play['week'], play.get('defteam', 'UNK'))
+                if key not in defensive_stats:
+                    defensive_stats[key] = {'sacks': 0, 'tackles': 0, 'ints': 0, 'pds': 0, 'ff': 0}
+                defensive_stats[key]['ints'] += 1
+        
+        # Process tackles
+        for _, play in self.pbp_data.iterrows():
+            # Solo tackles
+            if pd.notna(play.get('solo_tackle_1_player_name')):
+                key = (play['solo_tackle_1_player_id'], play['solo_tackle_1_player_name'],
+                      play['season'], play['week'], play.get('defteam', 'UNK'))
+                if key not in defensive_stats:
+                    defensive_stats[key] = {'sacks': 0, 'tackles': 0, 'ints': 0, 'pds': 0, 'ff': 0}
+                defensive_stats[key]['tackles'] += 1
+            
+            # Assist tackles
+            for assist_col in ['assist_tackle_1_player_name', 'assist_tackle_2_player_name']:
+                if pd.notna(play.get(assist_col)):
+                    id_col = assist_col.replace('_name', '_id')
+                    key = (play[id_col], play[assist_col],
+                          play['season'], play['week'], play.get('defteam', 'UNK'))
+                    if key not in defensive_stats:
+                        defensive_stats[key] = {'sacks': 0, 'tackles': 0, 'ints': 0, 'pds': 0, 'ff': 0}
+                    defensive_stats[key]['tackles'] += 0.5
+        
+        # Process pass deflections
+        for _, play in self.pbp_data.iterrows():
+            if pd.notna(play.get('pass_defense_1_player_name')):
+                key = (play['pass_defense_1_player_id'], play['pass_defense_1_player_name'],
+                      play['season'], play['week'], play.get('defteam', 'UNK'))
+                if key not in defensive_stats:
+                    defensive_stats[key] = {'sacks': 0, 'tackles': 0, 'ints': 0, 'pds': 0, 'ff': 0}
+                defensive_stats[key]['pds'] += 1
+        
+        # Process forced fumbles
+        for _, play in self.pbp_data.iterrows():
+            if pd.notna(play.get('forced_fumble_player_1_player_name')):
+                key = (play['forced_fumble_player_1_player_id'], play['forced_fumble_player_1_player_name'],
+                      play['season'], play['week'], play.get('defteam', 'UNK'))
+                if key not in defensive_stats:
+                    defensive_stats[key] = {'sacks': 0, 'tackles': 0, 'ints': 0, 'pds': 0, 'ff': 0}
+                defensive_stats[key]['ff'] += 1
+        
+        # Convert to grades and aggregate by player-season
+        weekly_grades = []
+        for (player_id, player_name, season, week, team), stats in defensive_stats.items():
+            # Simple defensive grading
+            base_score = 55  # Base defensive participation
+            
+            # Scale defensive stats for weekly performance
+            sack_score = stats['sacks'] * 10      # 10 points per sack
+            int_score = stats['ints'] * 12        # 12 points per INT
+            tackle_score = min(stats['tackles'] * 2, 15)  # Up to 15 points for tackles
+            pd_score = stats['pds'] * 4           # 4 points per pass deflection
+            ff_score = stats['ff'] * 8            # 8 points per forced fumble
+            
+            grade = base_score + sack_score + int_score + tackle_score + pd_score + ff_score
+            grade = max(min(grade, 95), 30)
+            
+            weekly_grades.append({
+                'player_id': player_id,
+                'player_name': player_name,
+                'team': team,
+                'position': 'DEF',
+                'position_group': 'DEFENSE',
+                'player_type': 'DEFENSE',
+                'season': season,
+                'week': week,
+                'numeric_grade': grade
+            })
+        
+        print(f"Processed defensive stats for {len(defensive_stats)} player-week combinations")
+        return weekly_grades
     
     def extract_coaching_info(self):
         """Extract coaching information from schedule data"""
         if self.schedule_data is None:
-            print("No schedule data available")
             return
         
-        print("Extracting coaching information...")
-        
         coaches = {}
-        
         for _, game in self.schedule_data.iterrows():
             season = game['season']
             
@@ -155,11 +341,8 @@ class RosterAwareCoachingAnalytics:
                 coaches[coach_key]['games'].append({
                     'game_id': game['game_id'],
                     'team': game['home_team'],
-                    'opponent': game['away_team'],
                     'is_home': True,
                     'week': game['week'],
-                    'score': game['home_score'],
-                    'opp_score': game['away_score'],
                     'result': 'W' if pd.notna(game['home_score']) and pd.notna(game['away_score']) and game['home_score'] > game['away_score'] else 'L' if pd.notna(game['home_score']) and pd.notna(game['away_score']) else None
                 })
             
@@ -177,878 +360,310 @@ class RosterAwareCoachingAnalytics:
                 coaches[coach_key]['games'].append({
                     'game_id': game['game_id'],
                     'team': game['away_team'],
-                    'opponent': game['home_team'],
                     'is_home': False,
                     'week': game['week'],
-                    'score': game['away_score'],
-                    'opp_score': game['home_score'],
                     'result': 'W' if pd.notna(game['away_score']) and pd.notna(game['home_score']) and game['away_score'] > game['home_score'] else 'L' if pd.notna(game['away_score']) and pd.notna(game['home_score']) else None
                 })
         
         self.coaching_data = coaches
         print(f"Extracted data for {len(coaches)} coach-season combinations")
-        
-        return coaches
     
-    def get_roster_quality_metrics(self, team, season, position_group=None):
-        """Calculate roster quality metrics for a team and season"""
-        if self.player_grades is None:
+    def analyze_roster_quality(self, team, season):
+        """FIXED: Analyze roster quality with proper grade scaling"""
+        if self.player_grades is None or self.player_grades.empty:
+            print(f"No player grades available for roster analysis")
             return None
         
-        # Filter to team and season
+        print(f"Analyzing roster quality for {team} ({season})...")
+        
+        # Get team's players for the season
         team_players = self.player_grades[
-            (self.player_grades['primary_team'] == team) & 
+            (self.player_grades['team'] == team) & 
             (self.player_grades['season'] == season)
-        ].copy()
-        
-        if team_players.empty:
-            return None
-        
-        # Filter by position group if specified
-        if position_group:
-            team_players = team_players[team_players['position_group'] == position_group]
-            if team_players.empty:
-                return None
-        
-        # Calculate metrics
-        metrics = {
-            'total_players': len(team_players),
-            'avg_grade': team_players['avg_grade'].mean(),
-            'median_grade': team_players['avg_grade'].median(),
-            'top_players': len(team_players[team_players['avg_grade'] >= 80]),  # B- or better
-            'elite_players': len(team_players[team_players['avg_grade'] >= 90]),  # A- or better
-            'below_avg_players': len(team_players[team_players['avg_grade'] < 70]),  # Below C-
-            'grade_std': team_players['avg_grade'].std(),
-            'depth_score': self._calculate_depth_score(team_players)
-        }
-        
-        # Position-specific metrics
-        if position_group:
-            metrics['position_group'] = position_group
-        else:
-            # Overall roster with position breakdowns
-            position_breakdown = team_players.groupby('position_group').agg({
-                'avg_grade': 'mean',
-                'player_id': 'count'
-            }).to_dict()
-            metrics['position_breakdown'] = position_breakdown
-        
-        return metrics
-    
-    def _calculate_depth_score(self, team_players):
-        """Calculate a depth score based on how many quality players a team has"""
-        if len(team_players) == 0:
-            return 0
-        
-        # Weight players by their grades - elite players contribute more to depth
-        depth_points = 0
-        
-        for _, player in team_players.iterrows():
-            grade = player['avg_grade']
-            if grade >= 90:  # Elite (A-)
-                depth_points += 4
-            elif grade >= 80:  # Very Good (B-)
-                depth_points += 3
-            elif grade >= 70:  # Average (C-)
-                depth_points += 2
-            elif grade >= 60:  # Below Average (D-)
-                depth_points += 1
-            # Below 60 (F) adds 0 points
-        
-        # Normalize by expected roster size for position group
-        return depth_points / len(team_players) * 10  # Scale to 0-40 range
-    
-    def calculate_roster_adjusted_coaching_grade(self, coach_name, season=None):
-        """Calculate coaching grade adjusted for roster quality"""
-        
-        # First get the base coaching grade using existing methods
-        base_grades = self.grade_coach_performance(coach_name, season)
-        if not base_grades:
-            return None
-        
-        # Get the team(s) this coach coached
-        coach_teams = []
-        for (coach, seas), data in self.coaching_data.items():
-            if coach == coach_name and (season is None or seas == season):
-                coach_teams.extend(list(data['teams']))
-                if season is None:
-                    season = seas  # Use the season from the data
-        
-        if not coach_teams:
-            print(f"No team data found for coach {coach_name}")
-            return base_grades
-        
-        # Calculate roster quality for each team coached
-        roster_adjustments = {}
-        
-        for team in set(coach_teams):
-            print(f"Analyzing roster quality for {team} ({season})...")
-            
-            # Get overall roster quality
-            overall_quality = self.get_roster_quality_metrics(team, season)
-            
-            # Get position-specific quality
-            offensive_quality = self.get_roster_quality_metrics(team, season, 'OFFENSE')
-            defensive_quality = self.get_roster_quality_metrics(team, season, 'DEFENSE')
-            
-            if overall_quality:
-                roster_adjustments[team] = {
-                    'overall': overall_quality,
-                    'offensive': offensive_quality,
-                    'defensive': defensive_quality
-                }
-        
-        if not roster_adjustments:
-            print("No roster quality data available - using base grades")
-            return base_grades
-        
-        # Calculate roster-adjusted grades
-        adjusted_grades = base_grades.copy()
-        
-        # Average roster quality across teams coached (if multiple)
-        avg_overall_grade = np.mean([r['overall']['avg_grade'] for r in roster_adjustments.values() if r['overall']])
-        avg_offensive_grade = np.mean([r['offensive']['avg_grade'] for r in roster_adjustments.values() if r['offensive']])
-        avg_defensive_grade = np.mean([r['defensive']['avg_grade'] for r in roster_adjustments.values() if r['defensive']])
-        
-        # Calculate adjustment factors based on roster quality
-        # League average player grade is around 70, so we adjust based on deviation from that
-        league_avg = 70
-        
-        # More sophisticated adjustment - consider both grade and depth
-        overall_depth = np.mean([r['overall']['depth_score'] for r in roster_adjustments.values() if r['overall']])
-        
-        # Adjustment factors (more moderate than before)
-        def calculate_adjustment_factor(roster_grade, depth_score, league_avg=70):
-            """Calculate how much to adjust coaching grade based on roster"""
-            grade_diff = roster_grade - league_avg
-            depth_factor = min(depth_score / 20, 1.0)  # Normalize depth
-            
-            # More nuanced adjustment
-            if roster_grade >= 85:  # Elite roster
-                return 0.85 + (0.1 * depth_factor)  # Harder to look good with elite talent
-            elif roster_grade >= 75:  # Good roster
-                return 0.92 + (0.05 * depth_factor)  # Slight penalty
-            elif roster_grade >= 65:  # Average roster
-                return 1.0  # No adjustment
-            elif roster_grade >= 55:  # Below average roster
-                return 1.08 + (0.1 * (1 - depth_factor))  # Bonus for poor roster
-            else:  # Poor roster
-                return 1.15 + (0.15 * (1 - depth_factor))  # Significant bonus for terrible roster
-        
-        # Apply adjustments
-        if avg_overall_grade:
-            overall_adjustment = calculate_adjustment_factor(avg_overall_grade, overall_depth)
-            print(f"Overall roster adjustment factor: {overall_adjustment:.3f} (avg grade: {avg_overall_grade:.1f})")
-        
-        if avg_offensive_grade and 'offensive_overall' in adjusted_grades:
-            off_depth = np.mean([r['offensive']['depth_score'] for r in roster_adjustments.values() if r['offensive']])
-            off_adjustment = calculate_adjustment_factor(avg_offensive_grade, off_depth)
-            adjusted_grades['offensive_overall'] *= off_adjustment
-            print(f"Offensive roster adjustment factor: {off_adjustment:.3f} (avg grade: {avg_offensive_grade:.1f})")
-            
-            # Apply to individual offensive categories
-            if 'offensive' in adjusted_grades:
-                for category in adjusted_grades['offensive']:
-                    adjusted_grades['offensive'][category] *= off_adjustment
-        
-        if avg_defensive_grade and 'defensive_overall' in adjusted_grades:
-            def_depth = np.mean([r['defensive']['depth_score'] for r in roster_adjustments.values() if r['defensive']])
-            def_adjustment = calculate_adjustment_factor(avg_defensive_grade, def_depth)
-            adjusted_grades['defensive_overall'] *= def_adjustment
-            print(f"Defensive roster adjustment factor: {def_adjustment:.3f} (avg grade: {avg_defensive_grade:.1f})")
-            
-            # Apply to individual defensive categories
-            if 'defensive' in adjusted_grades:
-                for category in adjusted_grades['defensive']:
-                    adjusted_grades['defensive'][category] *= def_adjustment
-        
-        # Recalculate overall grade with roster adjustments
-        if 'offensive_overall' in adjusted_grades and 'defensive_overall' in adjusted_grades:
-            coach_specialty = self._determine_coach_specialty(coach_name, season)
-            
-            if coach_specialty == 'offense':
-                adjusted_grades['overall'] = (adjusted_grades['offensive_overall'] * 0.6) + (adjusted_grades['defensive_overall'] * 0.4)
-            elif coach_specialty == 'defense':
-                adjusted_grades['overall'] = (adjusted_grades['offensive_overall'] * 0.4) + (adjusted_grades['defensive_overall'] * 0.6)
-            else:
-                adjusted_grades['overall'] = (adjusted_grades['offensive_overall'] * 0.5) + (adjusted_grades['defensive_overall'] * 0.5)
-        
-        # Add roster context to the grades
-        adjusted_grades['roster_context'] = {
-            'roster_adjustments': roster_adjustments,
-            'avg_roster_grade': avg_overall_grade,
-            'avg_offensive_grade': avg_offensive_grade,
-            'avg_defensive_grade': avg_defensive_grade,
-            'roster_quality_tier': self._get_roster_tier(avg_overall_grade) if avg_overall_grade else 'Unknown'
-        }
-        
-        # Ensure grades don't exceed realistic bounds
-        for category in ['offensive_overall', 'defensive_overall', 'overall']:
-            if category in adjusted_grades:
-                adjusted_grades[category] = min(100, max(40, adjusted_grades[category]))
-        
-        return adjusted_grades
-    
-    def _get_roster_tier(self, avg_grade):
-        """Classify roster quality into tiers"""
-        if avg_grade >= 80:
-            return 'Elite'
-        elif avg_grade >= 75:
-            return 'Very Good'
-        elif avg_grade >= 70:
-            return 'Average'
-        elif avg_grade >= 65:
-            return 'Below Average'
-        else:
-            return 'Poor'
-    
-    def print_roster_aware_coach_report(self, coach_name, season=None):
-        """Print comprehensive coaching report with roster context"""
-        print(f"\n{'='*80}")
-        print(f"ROSTER-AWARE COACHING REPORT: {coach_name}")
-        if season:
-            print(f"Season: {season}")
-        print(f"{'='*80}")
-        
-        # Get roster-adjusted grades
-        adjusted_grades = self.calculate_roster_adjusted_coaching_grade(coach_name, season)
-        if not adjusted_grades:
-            print("No grading data available")
-            return
-        
-        # Print basic coach info
-        coach_info = []
-        coach_specialty = self._determine_coach_specialty(coach_name, season)
-        
-        for (coach, seas), data in self.coaching_data.items():
-            if coach == coach_name and (season is None or seas == season):
-                teams = list(data['teams'])
-                wins = sum(1 for g in data['games'] if g['result'] == 'W')
-                total_games = len([g for g in data['games'] if g['result'] is not None])
-                win_pct = (wins / total_games * 100) if total_games > 0 else 0
-                
-                coach_info.append({
-                    'season': seas,
-                    'teams': teams,
-                    'record': f"{wins}-{total_games-wins}",
-                    'win_pct': win_pct,
-                    'games_coached': len(data['games'])
-                })
-        
-        for info in coach_info:
-            print(f"Season: {info['season']}")
-            print(f"Team(s): {', '.join(info['teams'])}")
-            print(f"Record: {info['record']} ({info['win_pct']:.1f}%)")
-            print(f"Specialty: {coach_specialty.title()}")
-        
-        # Print roster context
-        if 'roster_context' in adjusted_grades:
-            context = adjusted_grades['roster_context']
-            print(f"\n{'ROSTER CONTEXT':^80}")
-            print("-" * 80)
-            print(f"Overall Roster Quality: {context['roster_quality_tier']} (Avg Grade: {context['avg_roster_grade']:.1f})")
-            
-            if context['avg_offensive_grade']:
-                off_tier = self._get_roster_tier(context['avg_offensive_grade'])
-                print(f"Offensive Talent Level: {off_tier} (Avg Grade: {context['avg_offensive_grade']:.1f})")
-            
-            if context['avg_defensive_grade']:
-                def_tier = self._get_roster_tier(context['avg_defensive_grade'])
-                print(f"Defensive Talent Level: {def_tier} (Avg Grade: {context['avg_defensive_grade']:.1f})")
-            
-            # Show specific roster strengths/weaknesses
-            for team, roster_data in context['roster_adjustments'].items():
-                if roster_data['overall']:
-                    overall = roster_data['overall']
-                    print(f"\n{team} Roster Analysis:")
-                    print(f"  Overall: {overall['avg_grade']:.1f} avg, {overall['elite_players']} elite players, {overall['depth_score']:.1f} depth")
-        
-        # Print performance grades (now adjusted for roster)
-        print(f"\n{'ROSTER-ADJUSTED PERFORMANCE':^80}")
-        print("-" * 80)
-        
-        # Show both base and adjusted grades for comparison
-        base_grades = self.grade_coach_performance(coach_name, season)
-        
-        def print_grade_comparison(category, base_score, adjusted_score):
-            base_letter = self.get_letter_grade(base_score)
-            adj_letter = self.get_letter_grade(adjusted_score)
-            change = adjusted_score - base_score
-            change_str = f"({change:+.1f})" if abs(change) > 0.1 else ""
-            
-            indicator = "Outstanding" if adjusted_score >= 90 else "Very Good" if adjusted_score >= 80 else "Average" if adjusted_score >= 70 else "Below Average" if adjusted_score >= 60 else "Poor"
-            
-            print(f"{category:<35} {adjusted_score:>6.1f} ({adj_letter}) {indicator} {change_str}")
-        
-        if 'offensive_overall' in adjusted_grades and base_grades:
-            print(f"\n{'OFFENSIVE PERFORMANCE (Roster-Adjusted)':^80}")
-            print("-" * 80)
-            print_grade_comparison("Offensive Overall", base_grades.get('offensive_overall', 0), adjusted_grades['offensive_overall'])
-        
-        if 'defensive_overall' in adjusted_grades and base_grades:
-            print(f"\n{'DEFENSIVE PERFORMANCE (Roster-Adjusted)':^80}")
-            print("-" * 80)
-            print_grade_comparison("Defensive Overall", base_grades.get('defensive_overall', 0), adjusted_grades['defensive_overall'])
-        
-        if 'overall' in adjusted_grades:
-            print(f"\n{'='*80}")
-            print("FINAL ROSTER-ADJUSTED COACHING GRADE")
-            print("="*80)
-            
-            base_overall = base_grades.get('overall', 0) if base_grades else 0
-            print_grade_comparison("Overall Coaching Grade", base_overall, adjusted_grades['overall'])
-            
-            # Context explanation
-            grade = adjusted_grades['overall']
-            if grade >= 85:
-                context = "Exceptional coaching - Getting maximum from available talent"
-            elif grade >= 80:
-                context = "Excellent coaching - Strong player development and strategy"
-            elif grade >= 75:
-                context = "Good coaching - Solid performance given roster"
-            elif grade >= 70:
-                context = "Average coaching - Meeting expectations"
-            else:
-                context = "Below expectations - Underperforming given available talent"
-            
-            print(f"\n{context}")
-            print("="*80)
-    
-    # Include all the existing methods from the original coaching system
-    def analyze_offensive_tendencies(self, coach_name=None, team=None, season=None):
-        """Analyze offensive play-calling tendencies"""
-        if self.pbp_data is None:
-            print("No play-by-play data available")
-            return None
-        
-        # Filter data based on parameters
-        filtered_pbp = self.pbp_data.copy()
-        
-        # Filter by season if specified
-        if season:
-            filtered_pbp = filtered_pbp[filtered_pbp['season'] == season]
-        
-        # Filter by team if specified
-        if team:
-            filtered_pbp = filtered_pbp[filtered_pbp['posteam'] == team]
-        
-        # If coach specified, filter by their games
-        if coach_name:
-            coach_games = []
-            for (coach, seas), data in self.coaching_data.items():
-                if coach == coach_name and (season is None or seas == season):
-                    coach_games.extend([g['game_id'] for g in data['games']])
-            
-            if coach_games:
-                coach_team_games = []
-                for (coach, seas), data in self.coaching_data.items():
-                    if coach == coach_name and (season is None or seas == season):
-                        for game in data['games']:
-                            coach_team_games.append((game['game_id'], game['team']))
-                
-                # Filter to plays where the coach's team had possession
-                coach_plays = []
-                for game_id, coach_team in coach_team_games:
-                    game_plays = filtered_pbp[
-                        (filtered_pbp['game_id'] == game_id) & 
-                        (filtered_pbp['posteam'] == coach_team)
-                    ]
-                    coach_plays.append(game_plays)
-                
-                if coach_plays:
-                    filtered_pbp = pd.concat(coach_plays, ignore_index=True)
-                else:
-                    filtered_pbp = pd.DataFrame()
-        
-        if filtered_pbp.empty:
-            print(f"No offensive plays found for the specified criteria")
-            return None
-        
-        # Analyze offensive tendencies
-        analysis = {}
-        
-        # Basic play type distribution
-        play_types = filtered_pbp[filtered_pbp['play_type'].isin(['run', 'pass'])]['play_type'].value_counts()
-        analysis['play_type_pct'] = (play_types / play_types.sum() * 100).to_dict()
-        
-        # Down and distance tendencies
-        down_distance = {}
-        for down in [1, 2, 3, 4]:
-            down_plays = filtered_pbp[filtered_pbp['down'] == down]
-            if not down_plays.empty:
-                play_dist = down_plays[down_plays['play_type'].isin(['run', 'pass'])]['play_type'].value_counts()
-                if not play_dist.empty:
-                    down_distance[f'down_{down}'] = (play_dist / play_dist.sum() * 100).to_dict()
-        
-        analysis['down_tendencies'] = down_distance
-        
-        # Red zone tendencies (inside 20 yard line)
-        red_zone = filtered_pbp[
-            (filtered_pbp['yardline_100'] <= 20) & 
-            (filtered_pbp['play_type'].isin(['run', 'pass']))
         ]
         
-        if not red_zone.empty:
-            rz_types = red_zone['play_type'].value_counts()
-            analysis['red_zone_tendencies'] = (rz_types / rz_types.sum() * 100).to_dict()
-        
-        # Efficiency metrics
-        passing_plays = filtered_pbp[filtered_pbp['play_type'] == 'pass']
-        rushing_plays = filtered_pbp[filtered_pbp['play_type'] == 'run']
-        
-        if not passing_plays.empty:
-            analysis['passing_efficiency'] = {
-                'yards_per_attempt': passing_plays['passing_yards'].mean(),
-                'completion_pct': (passing_plays['complete_pass'].sum() / len(passing_plays)) * 100,
-                'td_pct': (passing_plays['pass_touchdown'].sum() / len(passing_plays)) * 100,
-                'int_pct': (passing_plays['interception'].sum() / len(passing_plays)) * 100
-            }
-        
-        if not rushing_plays.empty:
-            analysis['rushing_efficiency'] = {
-                'yards_per_carry': rushing_plays['rushing_yards'].mean(),
-                'td_pct': (rushing_plays['rush_touchdown'].sum() / len(rushing_plays)) * 100
-            }
-        
-        return analysis
-    
-    def analyze_defensive_performance(self, coach_name=None, team=None, season=None):
-        """Analyze defensive performance against different offensive schemes"""
-        if self.pbp_data is None:
-            print("No play-by-play data available")
+        if team_players.empty:
+            print(f"No player data found for {team} in {season}")
             return None
         
-        # Filter data - this time we want plays where the team/coach was on DEFENSE
-        filtered_pbp = self.pbp_data.copy()
+        # Calculate player averages for the season
+        player_avgs = team_players.groupby(['player_id', 'player_name', 'position_group']).agg({
+            'numeric_grade': 'mean'
+        }).reset_index()
         
-        # Filter by season if specified
-        if season:
-            filtered_pbp = filtered_pbp[filtered_pbp['season'] == season]
-        
-        # Filter by team if specified (defensive team)
-        if team:
-            filtered_pbp = filtered_pbp[filtered_pbp['defteam'] == team]
-        
-        # If coach specified, filter by their defensive games
-        if coach_name:
-            coach_defensive_plays = []
-            for (coach, seas), data in self.coaching_data.items():
-                if coach == coach_name and (season is None or seas == season):
-                    for game in data['games']:
-                        game_plays = filtered_pbp[
-                            (filtered_pbp['game_id'] == game['game_id']) & 
-                            (filtered_pbp['defteam'] == game['team'])
-                        ]
-                        coach_defensive_plays.append(game_plays)
-            
-            if coach_defensive_plays:
-                filtered_pbp = pd.concat(coach_defensive_plays, ignore_index=True)
-            else:
-                filtered_pbp = pd.DataFrame()
-        
-        if filtered_pbp.empty:
-            print(f"No defensive plays found for the specified criteria")
-            return None
-        
-        # Analyze defensive performance
         analysis = {}
         
-        # Overall defensive stats
-        passing_plays = filtered_pbp[filtered_pbp['play_type'] == 'pass']
-        rushing_plays = filtered_pbp[filtered_pbp['play_type'] == 'run']
+        # Overall roster quality
+        overall_avg = player_avgs['numeric_grade'].mean()
+        analysis['overall_avg_grade'] = overall_avg
+        analysis['total_players'] = len(player_avgs)
         
-        if not passing_plays.empty:
-            analysis['pass_defense'] = {
-                'yards_per_attempt_allowed': passing_plays['passing_yards'].mean(),
-                'completion_pct_allowed': (passing_plays['complete_pass'].sum() / len(passing_plays)) * 100,
-                'td_pct_allowed': (passing_plays['pass_touchdown'].sum() / len(passing_plays)) * 100,
-                'int_pct': (passing_plays['interception'].sum() / len(passing_plays)) * 100,
-                'sack_pct': (passing_plays['sack'].sum() / len(passing_plays)) * 100
-            }
+        # FIXED: Use realistic grade tiers
+        analysis['elite_players'] = len(player_avgs[player_avgs['numeric_grade'] >= 80])
+        analysis['good_players'] = len(player_avgs[
+            (player_avgs['numeric_grade'] >= 70) & (player_avgs['numeric_grade'] < 80)
+        ])
+        analysis['average_players'] = len(player_avgs[
+            (player_avgs['numeric_grade'] >= 60) & (player_avgs['numeric_grade'] < 70)
+        ])
+        analysis['below_avg_players'] = len(player_avgs[player_avgs['numeric_grade'] < 60])
         
-        if not rushing_plays.empty:
-            analysis['rush_defense'] = {
-                'yards_per_carry_allowed': rushing_plays['rushing_yards'].mean(),
-                'td_pct_allowed': (rushing_plays['rush_touchdown'].sum() / len(rushing_plays)) * 100,
-                'stuff_rate': (rushing_plays[rushing_plays['rushing_yards'] <= 0].shape[0] / len(rushing_plays)) * 100
-            }
+        # Position-specific analysis
+        for pos_group in ['QB', 'RB', 'WR_TE', 'DEFENSE']:
+            pos_players = player_avgs[player_avgs['position_group'] == pos_group]
+            if not pos_players.empty:
+                analysis[f'{pos_group.lower()}_avg_grade'] = pos_players['numeric_grade'].mean()
+                analysis[f'{pos_group.lower()}_count'] = len(pos_players)
+            else:
+                analysis[f'{pos_group.lower()}_avg_grade'] = None
+                analysis[f'{pos_group.lower()}_count'] = 0
         
-        # Red zone defense
-        red_zone_def = filtered_pbp[filtered_pbp['yardline_100'] <= 20]
-        if not red_zone_def.empty:
-            analysis['red_zone_defense'] = {
-                'td_pct_allowed': (red_zone_def['touchdown'].sum() / len(red_zone_def)) * 100,
-                'yards_per_play_allowed': red_zone_def['yards_gained'].mean()
-            }
+        # FIXED: Roster tier classification based on realistic grades
+        if overall_avg >= 75:
+            analysis['roster_tier'] = 'Elite'
+        elif overall_avg >= 70:
+            analysis['roster_tier'] = 'Good'
+        elif overall_avg >= 65:
+            analysis['roster_tier'] = 'Average'
+        elif overall_avg >= 60:
+            analysis['roster_tier'] = 'Below Average'
+        else:
+            analysis['roster_tier'] = 'Poor'
+        
+        # Calculate depth (standard deviation - lower is better for consistency)
+        analysis['roster_depth'] = player_avgs['numeric_grade'].std()
+        
+        print(f"Roster analysis complete:")
+        print(f"  Overall grade: {overall_avg:.1f} ({analysis['roster_tier']})")
+        print(f"  Elite players (80+): {analysis['elite_players']}")
+        print(f"  Good players (70-79): {analysis['good_players']}")
+        print(f"  Total players analyzed: {analysis['total_players']}")
         
         return analysis
     
-    def grade_coach_performance(self, coach_name, season=None):
-        """Base coaching performance grading (before roster adjustment)"""
+    def calculate_base_coaching_grade(self, coach_name, season):
+        """Calculate base coaching performance before roster adjustment"""
         
-        # Get offensive and defensive analysis
-        off_analysis = self.analyze_offensive_tendencies(coach_name=coach_name, season=season)
-        def_analysis = self.analyze_defensive_performance(coach_name=coach_name, season=season)
+        # Get team(s) for this coach
+        coach_teams = []
+        for (coach, seas), data in self.coaching_data.items():
+            if coach == coach_name and seas == season:
+                coach_teams.extend(list(data['teams']))
         
-        if not off_analysis and not def_analysis:
+        if not coach_teams:
             return None
         
-        grades = {}
-        
-        # Get team record for context
+        # Simplified base grading - you can integrate your existing logic here
         team_record = self._get_team_record(coach_name, season)
-        win_pct = team_record.get('win_pct', 50) if team_record else 50
+        if not team_record:
+            return None
         
-        # Moderate context multiplier
-        context_multiplier = 1.0
-        if win_pct >= 75:  # Elite teams
-            context_multiplier = 1.03
-        elif win_pct >= 65:  # Good teams
-            context_multiplier = 1.01
-        elif win_pct <= 25:  # Terrible teams
-            context_multiplier = 0.97
-        elif win_pct <= 35:  # Poor teams
-            context_multiplier = 0.99
+        # Base grade from win percentage with adjustments
+        win_pct = team_record.get('win_pct', 50)
         
-        # Offensive Grading
-        if off_analysis:
-            off_grades = {}
-            
-            # Play calling balance
-            if 'play_type_pct' in off_analysis:
-                run_pct = off_analysis['play_type_pct'].get('run', 0)
-                
-                if 30 <= run_pct <= 55:
-                    balance_score = 85
-                elif 25 <= run_pct <= 60:
-                    balance_score = 80
-                else:
-                    deviation = min(abs(30 - run_pct), abs(55 - run_pct))
-                    balance_score = max(70, 85 - deviation)
-                
-                off_grades['play_balance'] = balance_score * context_multiplier
-            
-            # Passing efficiency
-            if 'passing_efficiency' in off_analysis:
-                pass_eff = off_analysis['passing_efficiency']
-                
-                # Yards per attempt
-                ypa = pass_eff.get('yards_per_attempt', 0)
-                if ypa >= 7.5:
-                    ypa_grade = 90 + min(10, (ypa - 7.5) * 4)
-                elif ypa >= 7.0:
-                    ypa_grade = 80 + (ypa - 7.0) * 20
-                elif ypa >= 6.5:
-                    ypa_grade = 70 + (ypa - 6.5) * 20
-                else:
-                    ypa_grade = max(50, 70 * (ypa / 6.5))
-                
-                off_grades['passing_ypa'] = min(100, ypa_grade * context_multiplier)
-                
-                # Completion percentage
-                comp_pct = pass_eff.get('completion_pct', 0)
-                if comp_pct >= 65:
-                    comp_grade = 85 + min(15, (comp_pct - 65) * 3)
-                elif comp_pct >= 60:
-                    comp_grade = 75 + (comp_pct - 60) * 2
-                else:
-                    comp_grade = max(50, 75 * (comp_pct / 60.0))
-                
-                off_grades['completion_pct'] = min(100, comp_grade * context_multiplier)
-                
-                # TD percentage
-                td_pct = pass_eff.get('td_pct', 0)
-                if td_pct >= 4.5:
-                    td_grade = 85 + min(15, (td_pct - 4.5) * 6)
-                elif td_pct >= 3.5:
-                    td_grade = 75 + (td_pct - 3.5) * 10
-                else:
-                    td_grade = max(50, 75 * (td_pct / 3.5))
-                
-                off_grades['passing_tds'] = min(100, td_grade * context_multiplier)
-                
-                # Interception percentage (lower is better)
-                int_pct = pass_eff.get('int_pct', 0)
-                if int_pct <= 2.0:
-                    int_grade = 85 + min(15, (2.0 - int_pct) * 10)
-                elif int_pct <= 2.5:
-                    int_grade = 75 + (2.5 - int_pct) * 20
-                else:
-                    int_grade = max(50, 75 - (int_pct - 2.5) * 10)
-                
-                off_grades['interceptions'] = min(100, int_grade * context_multiplier)
-            
-            # Rushing efficiency
-            if 'rushing_efficiency' in off_analysis:
-                rush_eff = off_analysis['rushing_efficiency']
-                
-                ypc = rush_eff.get('yards_per_carry', 0)
-                if ypc >= 4.5:
-                    ypc_grade = 85 + min(15, (ypc - 4.5) * 10)
-                elif ypc >= 4.0:
-                    ypc_grade = 75 + (ypc - 4.0) * 20
-                else:
-                    ypc_grade = max(50, 75 * (ypc / 4.0))
-                
-                off_grades['rushing_ypc'] = min(100, ypc_grade * context_multiplier)
-            
-            # Red zone efficiency
-            if 'red_zone_tendencies' in off_analysis:
-                off_grades['red_zone_usage'] = 75 * context_multiplier
-            
-            grades['offensive'] = off_grades
+        # Convert win percentage to grade (with some adjustments for context)
+        if win_pct >= 80:  # 13+ wins
+            base_grade = 90 + (win_pct - 80) / 2  # 90-100
+        elif win_pct >= 70:  # 11-12 wins
+            base_grade = 80 + (win_pct - 70)  # 80-90
+        elif win_pct >= 60:  # 10 wins
+            base_grade = 75 + (win_pct - 60) / 2  # 75-80
+        elif win_pct >= 50:  # 8-9 wins
+            base_grade = 65 + (win_pct - 50)  # 65-75
+        elif win_pct >= 40:  # 6-7 wins
+            base_grade = 55 + (win_pct - 40)  # 55-65
+        else:  # 5 or fewer wins
+            base_grade = 40 + win_pct / 4  # 40-55
         
-        # Defensive Grading
-        if def_analysis:
-            def_grades = {}
-            
-            if 'pass_defense' in def_analysis:
-                pass_def = def_analysis['pass_defense']
-                
-                # Yards per attempt allowed
-                ypa_allowed = pass_def.get('yards_per_attempt_allowed', 7.0)
-                if ypa_allowed <= 6.5:
-                    ypa_def_grade = 85 + min(15, (6.5 - ypa_allowed) * 6)
-                elif ypa_allowed <= 7.0:
-                    ypa_def_grade = 75 + (7.0 - ypa_allowed) * 20
-                elif ypa_allowed <= 7.5:
-                    ypa_def_grade = 65 + (7.5 - ypa_allowed) * 20
-                else:
-                    ypa_def_grade = max(50, 65 - (ypa_allowed - 7.5) * 8)
-                
-                def_grades['pass_defense_ypa'] = min(100, ypa_def_grade * context_multiplier)
-                
-                # Interception rate
-                int_rate = pass_def.get('int_pct', 0)
-                if int_rate >= 2.5:
-                    int_def_grade = 85 + min(15, (int_rate - 2.5) * 10)
-                elif int_rate >= 2.0:
-                    int_def_grade = 75 + (int_rate - 2.0) * 20
-                else:
-                    int_def_grade = max(50, 75 * (int_rate / 2.0))
-                
-                def_grades['interceptions'] = min(100, int_def_grade * context_multiplier)
-                
-                # Sack rate
-                sack_rate = pass_def.get('sack_pct', 0)
-                if sack_rate >= 7.0:
-                    sack_grade = 85 + min(15, (sack_rate - 7.0) * 5)
-                elif sack_rate >= 5.5:
-                    sack_grade = 75 + (sack_rate - 5.5) * 6.67
-                else:
-                    sack_grade = max(50, 75 * (sack_rate / 5.5))
-                
-                def_grades['pass_rush'] = min(100, sack_grade * context_multiplier)
-            
-            if 'rush_defense' in def_analysis:
-                rush_def = def_analysis['rush_defense']
-                
-                # Yards per carry allowed
-                ypc_allowed = rush_def.get('yards_per_carry_allowed', 4.3)
-                if ypc_allowed <= 4.0:
-                    ypc_def_grade = 85 + min(15, (4.0 - ypc_allowed) * 15)
-                elif ypc_allowed <= 4.3:
-                    ypc_def_grade = 75 + (4.3 - ypc_allowed) * 33
-                elif ypc_allowed <= 4.6:
-                    ypc_def_grade = 65 + (4.6 - ypc_allowed) * 33
-                else:
-                    ypc_def_grade = max(50, 65 - (ypc_allowed - 4.6) * 10)
-                
-                def_grades['rush_defense_ypc'] = min(100, ypc_def_grade * context_multiplier)
-            
-            if 'red_zone_defense' in def_analysis:
-                rz_def = def_analysis['red_zone_defense']
-                
-                td_pct_allowed = rz_def.get('td_pct_allowed', 55)
-                if td_pct_allowed <= 50:
-                    rz_grade = 85 + min(15, (50 - td_pct_allowed) * 1)
-                elif td_pct_allowed <= 60:
-                    rz_grade = 75 + (60 - td_pct_allowed) * 1
-                else:
-                    rz_grade = max(50, 75 - (td_pct_allowed - 60) * 0.8)
-                
-                def_grades['red_zone_defense'] = min(100, rz_grade * context_multiplier)
-            
-            grades['defensive'] = def_grades
+        return {
+            'base_grade': base_grade,
+            'win_pct': win_pct,
+            'record': f"{team_record['wins']}-{team_record['losses']}"
+        }
+    
+    def calculate_roster_adjusted_grade(self, coach_name, season):
+        """FIXED: Calculate roster-adjusted coaching grade"""
         
-        # Calculate overall grades
-        if grades.get('offensive'):
-            off_scores = list(grades['offensive'].values())
-            grades['offensive_overall'] = sum(off_scores) / len(off_scores)
+        # Get base coaching performance
+        base_performance = self.calculate_base_coaching_grade(coach_name, season)
+        if not base_performance:
+            return None
         
-        if grades.get('defensive'):
-            def_scores = list(grades['defensive'].values())
-            grades['defensive_overall'] = sum(def_scores) / len(def_scores)
+        # Get team(s) for this coach
+        coach_teams = []
+        for (coach, seas), data in self.coaching_data.items():
+            if coach == coach_name and seas == season:
+                coach_teams.extend(list(data['teams']))
         
-        # Overall coaching grade
-        coach_specialty = self._determine_coach_specialty(coach_name, season)
+        if not coach_teams:
+            return None
         
-        if grades.get('offensive_overall') and grades.get('defensive_overall'):
-            if coach_specialty == 'offense':
-                grades['overall'] = (grades['offensive_overall'] * 0.6) + (grades['defensive_overall'] * 0.4)
-            elif coach_specialty == 'defense':
-                grades['overall'] = (grades['offensive_overall'] * 0.4) + (grades['defensive_overall'] * 0.6)
-            else:
-                grades['overall'] = (grades['offensive_overall'] * 0.5) + (grades['defensive_overall'] * 0.5)
-        elif grades.get('offensive_overall'):
-            grades['overall'] = grades['offensive_overall']
-        elif grades.get('defensive_overall'):
-            grades['overall'] = grades['defensive_overall']
+        # Analyze roster quality (use first team if multiple)
+        roster_analysis = self.analyze_roster_quality(coach_teams[0], season)
+        if not roster_analysis:
+            return None
         
-        return grades
+        base_grade = base_performance['base_grade']
+        roster_grade = roster_analysis['overall_avg_grade']
+        
+        # FIXED: More reasonable adjustment logic
+        # The adjustment should be proportional to how much better/worse the roster is than average
+        league_avg_roster_grade = 65  # Assume league average is around 65
+        
+        # Calculate roster adjustment factor
+        roster_difference = roster_grade - league_avg_roster_grade
+        
+        # FIXED: Smaller adjustment factor (max ±15 points instead of massive swings)
+        max_adjustment = 15
+        adjustment_factor = min(max(roster_difference / 10 * max_adjustment, -max_adjustment), max_adjustment)
+        
+        # Apply adjustment
+        adjusted_grade = base_grade - adjustment_factor  # Subtract because better roster should require higher performance
+        adjusted_grade = max(min(adjusted_grade, 100), 20)  # Cap between 20-100
+        
+        # Calculate efficiency (how much better/worse than expected given roster)
+        expected_grade = 50 + (roster_grade - league_avg_roster_grade) * 0.5  # More modest expectations
+        efficiency = base_grade - expected_grade
+        
+        return {
+            'base_grade': base_grade,
+            'adjusted_grade': adjusted_grade,
+            'roster_quality': roster_analysis,
+            'adjustment': adjustment_factor,
+            'efficiency': efficiency,
+            'record': base_performance['record']
+        }
     
     def _get_team_record(self, coach_name, season):
-        """Get team record for context"""
+        """Get team record for a coach"""
         for (coach, seas), data in self.coaching_data.items():
-            if coach == coach_name and (season is None or seas == season):
+            if coach == coach_name and seas == season:
                 wins = sum(1 for g in data['games'] if g['result'] == 'W')
                 total_games = len([g for g in data['games'] if g['result'] is not None])
                 win_pct = (wins / total_games * 100) if total_games > 0 else 0
                 return {'wins': wins, 'losses': total_games - wins, 'win_pct': win_pct}
         return None
     
-    def _determine_coach_specialty(self, coach_name, season):
-        """Determine coach specialty (existing method)"""
-        offensive_coaches = ['Andy Reid', 'Sean McVay', 'Kyle Shanahan', 'Sean Payton', 
-                           'Josh McDaniels', 'Arthur Smith', 'Matt LaFleur']
-        defensive_coaches = ['Bill Belichick', 'Mike Tomlin', 'Pete Carroll', 'Vic Fangio',
-                           'Brandon Staley', 'Robert Saleh', 'Dan Quinn']
-        
-        if coach_name in offensive_coaches:
-            return 'offense'
-        elif coach_name in defensive_coaches:
-            return 'defense'
-        else:
-            return 'balanced'
-    
-    def get_letter_grade(self, numerical_grade):
-        """Convert numerical grade to letter grade (existing method)"""
-        if numerical_grade >= 97:
+    def get_letter_grade(self, score):
+        """Convert numerical grade to letter grade"""
+        if score >= 95:
             return "A+"
-        elif numerical_grade >= 93:
+        elif score >= 90:
             return "A"
-        elif numerical_grade >= 90:
+        elif score >= 85:
             return "A-"
-        elif numerical_grade >= 87:
+        elif score >= 80:
             return "B+"
-        elif numerical_grade >= 83:
+        elif score >= 75:
             return "B"
-        elif numerical_grade >= 80:
+        elif score >= 70:
             return "B-"
-        elif numerical_grade >= 77:
+        elif score >= 65:
             return "C+"
-        elif numerical_grade >= 73:
+        elif score >= 60:
             return "C"
-        elif numerical_grade >= 70:
+        elif score >= 55:
             return "C-"
-        elif numerical_grade >= 67:
-            return "D+"
-        elif numerical_grade >= 63:
+        elif score >= 50:
             return "D"
-        elif numerical_grade >= 60:
-            return "D-"
         else:
             return "F"
     
-    def compare_coaches_with_roster_context(self, coach_names, season=None):
-        """Compare coaches with roster quality context"""
-        print(f"\n{'ROSTER-AWARE COACH COMPARISON':^100}")
-        if season:
-            print(f"Season: {season}")
-        print("=" * 100)
+    def print_roster_aware_report(self, coach_name, season):
+        """Print comprehensive roster-aware coaching report"""
+        print(f"\n{'='*80}")
+        print(f"ROSTER-AWARE COACHING REPORT: {coach_name}")
+        print(f"Season: {season}")
+        print(f"{'='*80}")
         
-        coach_data = {}
+        # Get analysis
+        analysis = self.calculate_roster_adjusted_grade(coach_name, season)
+        if not analysis:
+            print("No data available for analysis")
+            return
+        
+        roster_quality = analysis['roster_quality']
+        
+        print(f"Team Record: {analysis['record']}")
+        print(f"Base Coaching Grade: {analysis['base_grade']:.1f} ({self.get_letter_grade(analysis['base_grade'])})")
+        
+        print(f"\n{'ROSTER ANALYSIS':^80}")
+        print("-" * 80)
+        print(f"Overall Roster Grade: {roster_quality['overall_avg_grade']:.1f} ({roster_quality['roster_tier']})")
+        print(f"Elite Players (80+): {roster_quality['elite_players']}")
+        print(f"Good Players (70-79): {roster_quality['good_players']}")
+        print(f"Average Players (60-69): {roster_quality['average_players']}")
+        print(f"Below Average Players (<60): {roster_quality['below_avg_players']}")
+        print(f"Total Players Analyzed: {roster_quality['total_players']}")
+        
+        # Position breakdown
+        print(f"\nPosition Group Averages:")
+        for pos in ['qb', 'rb', 'wr_te', 'defense']:
+            avg_grade = roster_quality.get(f'{pos}_avg_grade')
+            count = roster_quality.get(f'{pos}_count', 0)
+            if avg_grade is not None:
+                print(f"  {pos.upper()}: {avg_grade:.1f} ({count} players)")
+            else:
+                print(f"  {pos.upper()}: No data ({count} players)")
+        
+        print(f"\n{'ROSTER-ADJUSTED PERFORMANCE':^80}")
+        print("-" * 80)
+        print(f"Adjustment Applied: {analysis['adjustment']:+.1f} points")
+        print(f"Final Adjusted Grade: {analysis['adjusted_grade']:.1f} ({self.get_letter_grade(analysis['adjusted_grade'])})")
+        print(f"Coaching Efficiency: {analysis['efficiency']:+.1f} (vs expected)")
+        
+        # Interpretation
+        if analysis['efficiency'] > 10:
+            interpretation = "Exceptional coaching - significantly outperforming roster talent"
+        elif analysis['efficiency'] > 5:
+            interpretation = "Good coaching - performing above roster expectations"
+        elif analysis['efficiency'] > -5:
+            interpretation = "Average coaching - performing as expected given roster"
+        elif analysis['efficiency'] > -10:
+            interpretation = "Below average coaching - underperforming roster talent"
+        else:
+            interpretation = "Poor coaching - significantly underperforming roster potential"
+        
+        print(f"\nInterpretation: {interpretation}")
+    
+    def compare_coaches_roster_aware(self, coach_names, season):
+        """Compare coaches with roster-aware adjustments"""
+        print(f"\n{'ROSTER-AWARE COACH COMPARISON':^80}")
+        print(f"Season: {season}")
+        print("=" * 80)
+        
+        results = []
         for coach in coach_names:
-            adjusted_grades = self.calculate_roster_adjusted_coaching_grade(coach, season)
-            base_grades = self.grade_coach_performance(coach, season)
-            
-            if adjusted_grades and base_grades:
-                roster_quality = adjusted_grades.get('roster_context', {}).get('avg_roster_grade', 0)
-                coach_data[coach] = {
-                    'adjusted_overall': adjusted_grades.get('overall', 0),
-                    'base_overall': base_grades.get('overall', 0),
-                    'roster_grade': roster_quality,
-                    'roster_tier': self._get_roster_tier(roster_quality) if roster_quality else 'Unknown'
-                }
+            analysis = self.calculate_roster_adjusted_grade(coach, season)
+            if analysis:
+                results.append({
+                    'coach': coach,
+                    'base_grade': analysis['base_grade'],
+                    'adjusted_grade': analysis['adjusted_grade'],
+                    'roster_grade': analysis['roster_quality']['overall_avg_grade'],
+                    'roster_tier': analysis['roster_quality']['roster_tier'],
+                    'efficiency': analysis['efficiency'],
+                    'record': analysis['record']
+                })
         
-        if not coach_data:
+        if not results:
             print("No data available for comparison")
             return
         
         # Print comparison table
-        print(f"{'Coach':<20}{'Base Grade':<12}{'Adj Grade':<12}{'Difference':<12}{'Roster Tier':<15}{'Roster Grade':<12}")
-        print("-" * 100)
+        print(f"{'Coach':<20} {'Base':<10} {'Adjusted':<10} {'Roster':<10} {'Efficiency':<12} {'Record':<10}")
+        print("-" * 80)
         
-        for coach, data in coach_data.items():
-            base = data['base_overall']
-            adj = data['adjusted_overall']
-            diff = adj - base
-            roster_tier = data['roster_tier']
-            roster_grade = data['roster_grade']
-            
-            base_letter = self.get_letter_grade(base)
-            adj_letter = self.get_letter_grade(adj)
-            
-            base_str = f"{base:.1f} ({base_letter})"
-            adj_str = f"{adj:.1f} ({adj_letter})"
-            diff_str = f"{diff:+.1f}"
-            
-            print(f"{coach[:19]:<20}{base_str:<12}{adj_str:<12}{diff_str:<12}{roster_tier:<15}{roster_grade:.1f}")
+        for result in sorted(results, key=lambda x: x['adjusted_grade'], reverse=True):
+            print(f"{result['coach'][:19]:<20} "
+                  f"{result['base_grade']:.1f} ({self.get_letter_grade(result['base_grade']):<2}) "
+                  f"{result['adjusted_grade']:.1f} ({self.get_letter_grade(result['adjusted_grade']):<2}) "
+                  f"{result['roster_grade']:.1f} ({result['roster_tier'][:4]:<4}) "
+                  f"{result['efficiency']:+.1f}{'':>6} "
+                  f"{result['record']}")
     
-    def get_coaching_efficiency_leaders(self, season=None, min_games=8):
-        """Find coaches who are most efficiently using their roster talent"""
-        print("Calculating coaching efficiency (performance vs roster quality)...")
-        
-        coaches = self.get_all_coaches(season)
-        efficiency_data = []
-        
-        for coach in coaches:
-            try:
-                adjusted_grades = self.calculate_roster_adjusted_coaching_grade(coach, season)
-                base_grades = self.grade_coach_performance(coach, season)
-                
-                if adjusted_grades and base_grades and 'roster_context' in adjusted_grades:
-                    roster_quality = adjusted_grades['roster_context'].get('avg_roster_grade', 0)
-                    base_overall = base_grades.get('overall', 0)
-                    adjusted_overall = adjusted_grades.get('overall', 0)
-                    
-                    # Calculate efficiency: how much better/worse than expected given roster
-                    expected_performance = roster_quality  # Simplified expectation
-                    efficiency = adjusted_overall - expected_performance
-                    
-                    efficiency_data.append({
-                        'coach': coach,
-                        'base_grade': base_overall,
-                        'adjusted_grade': adjusted_overall,
-                        'roster_grade': roster_quality,
-                        'efficiency': efficiency,
-                        'roster_tier': self._get_roster_tier(roster_quality)
-                    })
-            except Exception as e:
-                continue
-        
-        if not efficiency_data:
-            print("No efficiency data calculated")
-            return None
-        
-        efficiency_df = pd.DataFrame(efficiency_data)
-        efficiency_df = efficiency_df.sort_values('efficiency', ascending=False)
-        
-        print(f"\n{'COACHING EFFICIENCY LEADERS (Performance vs Roster Quality)':^100}")
-        print("=" * 100)
-        print(f"{'Coach':<20}{'Efficiency':<12}{'Adj Grade':<12}{'Roster Grade':<12}{'Roster Tier':<15}")
-        print("-" * 100)
-        
-        for _, row in efficiency_df.head(10).iterrows():
-            eff_str = f"{row['efficiency']:+.1f}"
-            adj_str = f"{row['adjusted_grade']:.1f}"
-            roster_str = f"{row['roster_grade']:.1f}"
-            print(f"{row['coach'][:19]:<20}{eff_str:<12}{adj_str:<12}{roster_str:<12}{row['roster_tier']:<15}")
-        
-        return efficiency_df
-    
-    def get_all_coaches(self, season=None):
-        """Get list of all coaches in the dataset"""
+    def get_available_coaches(self, season=None):
+        """Get list of available coaches"""
         coaches = set()
         for (coach, seas), data in self.coaching_data.items():
             if season is None or seas == season:
@@ -1056,175 +671,154 @@ class RosterAwareCoachingAnalytics:
         return sorted(list(coaches))
 
 
-def main():
-    """Main function demonstrating the roster-aware coaching system"""
-    print("NFL Roster-Aware Coaching Analytics System")
-    print("=" * 60)
+    def find_coaching_overperformers(self, season, min_efficiency=10):
+        """Find coaches significantly outperforming their roster talent"""
+        coaches = self.get_available_coaches(season)
+        overperformers = []
+        
+        for coach in coaches:
+            analysis = self.calculate_roster_adjusted_grade(coach, season)
+            if analysis and analysis['efficiency'] >= min_efficiency:
+                overperformers.append({
+                    'coach': coach,
+                    'efficiency': analysis['efficiency'],
+                    'base_grade': analysis['base_grade'],
+                    'adjusted_grade': analysis['adjusted_grade'],
+                    'roster_tier': analysis['roster_quality']['roster_tier'],
+                    'record': analysis['record']
+                })
+        
+        return sorted(overperformers, key=lambda x: x['efficiency'], reverse=True)
     
-    # Initialize the enhanced system
+    def find_coaching_underperformers(self, season, max_efficiency=-10):
+        """Find coaches underperforming relative to their roster talent"""
+        coaches = self.get_available_coaches(season)
+        underperformers = []
+        
+        for coach in coaches:
+            analysis = self.calculate_roster_adjusted_grade(coach, season)
+            if analysis and analysis['efficiency'] <= max_efficiency:
+                underperformers.append({
+                    'coach': coach,
+                    'efficiency': analysis['efficiency'],
+                    'base_grade': analysis['base_grade'],
+                    'adjusted_grade': analysis['adjusted_grade'],
+                    'roster_tier': analysis['roster_quality']['roster_tier'],
+                    'record': analysis['record']
+                })
+        
+        return sorted(underperformers, key=lambda x: x['efficiency'])
+    
+    def analyze_roster_vs_performance(self, season):
+        """Analyze the relationship between roster quality and team performance"""
+        coaches = self.get_available_coaches(season)
+        data = []
+        
+        print(f"\n{'ROSTER QUALITY vs TEAM PERFORMANCE ANALYSIS':^80}")
+        print(f"Season: {season}")
+        print("=" * 80)
+        
+        for coach in coaches:
+            analysis = self.calculate_roster_adjusted_grade(coach, season)
+            if analysis:
+                data.append({
+                    'coach': coach,
+                    'roster_grade': analysis['roster_quality']['overall_avg_grade'],
+                    'base_grade': analysis['base_grade'],
+                    'efficiency': analysis['efficiency'],
+                    'roster_tier': analysis['roster_quality']['roster_tier'],
+                    'elite_players': analysis['roster_quality']['elite_players'],
+                    'good_players': analysis['roster_quality']['good_players']
+                })
+        
+        if not data:
+            print("No data available")
+            return
+        
+        # Sort by roster quality
+        data.sort(key=lambda x: x['roster_grade'], reverse=True)
+        
+        print(f"{'Coach':<20} {'Roster':<10} {'Performance':<12} {'Efficiency':<12} {'Elite/Good':<12}")
+        print("-" * 80)
+        
+        for item in data:
+            print(f"{item['coach'][:19]:<20} "
+                  f"{item['roster_grade']:.1f} ({item['roster_tier'][:4]}) "
+                  f"{item['base_grade']:.1f} ({self.get_letter_grade(item['base_grade']):<2}) "
+                  f"{item['efficiency']:+.1f}{'':>6} "
+                  f"{item['elite_players']}/{item['good_players']}")
+        
+        return data
+
+
+def main():
+    """Enhanced demonstration with comprehensive analysis"""
+    
+    # Initialize system
     analytics = RosterAwareCoachingAnalytics(years=[2023])
     
-    # Load all data including player grades
+    # Load data
     analytics.load_data()
-    
-    # Extract coaching information
     analytics.extract_coaching_info()
-    
-    # Calculate player grades for roster analysis
-    player_grades = analytics.calculate_player_grades(min_games=3)
-    
-    if player_grades is None:
-        print("Could not calculate player grades - falling back to basic coaching analysis")
-        return
+    analytics.calculate_player_grades()
     
     # Get available coaches
-    coaches = analytics.get_all_coaches(season=2023)
-    print(f"\nAvailable coaches for 2023: {len(coaches)}")
+    coaches = analytics.get_available_coaches(season=2023)
+    print(f"\nAvailable coaches: {len(coaches)}")
     
-    if not coaches:
-        print("No coaches found")
-        return
-    
-    # Demonstrate with a well-known coach
-    example_coach = None
-    for coach in coaches:
-        if any(name in coach.lower() for name in ['reid', 'belichick', 'tomlin', 'harbaugh', 'mcvay']):
-            example_coach = coach
-            break
-    
-    if not example_coach:
-        example_coach = coaches[0]
-    
-    print(f"\n{'='*80}")
-    print(f"DEMONSTRATING ROSTER-AWARE ANALYSIS: {example_coach}")
-    print(f"{'='*80}")
-    
-    # Show roster-aware coaching report
-    analytics.print_roster_aware_coach_report(example_coach, season=2023)
-    
-    # Compare multiple coaches with roster context
-    if len(coaches) >= 3:
+    if coaches:
+        # Demo with first few coaches
+        demo_coaches = coaches[:5]
+        
         print(f"\n{'='*80}")
-        print("ROSTER-AWARE COACH COMPARISON")
+        print("COMPREHENSIVE ROSTER-AWARE ANALYSIS")
         print(f"{'='*80}")
-        comparison_coaches = coaches[:3]
-        analytics.compare_coaches_with_roster_context(comparison_coaches, season=2023)
-    
-    # Show coaching efficiency leaders
-    print(f"\n{'='*80}")
-    print("COACHING EFFICIENCY ANALYSIS")
-    print(f"{'='*80}")
-    efficiency_leaders = analytics.get_coaching_efficiency_leaders(season=2023)
-    
-    print(f"\n{'='*80}")
-    print("ANALYSIS COMPLETE!")
-    print("Key Features of Roster-Aware System:")
-    print("- Adjusts coaching grades based on player talent available")
-    print("- Provides roster quality context for each team")
-    print("- Identifies coaches who maximize limited talent")
-    print("- Compares coaches on equal footing regardless of roster")
-    print(f"{'='*80}")
-
-
-def interactive_mode():
-    """Interactive mode for exploring roster-aware coaching analytics"""
-    analytics = RosterAwareCoachingAnalytics(years=[2023])
-    analytics.load_data()
-    analytics.extract_coaching_info()
-    
-    # Calculate player grades
-    print("Calculating player grades for roster analysis...")
-    player_grades = analytics.calculate_player_grades(min_games=3)
-    
-    if player_grades is None:
-        print("Could not calculate player grades - some features will be limited")
-    
-    coaches = analytics.get_all_coaches(season=2023)
-    
-    while True:
-        print(f"\n{'='*60}")
-        print("ROSTER-AWARE COACHING ANALYTICS - INTERACTIVE MODE")
-        print(f"{'='*60}")
-        print("Available commands:")
-        print("1. List all coaches")
-        print("2. Analyze specific coach (roster-aware)")
-        print("3. Compare coaches with roster context")
-        print("4. Show coaching efficiency leaders")
-        print("5. Analyze team roster quality")
-        print("6. Exit")
         
-        choice = input("\nEnter your choice (1-6): ")
+        # Individual analysis for first coach
+        analytics.print_roster_aware_report(demo_coaches[0], 2023)
         
-        if choice == '1':
-            print(f"\nAvailable coaches for 2023 ({len(coaches)}):")
-            for i, coach in enumerate(coaches, 1):
-                print(f"{i:2d}. {coach}")
+        # Comparison of first 3 coaches
+        print(f"\n{'COACHING COMPARISON':^80}")
+        analytics.compare_coaches_roster_aware(demo_coaches[:3], 2023)
         
-        elif choice == '2':
-            coach_name = input("Enter coach name: ")
-            if coach_name in coaches:
-                try:
-                    analytics.print_roster_aware_coach_report(coach_name, season=2023)
-                except Exception as e:
-                    print(f"Error analyzing coach: {e}")
-            else:
-                print(f"Coach '{coach_name}' not found. Use command 1 to see available coaches.")
+        # Find overperformers and underperformers
+        print(f"\n{'COACHING EFFICIENCY ANALYSIS':^80}")
+        print("=" * 80)
         
-        elif choice == '3':
-            print("Enter coach names separated by commas:")
-            coach_input = input("Coaches: ")
-            coach_names = [name.strip() for name in coach_input.split(',')]
-            valid_coaches = [name for name in coach_names if name in coaches]
-            
-            if valid_coaches:
-                try:
-                    analytics.compare_coaches_with_roster_context(valid_coaches, season=2023)
-                except Exception as e:
-                    print(f"Error comparing coaches: {e}")
-            else:
-                print("No valid coaches found.")
+        overperformers = analytics.find_coaching_overperformers(2023, min_efficiency=15)
+        if overperformers:
+            print(f"\nTOP OVERPERFORMERS (Efficiency +15 or better):")
+            print(f"{'Coach':<20} {'Efficiency':<12} {'Record':<10} {'Roster Tier':<15}")
+            print("-" * 60)
+            for coach_data in overperformers[:5]:
+                print(f"{coach_data['coach'][:19]:<20} "
+                      f"{coach_data['efficiency']:+.1f}{'':>6} "
+                      f"{coach_data['record']:<10} "
+                      f"{coach_data['roster_tier']}")
         
-        elif choice == '4':
-            try:
-                analytics.get_coaching_efficiency_leaders(season=2023)
-            except Exception as e:
-                print(f"Error calculating efficiency leaders: {e}")
+        underperformers = analytics.find_coaching_underperformers(2023, max_efficiency=-5)
+        if underperformers:
+            print(f"\nUNDERPERFORMERS (Efficiency -5 or worse):")
+            print(f"{'Coach':<20} {'Efficiency':<12} {'Record':<10} {'Roster Tier':<15}")
+            print("-" * 60)
+            for coach_data in underperformers[:5]:
+                print(f"{coach_data['coach'][:19]:<20} "
+                      f"{coach_data['efficiency']:+.1f}{'':>6} "
+                      f"{coach_data['record']:<10} "
+                      f"{coach_data['roster_tier']}")
         
-        elif choice == '5':
-            team = input("Enter team abbreviation (e.g., KC, NE, DAL): ").upper()
-            try:
-                roster_quality = analytics.get_roster_quality_metrics(team, 2023)
-                if roster_quality:
-                    print(f"\n{team} Roster Quality Analysis (2023):")
-                    print(f"Overall Grade: {roster_quality['avg_grade']:.1f}")
-                    print(f"Quality Tier: {analytics._get_roster_tier(roster_quality['avg_grade'])}")
-                    print(f"Elite Players (90+): {roster_quality['elite_players']}")
-                    print(f"Top Players (80+): {roster_quality['top_players']}")
-                    print(f"Below Average (<70): {roster_quality['below_avg_players']}")
-                    print(f"Depth Score: {roster_quality['depth_score']:.1f}")
-                    
-                    if 'position_breakdown' in roster_quality:
-                        print("\nPosition Group Breakdown:")
-                        for pos_group, data in roster_quality['position_breakdown']['avg_grade'].items():
-                            count = roster_quality['position_breakdown']['player_id'][pos_group]
-                            print(f"  {pos_group}: {data:.1f} avg ({count} players)")
-                else:
-                    print(f"No roster data found for {team}")
-            except Exception as e:
-                print(f"Error analyzing roster: {e}")
+        # Full roster vs performance analysis
+        analytics.analyze_roster_vs_performance(2023)
         
-        elif choice == '6':
-            print("Thanks for using Roster-Aware Coaching Analytics!")
-            break
-        
-        else:
-            print("Invalid choice. Please try again.")
+        print(f"\n{'='*80}")
+        print("ENHANCED SYSTEM FEATURES:")
+        print("- Comprehensive defensive player grading")
+        print("- Coaching efficiency analysis")
+        print("- Overperformer/underperformer identification")
+        print("- Roster quality vs performance correlation")
+        print("- Position-specific roster breakdowns")
+        print(f"{'='*80}")
 
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == 'interactive':
-        interactive_mode()
-    else:
-        main()
+    main()
