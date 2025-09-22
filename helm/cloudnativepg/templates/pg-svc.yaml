@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.db.name }}
+  labels:
+    app: {{ .Values.db.name }}
+    group: {{ .Values.db.group }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+  selector:
+    app: {{ .Values.db.name }}

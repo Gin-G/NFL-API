@@ -1,0 +1,15 @@
+db:
+  name: nfl-api
+  group: nfl-api
+  instances: 3
+  size: 10Gi
+  secretPath: nfl-api
+  app:
+    name: nfl-api
+    owner: ging
+  superuser:
+    userKey: dbsu
+    passwordKey: dbsupassw
+  appuser:
+    userKey: dbuser
+    passwordKey: dbpassw

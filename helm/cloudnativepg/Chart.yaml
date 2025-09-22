@@ -1,0 +1,12 @@
+apiVersion: v2
+name: defs-dev-cnpg
+description: A Helm chart for DeFS CloudNativePG database
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/Gin-G/DeFS
+sources:
+  - https://github.com/Gin-G/DeFS
+maintainers:
+  - name: Gin-G
+    email: NickCo7@gmail.com
