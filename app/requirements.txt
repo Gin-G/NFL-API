@@ -1,0 +1,29 @@
+# FastAPI and API dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+python-multipart==0.0.6
+
+# NFL Data and Analysis
+nfl_data_py==0.3.0
+pandas==2.1.4
+numpy==1.24.3
+scipy==1.11.4
+
+# Visualization (optional for future endpoints)
+matplotlib==3.8.2
+seaborn==0.13.0
+
+# Database (for future PostgreSQL integration)
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.23
+alembic==1.13.1
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+
+# Utilities
+python-dotenv==1.0.0
+structlog==23.2.0
