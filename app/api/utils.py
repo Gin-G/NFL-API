@@ -11,25 +11,87 @@ import logging
 logger = logging.getLogger(__name__)
 
 def clean_data_for_json(data):
-    """Clean data to make it JSON serializable"""
-    if isinstance(data, dict):
-        return {k: clean_data_for_json(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [clean_data_for_json(item) for item in data]
-    elif isinstance(data, pd.DataFrame):
-        # Replace NaN and infinite values
-        df_cleaned = data.replace([np.inf, -np.inf], None).fillna(value=None)
-        return df_cleaned.to_dict('records')
-    elif isinstance(data, (np.integer, np.floating)):
-        if np.isnan(data) or np.isinf(data):
+    """Clean data to make it JSON serializable - simplified reliable version"""
+    try:
+        if isinstance(data, dict):
+            return {k: clean_data_for_json(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [clean_data_for_json(item) for item in data]
+        elif isinstance(data, pd.DataFrame):
+            logger.debug(f"Processing DataFrame with shape: {data.shape}")
+            
+            # Use the reliable approach - convert to records first, then clean
+            try:
+                raw_records = data.to_dict('records')
+                cleaned_records = []
+                
+                for record in raw_records:
+                    cleaned_record = {}
+                    for key, value in record.items():
+                        # Handle different types of problematic values
+                        if pd.isna(value):
+                            cleaned_record[key] = None
+                        elif isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+                            cleaned_record[key] = None
+                        elif isinstance(value, (np.integer, np.floating)):
+                            # Convert numpy types to Python types
+                            if np.isnan(value) or np.isinf(value):
+                                cleaned_record[key] = None
+                            else:
+                                cleaned_record[key] = value.item()
+                        elif isinstance(value, np.ndarray):
+                            cleaned_record[key] = value.tolist()
+                        else:
+                            cleaned_record[key] = value
+                    cleaned_records.append(cleaned_record)
+                
+                logger.debug(f"✅ DataFrame cleaned successfully: {len(cleaned_records)} records")
+                return cleaned_records
+                
+            except Exception as df_error:
+                logger.error(f"Error processing DataFrame: {df_error}")
+                # Final fallback - return empty list rather than crash
+                logger.warning("Returning empty list as fallback")
+                return []
+                
+        elif isinstance(data, pd.Series):
+            try:
+                # Convert series to list, handling NaN values
+                result = []
+                for value in data:
+                    if pd.isna(value) or (isinstance(value, float) and (np.isnan(value) or np.isinf(value))):
+                        result.append(None)
+                    elif isinstance(value, (np.integer, np.floating)):
+                        result.append(value.item())
+                    else:
+                        result.append(value)
+                return result
+            except Exception:
+                return data.tolist()
+                
+        elif isinstance(data, (np.integer, np.floating)):
+            if np.isnan(data) or np.isinf(data):
+                return None
+            return data.item()
+        elif isinstance(data, np.ndarray):
+            return data.tolist()
+        elif pd.isna(data) or (isinstance(data, float) and (np.isnan(data) or np.isinf(data))):
             return None
-        return data.item()
-    elif isinstance(data, np.ndarray):
-        return data.tolist()
-    elif pd.isna(data) or (isinstance(data, float) and (np.isnan(data) or np.isinf(data))):
-        return None
-    else:
-        return data
+        else:
+            return data
+            
+    except Exception as e:
+        logger.error(f"Unexpected error in clean_data_for_json: {e}")
+        logger.error(f"Data type: {type(data)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        # Return a safe fallback rather than crashing
+        if isinstance(data, pd.DataFrame):
+            return []
+        elif isinstance(data, (list, dict)):
+            return data
+        else:
+            return None
 
 def check_grading_systems():
     """Check availability of grading systems"""
