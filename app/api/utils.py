@@ -18,7 +18,7 @@ def clean_data_for_json(data):
         return [clean_data_for_json(item) for item in data]
     elif isinstance(data, pd.DataFrame):
         # Replace NaN and infinite values
-        df_cleaned = data.replace([np.inf, -np.inf], None).fillna(None)
+        df_cleaned = data.replace([np.inf, -np.inf], None).fillna(value=None)
         return df_cleaned.to_dict('records')
     elif isinstance(data, (np.integer, np.floating)):
         if np.isnan(data) or np.isinf(data):

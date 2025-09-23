@@ -115,7 +115,7 @@ class EnhancedNFLPlayerGrader:
         
         # Fill missing numeric columns
         numeric_cols = self.weekly_data.select_dtypes(include=[np.number]).columns
-        self.weekly_data[numeric_cols] = self.weekly_data[numeric_cols].fillna(0)
+        self.weekly_data[numeric_cols] = self.weekly_data[numeric_cols].fillna(value=0)
         
         # Filter to players with meaningful offensive stats
         self.weekly_data = self.weekly_data[
@@ -1528,7 +1528,7 @@ class EnhancedNFLPlayerGrader:
             print(f"After merging positions: {len(defensive_data)} records")
         
         # For players without positions, set as generic DEF
-        defensive_data['position'] = defensive_data['position'].fillna('DEF')
+        defensive_data['position'] = defensive_data['position'].fillna(value='DEF')
         
         # Map to position groups - exclude line positions (they're handled separately)
         defensive_data['position_group'] = defensive_data['position'].apply(self._map_defensive_position_group)
