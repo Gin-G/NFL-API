@@ -1,320 +1,422 @@
-# NFL Player Performance Grading System
+# NFL Player Grading Functions
 
-A comprehensive Python system for grading NFL player performance using `nfl_data_py`, covering both offensive and defensive players with position-specific analytics and outlier detection.
+## Overview
 
-## 🏈 Features
+Comprehensive NFL player grading system that evaluates all position groups including **individual offensive/defensive line players** and **context-aware adjustments** for skill positions based on line performance. Built using `nfl_data_py` with realistic grade scales and position-specific metrics.
 
-### Comprehensive Player Coverage
-- **Offensive Players**: QB, RB, WR, TE grading using weekly statistical data
-- **Defensive Players**: Pass rushers, linebackers, secondary using play-by-play data
-- **Unified Grading Scale**: A-F letter grades with numerical scores (0-100)
+## Core Classes
 
-### Advanced Analytics
-- **Position-Specific Grading**: Different criteria for each position group
-- **Outlier Detection**: Identifies boom/bust performances using statistical analysis
-- **Consistency Metrics**: Tracks player reliability vs variance
-- **Performance Trends**: Season-long grade tracking and analysis
+### `EnhancedNFLPlayerGrader`
 
-### Rich Data Sources
-- **Weekly Stats**: Offensive player statistics (passing, rushing, receiving)
-- **Play-by-Play Data**: Defensive statistics (sacks, tackles, interceptions, etc.)
-- **Coverage Schemes**: Defensive formation and coverage analysis (Cover 1, 2, 3, etc.)
+Main class that handles all player grading functionality including traditional skill positions, defensive players, and line players with contextual adjustments.
 
-## 📊 Output Data
-
-The system generates comprehensive performance data including:
-
-### Sample Results (2023 Season)
-```
-Top QBs by Grade:
-K.Cousins    77.8 (B+)    - 8 games
-D.Prescott   75.2 (B)     - 18 games  
-B.Purdy      75.2 (B)     - 19 games
-
-Top Defensive Players:
-L.David (LB)      83.8 (B+)   - 17 games
-K.Mack (EDGE)     82.3 (B+)   - 9 games
-C.Ward (DB)       72.0 (B-)   - 16 games
-
-Season Leaders:
-Sacks: J.Allen (23.0), T.Watt (19.0), T.Hendrickson (17.5)
-Tackles: R.Smith (170), B.Wagner (164), Z.Franklin (158)
-Interceptions: D.Bland (9), G.Stone (7), J.Johnson (7)
-```
-
-## 🚀 Quick Start
-
-### Installation
-```bash
-pip install nfl_data_py pandas numpy matplotlib seaborn scipy
-```
-
-### Basic Usage
 ```python
-from enhanced_nfl_grading import EnhancedNFLPlayerGrader
+from app.functions.players.grading import EnhancedNFLPlayerGrader
 
-# Initialize system for 2023 season
+# Initialize for specific seasons
 grader = EnhancedNFLPlayerGrader(years=[2023])
 
 # Calculate all player grades
 all_grades = grader.calculate_all_grades(min_games=3)
-
-# Identify outlier performances  
-outliers = grader.identify_performance_outliers(all_grades)
-
-# Get top performers
-top_qbs = grader.get_top_performers(outliers, position_group='QB', n=10)
-top_defense = grader.get_top_performers(outliers, player_type='DEFENSE', n=10)
 ```
 
-## 📈 Grading Methodology
+## Data Sources & NFL Data Py Functions
 
-### Offensive Players
-
-#### Quarterbacks (QB)
-- **Passing Yards**: Compared to position average (25 points max)
-- **Completion %**: Bonus scoring above 50% completion (60 points max)
-- **Touchdowns**: 12 points per passing TD
-- **Interceptions**: -8 point penalty per INT
-- **Efficiency**: Yards per attempt bonus (4 points per YPA above 6.0)
-- **Volume**: Attempt bonus up to 10 points
-
-#### Running Backs (RB)  
-- **Rushing Yards**: Volume scoring vs position average (35 points max)
-- **Yards Per Carry**: Efficiency scoring vs 4.2 YPC baseline (25 points max)
-- **Rushing TDs**: 10 points per TD
-- **Receiving**: Receiving yards (0.15x) + receptions (2x)
-- **Receiving TDs**: 8 points per receiving TD
-
-#### Wide Receivers & Tight Ends (WR/TE)
-- **Receiving Yards**: Volume scoring vs position average (40 points max)
-- **Receptions**: 3 points per reception
-- **Receiving TDs**: 12 points per TD
-- **Catch Rate**: Target efficiency scoring (15 points max)
-
-### Defensive Players
-
-#### Pass Rushers (DE, OLB, DT)
-- **Sacks**: Primary metric (15 points per relative performance)
-- **QB Hits**: Pressure generation (10 points max)
-- **Tackles for Loss**: Disruptive plays (8 points max)
-- **Total Tackles**: Run defense contribution (7 points max)
-- **Forced Fumbles**: 10 points per forced fumble
-- **Base Score**: 20 points for position participation
-
-#### Linebackers (ILB, MLB)
-- **Total Tackles**: Primary responsibility (20 points max)
-- **Tackles for Loss**: Impact plays (10 points max)
-- **Sacks**: Pass rush value (12 points per sack)
-- **Interceptions**: Coverage success (15 points per INT)
-- **Pass Deflections**: Coverage impact (3 points per PD)
-- **Forced Fumbles**: Turnover creation (8 points per FF)
-- **Base Score**: 15 points for position participation
-
-#### Secondary (CB, S, FS, SS)
-- **Interceptions**: Primary coverage metric (20 points per INT)
-- **Pass Deflections**: Coverage effectiveness (15 points max)
-- **Total Tackles**: Run support (8 points max)
-- **Forced Fumbles**: Turnover creation (12 points per FF)
-- **Base Score**: 25 points for position participation
-
-## 🎯 Key Functions
-
-### Core Analysis
+### Required NFL Data Functions
 ```python
-# Calculate grades for all players
+import nfl_data_py as nfl
+
+# Data loading functions called automatically
+self.weekly_data = nfl.import_weekly_data(self.years)        # Skill position stats
+self.pbp_data = nfl.import_pbp_data(self.years)             # Play-by-play for line analysis
+self.rosters = nfl.import_weekly_rosters(self.years)        # Position mapping
+self.snap_counts = nfl.import_snap_counts(self.years)       # Individual line player snaps
+```
+
+### Key Columns Used
+
+#### From `weekly_data` (Skill Positions)
+```python
+# QB Columns
+['player_id', 'player_name', 'position', 'team', 'season', 'week',
+ 'attempts', 'completions', 'passing_yards', 'passing_tds', 'interceptions']
+
+# RB Columns  
+['carries', 'rushing_yards', 'rushing_tds', 'receiving_yards', 
+ 'receptions', 'receiving_tds', 'targets']
+
+# WR/TE Columns
+['receiving_yards', 'receiving_tds', 'receptions', 'targets']
+```
+
+#### From `pbp_data` (Line Performance)
+```python
+# O-Line Analysis
+['posteam', 'season', 'week', 'play_type', 'sack', 'qb_hit', 
+ 'rushing_yards', 'passing_yards']
+
+# D-Line Analysis  
+['defteam', 'season', 'week', 'play_type', 'sack', 'qb_hit',
+ 'rushing_yards']
+
+# Defensive Players
+['sack_player_name', 'sack_player_id', 'half_sack_1_player_name',
+ 'solo_tackle_1_player_name', 'assist_tackle_1_player_name',
+ 'interception_player_name', 'pass_defense_1_player_name',
+ 'forced_fumble_player_1_player_name', 'qb_hit_1_player_name']
+```
+
+#### From `snap_counts` (Individual Line Players)
+```python
+['player', 'position', 'team', 'season', 'week', 'offense_snaps', 
+ 'offense_pct', 'defense_snaps', 'defense_pct']
+```
+
+#### From `rosters` (Position Mapping)
+```python
+['player_id', 'player_name', 'position', 'team', 'week', 'season']
+```
+
+## Core Functions
+
+### `calculate_all_grades(min_games=3)`
+
+Main function that calculates all player types and returns comprehensive results.
+
+```python
 all_grades = grader.calculate_all_grades(min_games=3)
 
-# Find performance outliers (boom/bust games)
-outliers = grader.identify_performance_outliers(all_grades, std_threshold=1.5)
-
-# Generate defensive statistics summary
-grader.generate_defensive_report()
+# Returns dictionary with:
+all_grades = {
+    'team_oline_grades': DataFrame,      # Team O-Line unit performance
+    'team_dline_grades': DataFrame,      # Team D-Line unit performance
+    'individual_oline_grades': DataFrame, # Individual O-Line player grades
+    'individual_dline_grades': DataFrame, # Individual D-Line player grades
+    'enhanced_qb_grades': DataFrame,     # QBs with O-Line adjustments
+    'enhanced_rb_grades': DataFrame,     # RBs with O-Line adjustments
+    'offensive_grades': DataFrame,       # WR/TE traditional grades
+    'defensive_grades': DataFrame        # LB/DB traditional grades
+}
 ```
 
-### Performance Rankings
+### Line Grading Functions
+
+#### `calculate_team_oline_grades(min_plays=40)`
+Calculates team offensive line unit grades from play-by-play data.
+
+**Input Data**: `pbp_data` filtered to pass/run plays  
+**Key Metrics**:
+- Pass protection success rate (no pressure allowed)
+- Pressure rate (sacks + QB hits)
+- Run success rate (≥4 yards gained)
+- Sacks allowed per game
+
+**Output Columns**:
 ```python
-# Top performers by player type
-top_offense = grader.get_top_performers(outliers, player_type='OFFENSE', n=10)
-top_defense = grader.get_top_performers(outliers, player_type='DEFENSE', n=10)
-
-# Position-specific rankings
-top_qbs = grader.get_top_performers(outliers, position_group='QB', n=10)
-top_pass_rushers = grader.get_top_performers(outliers, position_group='PASS_RUSHER', n=10)
-
-# Consistency rankings
-consistent_players = grader.get_top_performers(outliers, metric='consistency', n=10)
-boom_bust_players = grader.get_top_performers(outliers, metric='over_performances', n=10)
+['team', 'season', 'week', 'pass_protection_grade', 'run_blocking_grade',
+ 'overall_oline_grade', 'letter_grade', 'total_plays', 'pass_pro_success_rate',
+ 'pressure_rate', 'run_success_rate', 'sacks_allowed']
 ```
 
-### Individual Player Analysis
+#### `calculate_team_dline_grades(min_plays=40)`
+Calculates team defensive line unit grades from play-by-play data.
+
+**Input Data**: `pbp_data` filtered to opposing team's offensive plays  
+**Key Metrics**:
+- Pressure generation rate (sacks + QB hits)
+- Run stuff rate (≤2 yards allowed)
+- Sacks generated per game
+- Negative plays created
+
+**Output Columns**:
 ```python
-# Filter to specific player
-player_data = outliers[outliers['player_name'].str.contains('Josh Allen', case=False)]
-
-# View season performance
-print(f"Average Grade: {player_data['numeric_grade'].mean():.1f}")
-print(f"Best Game: {player_data['numeric_grade'].max():.1f}")
-print(f"Worst Game: {player_data['numeric_grade'].min():.1f}")
-print(f"Consistency: {100 - player_data['numeric_grade'].std():.1f}")
+['team', 'season', 'week', 'pass_rush_grade', 'run_defense_grade',
+ 'overall_dline_grade', 'letter_grade', 'total_plays', 'pressure_rate',
+ 'run_stuff_rate', 'sacks', 'negative_play_rate']
 ```
 
-## 📋 Data Requirements
+#### `calculate_individual_oline_grades(min_games=3)`
+Grades individual offensive linemen based on team performance and snap participation.
 
-### Dependencies
-- `nfl_data_py`: NFL data access
-- `pandas`: Data manipulation
-- `numpy`: Numerical operations
-- `matplotlib`: Plotting
-- `seaborn`: Statistical visualization
-- `scipy`: Statistical analysis
+**Input Data**: `snap_counts` + `rosters` + team O-Line performance  
+**Positions Covered**: `['C', 'G', 'LG', 'RG', 'T', 'LT', 'RT', 'OL']`
 
-### Data Sources
-- **Weekly Player Stats**: `nfl.import_weekly_data()`
-- **Play-by-Play Data**: `nfl.import_pbp_data()`
-- **Player Rosters**: `nfl.import_weekly_rosters()`
+**Position-Specific Weighting**:
+- **Tackles (LT/RT)**: 70% pass protection, 30% run blocking
+- **Center**: 50% pass protection, 50% run blocking  
+- **Guards (LG/RG)**: 30% pass protection, 70% run blocking
 
-### System Requirements
-- Python 3.7+
-- 4GB+ RAM (for play-by-play data processing)
-- Internet connection (for initial data download)
-
-## 🔧 Configuration
-
-### Adjustable Parameters
+**Output Columns**:
 ```python
-# Minimum games for qualification
-min_games = 3
-
-# Outlier detection sensitivity  
-std_threshold = 1.5
-
-# Years to analyze
-years = [2022, 2023]
-
-# Initialize with custom settings
-grader = EnhancedNFLPlayerGrader(years=years)
+['player_id', 'player_name', 'position', 'team', 'season', 'week',
+ 'snaps', 'snap_pct', 'individual_grade', 'letter_grade',
+ 'team_pass_pro', 'team_run_success', 'team_pressure_allowed']
 ```
 
-### Grade Scale
+#### `calculate_individual_dline_grades(min_games=3)`
+Grades individual defensive linemen based on team performance and snap participation.
+
+**Input Data**: `snap_counts` + `rosters` + team D-Line performance  
+**Positions Covered**: `['DE', 'DT', 'NT', 'EDGE', 'DL']`
+
+**Position-Specific Weighting**:
+- **Edge (DE/EDGE)**: 80% pass rush, 20% run defense
+- **Interior (DT/NT)**: 30% pass rush, 70% run defense
+
+**Output Columns**:
+```python
+['player_id', 'player_name', 'position', 'team', 'season', 'week',
+ 'snaps', 'snap_pct', 'individual_grade', 'letter_grade',
+ 'team_pressure_rate', 'team_run_stuff_rate', 'team_negative_plays']
+```
+
+### Enhanced Skill Position Functions
+
+#### `calculate_enhanced_qb_grades_with_oline(team_oline_grades, min_games=3)`
+Calculates QB grades with realistic O-Line adjustments.
+
+**Input Data**: `weekly_data` (QB stats) + `team_oline_grades`  
+**Base Grading Factors**:
+- Passing yards (25 points max)
+- Completion percentage (30 points max, starts at 50%)
+- Touchdown passes (12 points each)
+- Interceptions (-8 points each)
+- Yards per attempt bonus (4 points per YPA above 6.0)
+
+**O-Line Adjustment**:
+```python
+# Conservative adjustments based on pass protection grade
+if oline_grade >= 85: adjustment = 1.06  # +6% max
+elif oline_grade >= 75: adjustment = 1.03  # +3%
+elif oline_grade >= 65: adjustment = 1.0   # No change
+elif oline_grade >= 55: adjustment = 0.97  # -3%
+else: adjustment = 0.93  # -7% max
+```
+
+**Output Columns**:
+```python
+['player_id', 'player_name', 'position', 'team', 'season', 'week',
+ 'base_grade', 'oline_grade', 'oline_adjustment', 'adjusted_grade',
+ 'grade_improvement', 'oline_tier', 'attempts', 'completions',
+ 'passing_yards', 'passing_tds', 'interceptions']
+```
+
+#### `calculate_enhanced_rb_grades_with_oline(team_oline_grades, min_games=3)`
+Calculates RB grades with realistic O-Line adjustments.
+
+**Input Data**: `weekly_data` (RB stats) + `team_oline_grades`  
+**Base Grading Factors**:
+- Rushing yards (30 points max)
+- Yards per carry (25 points max, baseline 3.5 YPC)
+- Rushing touchdowns (10 points each)
+- Receiving contribution (yards + receptions + TDs)
+
+**O-Line Adjustment**:
+```python
+# More aggressive adjustments for RBs (more O-Line dependent)
+if oline_grade >= 85: adjustment = 1.08  # +8% max
+elif oline_grade >= 75: adjustment = 1.05  # +5%
+elif oline_grade >= 65: adjustment = 1.0   # No change
+elif oline_grade >= 55: adjustment = 0.95  # -5%
+else: adjustment = 0.90  # -10% max
+```
+
+**Output Columns**:
+```python
+['player_id', 'player_name', 'position', 'team', 'season', 'week',
+ 'base_grade', 'oline_grade', 'oline_adjustment', 'adjusted_grade',
+ 'grade_improvement', 'oline_tier', 'carries', 'rushing_yards',
+ 'rushing_tds', 'receiving_yards', 'receptions']
+```
+
+### Traditional Grading Functions
+
+#### `calculate_offensive_grades(min_games=3)`
+Traditional grading for WR/TE positions.
+
+**Input Data**: `weekly_data` filtered to WR/TE positions  
+**Grading Factors**:
+- Receiving yards (40 points max)
+- Receptions (3 points each)
+- Receiving touchdowns (12 points each)
+- Catch rate (15 points max)
+
+#### `calculate_defensive_grades(min_games=3)`
+Traditional grading for defensive players (excluding line).
+
+**Input Data**: `defensive_weekly` (aggregated from play-by-play)  
+**Position Groups**:
+- **LINEBACKER**: Emphasizes tackles, versatility
+- **SECONDARY**: Emphasizes interceptions, pass deflections
+
+**Key Metrics**:
+- Total tackles, tackles for loss
+- Sacks, QB hits
+- Interceptions, pass deflections
+- Forced fumbles
+
+## Grade Scales & Validation
+
+### Realistic Grade Ranges
+```python
+# Team Units
+team_oline_grades: 60-95 (average ~75-80)
+team_dline_grades: 60-90 (average ~70-75)
+
+# Individual Players  
+individual_line_grades: 65-90 (based on team performance + snaps)
+enhanced_qb_grades: 0-100 (with ±7% O-Line adjustment)
+enhanced_rb_grades: 0-100 (with ±10% O-Line adjustment)
+traditional_grades: 0-100 (standard distribution)
+```
+
+### Letter Grade Scale
 ```python
 grade_scale = {
-    'A+': (95, 100),   'A': (90, 94.9),   'A-': (85, 89.9),
-    'B+': (80, 84.9),  'B': (75, 79.9),   'B-': (70, 74.9), 
-    'C+': (65, 69.9),  'C': (55, 64.9),   'C-': (50, 54.9),
-    'D+': (45, 49.9),  'D': (40, 44.9),   'D-': (35, 39.9),
+    'A+': (95, 100), 'A': (90, 94.9), 'A-': (85, 89.9),
+    'B+': (80, 84.9), 'B': (75, 79.9), 'B-': (70, 74.9),
+    'C+': (65, 69.9), 'C': (55, 64.9), 'C-': (50, 54.9),
+    'D+': (45, 49.9), 'D': (40, 44.9), 'D-': (35, 39.9),
     'F': (0, 34.9)
 }
 ```
 
-## 🏗️ Architecture
+## Error Handling & Fallbacks
 
-### DevOps-Friendly Design
-- **Modular Components**: Separate offensive/defensive processing
-- **Error Handling**: Comprehensive logging and fallback methods
-- **Scalable Processing**: Efficient pandas vectorization
-- **Container Ready**: Easy Docker deployment
-- **Configuration**: Environment-based settings support
+### Snap Count Data Issues
+When snap count data is unavailable or has column mismatches:
 
-### Container Deployment
-```dockerfile
-FROM python:3.9-slim
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-CMD ["python", "enhanced_nfl_grading.py"]
+```python
+# Automatic fallback methods
+calculate_individual_oline_grades() → _calculate_oline_grades_from_pbp()
+calculate_individual_dline_grades() → _calculate_dline_grades_from_pbp()
+
+# Creates estimated individual grades based on team performance
 ```
 
-### Kubernetes Integration
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nfl-grading
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nfl-grading
-  template:
-    metadata:
-      labels:
-        app: nfl-grading
-    spec:
-      containers:
-      - name: nfl-grading
-        image: nfl-grading:latest
-        resources:
-          requests:
-            memory: "4Gi"
-            cpu: "1000m"
+### Data Validation
+```python
+# Built-in validation checks
+assert 35 <= oline_grade <= 95, "O-Line grades outside realistic range"
+assert -10 <= grade_improvement <= 10, "Player adjustments too extreme"
+assert 0 <= final_grade <= 100, "Final grades outside valid range"
 ```
 
-## 📊 Sample Outputs
+## Usage Examples
 
-### Position Rankings
-```
-Top 5 Quarterbacks (2023):
-Player          Grade   Games   Consistency
-K.Cousins       77.8    8       80.6
-D.Prescott      75.2    18      73.1  
-B.Purdy        75.2    19      74.6
-J.Goff         74.3    20      76.8
-T.Tagovailoa   72.9    17      71.2
-```
+### Basic Analysis
+```python
+from app.functions.players.grading import EnhancedNFLPlayerGrader
 
-### Defensive Leaders
-```
-Top Pass Rushers (2023):
-Player          Grade   Sacks   QB Hits   Games
-K.Mack         82.3    17.0    22        9
-J.Bosa         79.6    10.5    16        18
-T.Watt         78.4    19.0    36        17
-M.Crosby       77.9    14.5    18        17
+# Initialize and run complete analysis
+grader = EnhancedNFLPlayerGrader(years=[2023])
+all_grades = grader.calculate_all_grades(min_games=3)
+
+# Generate comprehensive report
+grader.generate_line_report(all_grades)
 ```
 
-### Outlier Performances
+### Accessing Specific Grade Types
+```python
+# Team line units
+team_oline = all_grades['team_oline_grades']
+team_dline = all_grades['team_dline_grades']
+
+# Individual line players
+individual_oline = all_grades['individual_oline_grades']
+individual_dline = all_grades['individual_dline_grades']
+
+# Enhanced skill positions
+enhanced_qbs = all_grades['enhanced_qb_grades']
+enhanced_rbs = all_grades['enhanced_rb_grades']
+
+# Traditional positions
+wr_te_grades = all_grades['offensive_grades']
+def_grades = all_grades['defensive_grades']
 ```
-Biggest Over-Performances (2023):
-Player          Week    Grade   vs Avg    Performance Type
-T.Hill          Week 3  98.7    +20.5     Over-Performance
-J.Jefferson     Week 8  96.4    +18.9     Over-Performance  
-C.McCaffrey     Week 12 94.8    +19.7     Over-Performance
+
+### Team-Specific Analysis
+```python
+# Analyze specific team's performance
+team = 'KC'
+
+# O-Line unit performance
+chiefs_oline = team_oline[team_oline['team'] == team]
+avg_oline_grade = chiefs_oline['overall_oline_grade'].mean()
+
+# Individual Chiefs linemen
+chiefs_linemen = individual_oline[individual_oline['team'] == team]
+
+# Chiefs QBs with O-Line context
+chiefs_qbs = enhanced_qbs[enhanced_qbs['team'] == team]
+qb_oline_impact = chiefs_qbs['grade_improvement'].mean()
+
+print(f"Chiefs O-Line Grade: {avg_oline_grade:.1f}")
+print(f"QB O-Line Impact: {qb_oline_impact:+.1f} points")
 ```
 
-## 🤝 Contributing
+### Player Dependency Analysis
+```python
+# Find most O-Line dependent players
+qb_impact = enhanced_qbs.groupby('player_name').agg({
+    'base_grade': 'mean',
+    'adjusted_grade': 'mean',
+    'grade_improvement': 'mean',
+    'oline_grade': 'mean'
+}).round(1)
 
-### Development Setup
-```bash
-git clone <repository>
-cd nfl-grading-system
-pip install -r requirements.txt
-python test_grading_fixes.py  # Run tests
+# Players most helped by good O-Line
+helped_players = qb_impact.nlargest(10, 'grade_improvement')
+print("Most O-Line Dependent QBs:")
+print(helped_players[['adjusted_grade', 'grade_improvement', 'oline_grade']])
 ```
 
-### Adding New Metrics
-1. Extend position-specific grading functions
-2. Update data preparation methods
-3. Add corresponding unit tests
-4. Update documentation
+## Output Data Structure
 
-### Enhancement Ideas
-- **Advanced Coverage Metrics**: Utilize coverage scheme data
-- **Situational Grading**: Performance by down/distance
-- **Opponent Adjustments**: Strength of schedule factors
-- **Injury Context**: Performance relative to injury status
-- **Weather Factors**: Environmental impact analysis
+All grade DataFrames include these common columns:
+- `player_id` / `team`: Unique identifier
+- `player_name`: Display name  
+- `position`: Specific position (QB, RB, LT, DE, etc.)
+- `season`, `week`: Time identifiers
+- `*_grade`: Numeric grade (0-100)
+- `letter_grade`: Letter grade (A+ through F)
 
-## 📝 License
+Enhanced grades additionally include:
+- `base_grade`: Grade before O-Line adjustments
+- `oline_grade`: Supporting O-Line quality
+- `oline_adjustment`: Adjustment factor applied
+- `grade_improvement`: Points gained/lost from O-Line context
 
-This project uses NFL data provided by `nfl_data_py` under their respective licenses. The grading system code is available under MIT License.
+## Performance Notes
 
-## 🏆 Acknowledgments
+- **Memory Usage**: ~4GB RAM recommended for full season analysis
+- **Processing Time**: ~30-60 seconds for single season
+- **Data Dependencies**: Requires internet connection for initial nfl_data_py downloads
+- **Caching**: nfl_data_py automatically caches downloaded data locally
 
-- **nflfastR team**: For comprehensive NFL play-by-play data
-- **nfl_data_py maintainers**: For the Python data access layer
-- **NFL community**: For open data initiatives and statistical innovation
+## Dependencies
 
----
+```python
+# Required packages
+nfl_data_py  # NFL data access
+pandas       # Data manipulation
+numpy        # Numerical operations
+matplotlib   # Plotting (optional)
+seaborn      # Statistical visualization (optional)
+scipy        # Statistical analysis (optional)
+```
 
-**Ready to analyze NFL performance like never before!** 🏈📊
+## File Structure
+
+```
+app/functions/players/grading.py
+├── EnhancedNFLPlayerGrader (main class)
+├── Data loading methods (_load_data, _prepare_*)  
+├── Team line grading (calculate_team_*_grades)
+├── Individual line grading (calculate_individual_*_grades)
+├── Enhanced skill grading (calculate_enhanced_*_grades_with_oline)
+├── Traditional grading (calculate_offensive/defensive_grades)
+├── Helper methods (_calculate_*_grade, _numeric_to_letter_grade)
+├── Reporting (generate_line_report)
+└── Fallback methods (_calculate_*_grades_from_pbp)
+```
