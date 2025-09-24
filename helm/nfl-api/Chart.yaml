@@ -1,0 +1,12 @@
+apiVersion: v2
+name: nfl-api
+description: A Helm chart for an NFL API
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/Gin-G/NFL-API
+sources:
+  - https://github.com/Gin-G/NFL-API
+maintainers:
+  - name: Gin-G
+    email: NickCo7@gmail.com

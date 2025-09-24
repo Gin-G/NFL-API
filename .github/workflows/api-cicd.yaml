@@ -1,0 +1,41 @@
+# This workflow checksout the most recent code, builds a container image for FastAPI, 
+# and pushes it to docker.io before updating the Helm chart and pushing the changes back to the code repository
+name: NFL API CI/CD
+
+on: 
+  push:
+    paths:
+      - app/**
+
+jobs:
+  build-image-update-helm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code repository
+        uses: actions/checkout@v4
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Get the current date for an image tag
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d.%H.%M')" >> $GITHUB_OUTPUT
+      - name: Build and push NFL API image
+        uses: docker/build-push-action@v4
+        with:
+          context: app/.
+          file: app/Dockerfile
+          push: true
+          tags: |
+            ncging/nfl-api:latest
+            ncging/nfl-api:${{ steps.date.outputs.date }}
+      - name: Update Helm chart with new image
+        run: |
+          sed -i "/nfl-api/ c\    image: docker.io/ncging/nfl-api:${{ steps.date.outputs.date }}" helm/nfl-api/values.yaml
+      - name: Push changes to GitHub
+        run: |
+          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git config --global user.name "$GITHUB_ACTOR"
+          git commit -a -m "Image build and push successful, updated Helm chart to use new image"
+          git push
