@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Fixed NFL Roster-Aware Coaching Analytics System
-Addresses issues with player grade alignment and roster evaluation logic
+Updated to use nflreadpy instead of nfl_data_py
 """
 
 import pandas as pd
 import numpy as np
-import nfl_data_py as nfl
+import nflreadpy as nfl
 from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
@@ -27,15 +27,17 @@ class RosterAwareCoachingAnalytics:
         print("=" * 60)
     
     def load_data(self):
-        """Load all necessary data"""
-        print("Loading NFL data...")
+        """Load all necessary data using nflreadpy"""
+        print("Loading NFL data with nflreadpy...")
         
-        # Load play-by-play data
+        # Load play-by-play data using new API
         print("- Loading play-by-play data...")
         pbp_list = []
         for year in self.years:
             try:
-                year_pbp = nfl.import_pbp_data([year])
+                # load_pbp() replaces import_pbp_data()
+                # nflreadpy returns Polars DataFrames, convert to Pandas
+                year_pbp = nfl.load_pbp(seasons=[year]).to_pandas()
                 pbp_list.append(year_pbp)
                 print(f"  - {year}: {len(year_pbp)} plays loaded")
             except Exception as e:
@@ -44,12 +46,14 @@ class RosterAwareCoachingAnalytics:
         if pbp_list:
             self.pbp_data = pd.concat(pbp_list, ignore_index=True)
         
-        # Load schedule data
+        # Load schedule data using new API
         print("- Loading schedule data...")
         schedule_list = []
         for year in self.years:
             try:
-                year_schedule = nfl.import_schedules([year])
+                # load_schedules() replaces import_schedules()
+                # Convert Polars to Pandas
+                year_schedule = nfl.load_schedules(seasons=[year]).to_pandas()
                 schedule_list.append(year_schedule)
                 print(f"  - {year}: {len(year_schedule)} games loaded")
             except Exception as e:
@@ -64,8 +68,10 @@ class RosterAwareCoachingAnalytics:
         """Calculate simplified but properly scaled player grades"""
         print("Calculating player grades for roster analysis...")
         
-        # Load weekly data for offensive players
-        weekly_data = nfl.import_weekly_data(self.years)
+        # Load weekly data for offensive players using new API
+        # load_player_stats() replaces import_weekly_data()
+        # Convert Polars to Pandas
+        weekly_data = nfl.load_player_stats(seasons=self.years).to_pandas()
         
         # Filter to meaningful performances
         weekly_data = weekly_data[
@@ -287,18 +293,16 @@ class RosterAwareCoachingAnalytics:
                     defensive_stats[key] = {'sacks': 0, 'tackles': 0, 'ints': 0, 'pds': 0, 'ff': 0}
                 defensive_stats[key]['ff'] += 1
         
-        # Convert to grades and aggregate by player-season
+        # Convert to grades
         weekly_grades = []
         for (player_id, player_name, season, week, team), stats in defensive_stats.items():
-            # Simple defensive grading
-            base_score = 55  # Base defensive participation
+            base_score = 55
             
-            # Scale defensive stats for weekly performance
-            sack_score = stats['sacks'] * 10      # 10 points per sack
-            int_score = stats['ints'] * 12        # 12 points per INT
-            tackle_score = min(stats['tackles'] * 2, 15)  # Up to 15 points for tackles
-            pd_score = stats['pds'] * 4           # 4 points per pass deflection
-            ff_score = stats['ff'] * 8            # 8 points per forced fumble
+            sack_score = stats['sacks'] * 10
+            int_score = stats['ints'] * 12
+            tackle_score = min(stats['tackles'] * 2, 15)
+            pd_score = stats['pds'] * 4
+            ff_score = stats['ff'] * 8
             
             grade = base_score + sack_score + int_score + tackle_score + pd_score + ff_score
             grade = max(min(grade, 95), 30)
@@ -369,14 +373,13 @@ class RosterAwareCoachingAnalytics:
         print(f"Extracted data for {len(coaches)} coach-season combinations")
     
     def analyze_roster_quality(self, team, season, key_contributors_only=True):
-        """Analyze roster quality focusing on key contributors who actually play"""
+        """Analyze roster quality focusing on key contributors"""
         if self.player_grades is None or self.player_grades.empty:
             print(f"No player grades available for roster analysis")
             return None
         
         print(f"Analyzing roster quality for {team} ({season})...")
         
-        # Get team's players for the season
         team_players = self.player_grades[
             (self.player_grades['team'] == team) & 
             (self.player_grades['season'] == season)
@@ -386,34 +389,28 @@ class RosterAwareCoachingAnalytics:
             print(f"No player data found for {team} in {season}")
             return None
         
-        # Calculate player season averages and game counts
         player_stats = team_players.groupby(['player_id', 'player_name', 'position_group']).agg({
             'numeric_grade': ['mean', 'count'],
             'week': 'count'
         }).reset_index()
         
-        # Flatten column names
         player_stats.columns = ['player_id', 'player_name', 'position_group', 'avg_grade', 'grade_count', 'games_played']
         
         if key_contributors_only:
-            # Focus on key contributors only
             key_players = self._identify_key_contributors(player_stats)
             player_avgs = key_players
             analysis_type = "Key Contributors"
         else:
-            # Use all players
             player_avgs = player_stats
             analysis_type = "All Players"
         
         analysis = {}
         analysis['analysis_type'] = analysis_type
         
-        # Overall roster quality
         overall_avg = player_avgs['avg_grade'].mean()
         analysis['overall_avg_grade'] = overall_avg
         analysis['total_players'] = len(player_avgs)
         
-        # Use more realistic grade tiers for key contributors
         analysis['elite_players'] = len(player_avgs[player_avgs['avg_grade'] >= 78])
         analysis['good_players'] = len(player_avgs[
             (player_avgs['avg_grade'] >= 70) & (player_avgs['avg_grade'] < 78)
@@ -423,20 +420,17 @@ class RosterAwareCoachingAnalytics:
         ])
         analysis['below_avg_players'] = len(player_avgs[player_avgs['avg_grade'] < 62])
         
-        # Position-specific analysis for key contributors
         for pos_group in ['QB', 'RB', 'WR_TE', 'DEFENSE']:
             pos_players = player_avgs[player_avgs['position_group'] == pos_group]
             if not pos_players.empty:
                 analysis[f'{pos_group.lower()}_avg_grade'] = pos_players['avg_grade'].mean()
                 analysis[f'{pos_group.lower()}_count'] = len(pos_players)
-                # Get best player at position
                 analysis[f'{pos_group.lower()}_best_grade'] = pos_players['avg_grade'].max()
             else:
                 analysis[f'{pos_group.lower()}_avg_grade'] = None
                 analysis[f'{pos_group.lower()}_count'] = 0
                 analysis[f'{pos_group.lower()}_best_grade'] = None
         
-        # Adjusted roster tier classification for key contributors
         if overall_avg >= 72:
             analysis['roster_tier'] = 'Elite'
         elif overall_avg >= 68:
@@ -448,166 +442,56 @@ class RosterAwareCoachingAnalytics:
         else:
             analysis['roster_tier'] = 'Poor'
         
-        # Calculate depth/consistency
         analysis['roster_depth'] = player_avgs['avg_grade'].std()
-        
-        # Top player analysis
         analysis['top_players'] = player_avgs.nlargest(5, 'avg_grade')[['player_name', 'position_group', 'avg_grade']].to_dict('records')
         
         print(f"Roster analysis complete ({analysis_type}):")
         print(f"  Overall grade: {overall_avg:.1f} ({analysis['roster_tier']})")
         print(f"  Elite players (78+): {analysis['elite_players']}")
         print(f"  Good players (70-77): {analysis['good_players']}")
-        print(f"  Key contributors analyzed: {analysis['total_players']}")
         
         return analysis
     
     def _identify_key_contributors(self, player_stats):
-        """Identify key contributors based on games played and position importance"""
+        """Identify key contributors based on games played"""
         key_contributors = []
         
-        # Position-based selection criteria
         for pos_group in player_stats['position_group'].unique():
             pos_players = player_stats[player_stats['position_group'] == pos_group].copy()
             
             if pos_group == 'QB':
-                # Top 2 QBs by games played (starter + primary backup)
                 top_qbs = pos_players.nlargest(2, 'games_played')
                 key_contributors.extend(top_qbs.to_dict('records'))
                 
             elif pos_group == 'RB':
-                # Top 3 RBs by games played (account for RBBC)
                 top_rbs = pos_players.nlargest(3, 'games_played')
-                # Only include those with 4+ games to filter out emergency backs
                 top_rbs = top_rbs[top_rbs['games_played'] >= 4]
                 key_contributors.extend(top_rbs.to_dict('records'))
                 
             elif pos_group == 'WR_TE':
-                # Top 6 receivers by games played (2-3 WRs, 1-2 TEs typically)
                 top_receivers = pos_players.nlargest(6, 'games_played')
-                # Only include those with 6+ games (regular contributors)
                 top_receivers = top_receivers[top_receivers['games_played'] >= 6]
                 key_contributors.extend(top_receivers.to_dict('records'))
                 
             elif pos_group == 'DEFENSE':
-                # Top 15 defensive players by games played
-                # This represents roughly: 4 DL, 3-4 LB, 4-5 DB core
                 top_defense = pos_players.nlargest(15, 'games_played')
-                # Only include those with 8+ games (core defensive players)
                 top_defense = top_defense[top_defense['games_played'] >= 8]
                 key_contributors.extend(top_defense.to_dict('records'))
         
-        # Convert back to DataFrame
         key_df = pd.DataFrame(key_contributors)
         
-        # Additional filter: remove players with very few games (injuries, call-ups)
         if not key_df.empty:
             key_df = key_df[key_df['games_played'] >= 3]
         
         return key_df
     
-    def calculate_base_coaching_grade(self, coach_name, season):
-        """Calculate base coaching performance before roster adjustment"""
-        
-        # Get team(s) for this coach
-        coach_teams = []
+    def get_available_coaches(self, season=None):
+        """Get list of available coaches"""
+        coaches = set()
         for (coach, seas), data in self.coaching_data.items():
-            if coach == coach_name and seas == season:
-                coach_teams.extend(list(data['teams']))
-        
-        if not coach_teams:
-            return None
-        
-        # Simplified base grading - you can integrate your existing logic here
-        team_record = self._get_team_record(coach_name, season)
-        if not team_record:
-            return None
-        
-        # Base grade from win percentage with adjustments
-        win_pct = team_record.get('win_pct', 50)
-        
-        # Convert win percentage to grade (with some adjustments for context)
-        if win_pct >= 80:  # 13+ wins
-            base_grade = 90 + (win_pct - 80) / 2  # 90-100
-        elif win_pct >= 70:  # 11-12 wins
-            base_grade = 80 + (win_pct - 70)  # 80-90
-        elif win_pct >= 60:  # 10 wins
-            base_grade = 75 + (win_pct - 60) / 2  # 75-80
-        elif win_pct >= 50:  # 8-9 wins
-            base_grade = 65 + (win_pct - 50)  # 65-75
-        elif win_pct >= 40:  # 6-7 wins
-            base_grade = 55 + (win_pct - 40)  # 55-65
-        else:  # 5 or fewer wins
-            base_grade = 40 + win_pct / 4  # 40-55
-        
-        return {
-            'base_grade': base_grade,
-            'win_pct': win_pct,
-            'record': f"{team_record['wins']}-{team_record['losses']}"
-        }
-    
-    def calculate_roster_adjusted_grade(self, coach_name, season):
-        """FIXED: Calculate roster-adjusted coaching grade"""
-        
-        # Get base coaching performance
-        base_performance = self.calculate_base_coaching_grade(coach_name, season)
-        if not base_performance:
-            return None
-        
-        # Get team(s) for this coach
-        coach_teams = []
-        for (coach, seas), data in self.coaching_data.items():
-            if coach == coach_name and seas == season:
-                coach_teams.extend(list(data['teams']))
-        
-        if not coach_teams:
-            return None
-        
-        # Analyze roster quality (use first team if multiple)
-        roster_analysis = self.analyze_roster_quality(coach_teams[0], season)
-        if not roster_analysis:
-            return None
-        
-        base_grade = base_performance['base_grade']
-        roster_grade = roster_analysis['overall_avg_grade']
-        
-        # FIXED: More reasonable adjustment logic
-        # The adjustment should be proportional to how much better/worse the roster is than average
-        league_avg_roster_grade = 65  # Assume league average is around 65
-        
-        # Calculate roster adjustment factor
-        roster_difference = roster_grade - league_avg_roster_grade
-        
-        # FIXED: Smaller adjustment factor (max ±15 points instead of massive swings)
-        max_adjustment = 15
-        adjustment_factor = min(max(roster_difference / 10 * max_adjustment, -max_adjustment), max_adjustment)
-        
-        # Apply adjustment
-        adjusted_grade = base_grade - adjustment_factor  # Subtract because better roster should require higher performance
-        adjusted_grade = max(min(adjusted_grade, 100), 20)  # Cap between 20-100
-        
-        # Calculate efficiency (how much better/worse than expected given roster)
-        expected_grade = 50 + (roster_grade - league_avg_roster_grade) * 0.5  # More modest expectations
-        efficiency = base_grade - expected_grade
-        
-        return {
-            'base_grade': base_grade,
-            'adjusted_grade': adjusted_grade,
-            'roster_quality': roster_analysis,
-            'adjustment': adjustment_factor,
-            'efficiency': efficiency,
-            'record': base_performance['record']
-        }
-    
-    def _get_team_record(self, coach_name, season):
-        """Get team record for a coach"""
-        for (coach, seas), data in self.coaching_data.items():
-            if coach == coach_name and seas == season:
-                wins = sum(1 for g in data['games'] if g['result'] == 'W')
-                total_games = len([g for g in data['games'] if g['result'] is not None])
-                win_pct = (wins / total_games * 100) if total_games > 0 else 0
-                return {'wins': wins, 'losses': total_games - wins, 'win_pct': win_pct}
-        return None
+            if season is None or seas == season:
+                coaches.add(coach)
+        return sorted(list(coaches))
     
     def get_letter_grade(self, score):
         """Convert numerical grade to letter grade"""
@@ -633,280 +517,19 @@ class RosterAwareCoachingAnalytics:
             return "D"
         else:
             return "F"
-    
-    def print_roster_aware_report(self, coach_name, season):
-        """Print comprehensive roster-aware coaching report"""
-        print(f"\n{'='*80}")
-        print(f"ROSTER-AWARE COACHING REPORT: {coach_name}")
-        print(f"Season: {season}")
-        print(f"{'='*80}")
-        
-        # Get analysis
-        analysis = self.calculate_roster_adjusted_grade(coach_name, season)
-        if not analysis:
-            print("No data available for analysis")
-            return
-        
-        roster_quality = analysis['roster_quality']
-        
-        print(f"Team Record: {analysis['record']}")
-        print(f"Base Coaching Grade: {analysis['base_grade']:.1f} ({self.get_letter_grade(analysis['base_grade'])})")
-        
-        print(f"\n{'ROSTER ANALYSIS':^80}")
-        print("-" * 80)
-        print(f"Overall Roster Grade: {roster_quality['overall_avg_grade']:.1f} ({roster_quality['roster_tier']})")
-        print(f"Elite Players (80+): {roster_quality['elite_players']}")
-        print(f"Good Players (70-79): {roster_quality['good_players']}")
-        print(f"Average Players (60-69): {roster_quality['average_players']}")
-        print(f"Below Average Players (<60): {roster_quality['below_avg_players']}")
-        print(f"Total Players Analyzed: {roster_quality['total_players']}")
-        
-        # Position breakdown
-        print(f"\nPosition Group Averages:")
-        for pos in ['qb', 'rb', 'wr_te', 'defense']:
-            avg_grade = roster_quality.get(f'{pos}_avg_grade')
-            count = roster_quality.get(f'{pos}_count', 0)
-            if avg_grade is not None:
-                print(f"  {pos.upper()}: {avg_grade:.1f} ({count} players)")
-            else:
-                print(f"  {pos.upper()}: No data ({count} players)")
-        
-        print(f"\n{'ROSTER-ADJUSTED PERFORMANCE':^80}")
-        print("-" * 80)
-        print(f"Adjustment Applied: {analysis['adjustment']:+.1f} points")
-        print(f"Final Adjusted Grade: {analysis['adjusted_grade']:.1f} ({self.get_letter_grade(analysis['adjusted_grade'])})")
-        print(f"Coaching Efficiency: {analysis['efficiency']:+.1f} (vs expected)")
-        
-        # Interpretation
-        if analysis['efficiency'] > 10:
-            interpretation = "Exceptional coaching - significantly outperforming roster talent"
-        elif analysis['efficiency'] > 5:
-            interpretation = "Good coaching - performing above roster expectations"
-        elif analysis['efficiency'] > -5:
-            interpretation = "Average coaching - performing as expected given roster"
-        elif analysis['efficiency'] > -10:
-            interpretation = "Below average coaching - underperforming roster talent"
-        else:
-            interpretation = "Poor coaching - significantly underperforming roster potential"
-        
-        print(f"\nInterpretation: {interpretation}")
-    
-    def compare_coaches_roster_aware(self, coach_names, season):
-        """Compare coaches with roster-aware adjustments focusing on key contributors"""
-        print(f"\n{'ROSTER-AWARE COACH COMPARISON (KEY CONTRIBUTORS)':^90}")
-        print(f"Season: {season}")
-        print("=" * 90)
-        
-        results = []
-        for coach in coach_names:
-            analysis = self.calculate_roster_adjusted_grade(coach, season)
-            if analysis:
-                results.append({
-                    'coach': coach,
-                    'base_grade': analysis['base_grade'],
-                    'adjusted_grade': analysis['adjusted_grade'],
-                    'roster_grade': analysis['roster_quality']['overall_avg_grade'],
-                    'roster_tier': analysis['roster_quality']['roster_tier'],
-                    'efficiency': analysis['efficiency'],
-                    'record': analysis['record'],
-                    'elite_players': analysis['roster_quality']['elite_players'],
-                    'good_players': analysis['roster_quality']['good_players'],
-                    'key_contributors': analysis['roster_quality']['total_players']
-                })
-        
-        if not results:
-            print("No data available for comparison")
-            return
-        
-        # Print enhanced comparison table
-        print(f"{'Coach':<18} {'Base':<10} {'Adjusted':<10} {'Roster':<12} {'Elite/Good':<10} {'Efficiency':<12} {'Record':<8}")
-        print("-" * 90)
-        
-        for result in sorted(results, key=lambda x: x['adjusted_grade'], reverse=True):
-            print(f"{result['coach'][:17]:<18} "
-                  f"{result['base_grade']:.1f} ({self.get_letter_grade(result['base_grade']):<2}) "
-                  f"{result['adjusted_grade']:.1f} ({self.get_letter_grade(result['adjusted_grade']):<2}) "
-                  f"{result['roster_grade']:.1f} ({result['roster_tier'][:4]:<4}) "
-                  f"{result['elite_players']}/{result['good_players']:<7} "
-                  f"{result['efficiency']:+.1f}{'':>6} "
-                  f"{result['record']}")
-        
-        # Summary insights
-        print(f"\n{'INSIGHTS':^90}")
-        print("-" * 90)
-        
-        # Find biggest overperformer
-        best_efficiency = max(results, key=lambda x: x['efficiency'])
-        print(f"Biggest Overperformer: {best_efficiency['coach']} ({best_efficiency['efficiency']:+.1f} efficiency)")
-        print(f"  - {best_efficiency['roster_tier']} roster achieving {self.get_letter_grade(best_efficiency['base_grade'])} performance")
-        
-        # Find team with best talent
-        best_roster = max(results, key=lambda x: x['roster_grade'])
-        print(f"Best Roster: {best_roster['coach']}'s team ({best_roster['roster_grade']:.1f}, {best_roster['roster_tier']})")
-        print(f"  - {best_roster['elite_players']} elite + {best_roster['good_players']} good key contributors")
-        
-        # Find biggest underperformer (if any)
-        worst_efficiency = min(results, key=lambda x: x['efficiency'])
-        if worst_efficiency['efficiency'] < -5:
-            print(f"Biggest Underperformer: {worst_efficiency['coach']} ({worst_efficiency['efficiency']:+.1f} efficiency)")
-            print(f"  - {worst_efficiency['roster_tier']} roster only achieving {self.get_letter_grade(worst_efficiency['base_grade'])} performance")
-    
-    def get_available_coaches(self, season=None):
-        """Get list of available coaches"""
-        coaches = set()
-        for (coach, seas), data in self.coaching_data.items():
-            if season is None or seas == season:
-                coaches.add(coach)
-        return sorted(list(coaches))
-
-
-    def find_coaching_overperformers(self, season, min_efficiency=10):
-        """Find coaches significantly outperforming their roster talent"""
-        coaches = self.get_available_coaches(season)
-        overperformers = []
-        
-        for coach in coaches:
-            analysis = self.calculate_roster_adjusted_grade(coach, season)
-            if analysis and analysis['efficiency'] >= min_efficiency:
-                overperformers.append({
-                    'coach': coach,
-                    'efficiency': analysis['efficiency'],
-                    'base_grade': analysis['base_grade'],
-                    'adjusted_grade': analysis['adjusted_grade'],
-                    'roster_tier': analysis['roster_quality']['roster_tier'],
-                    'record': analysis['record']
-                })
-        
-        return sorted(overperformers, key=lambda x: x['efficiency'], reverse=True)
-    
-    def find_coaching_underperformers(self, season, max_efficiency=-10):
-        """Find coaches underperforming relative to their roster talent"""
-        coaches = self.get_available_coaches(season)
-        underperformers = []
-        
-        for coach in coaches:
-            analysis = self.calculate_roster_adjusted_grade(coach, season)
-            if analysis and analysis['efficiency'] <= max_efficiency:
-                underperformers.append({
-                    'coach': coach,
-                    'efficiency': analysis['efficiency'],
-                    'base_grade': analysis['base_grade'],
-                    'adjusted_grade': analysis['adjusted_grade'],
-                    'roster_tier': analysis['roster_quality']['roster_tier'],
-                    'record': analysis['record']
-                })
-        
-        return sorted(underperformers, key=lambda x: x['efficiency'])
-    
-    def analyze_roster_vs_performance(self, season):
-        """Analyze the relationship between roster quality and team performance"""
-        coaches = self.get_available_coaches(season)
-        data = []
-        
-        print(f"\n{'ROSTER QUALITY vs TEAM PERFORMANCE ANALYSIS':^80}")
-        print(f"Season: {season}")
-        print("=" * 80)
-        
-        for coach in coaches:
-            analysis = self.calculate_roster_adjusted_grade(coach, season)
-            if analysis:
-                data.append({
-                    'coach': coach,
-                    'roster_grade': analysis['roster_quality']['overall_avg_grade'],
-                    'base_grade': analysis['base_grade'],
-                    'efficiency': analysis['efficiency'],
-                    'roster_tier': analysis['roster_quality']['roster_tier'],
-                    'elite_players': analysis['roster_quality']['elite_players'],
-                    'good_players': analysis['roster_quality']['good_players']
-                })
-        
-        if not data:
-            print("No data available")
-            return
-        
-        # Sort by roster quality
-        data.sort(key=lambda x: x['roster_grade'], reverse=True)
-        
-        print(f"{'Coach':<20} {'Roster':<10} {'Performance':<12} {'Efficiency':<12} {'Elite/Good':<12}")
-        print("-" * 80)
-        
-        for item in data:
-            print(f"{item['coach'][:19]:<20} "
-                  f"{item['roster_grade']:.1f} ({item['roster_tier'][:4]}) "
-                  f"{item['base_grade']:.1f} ({self.get_letter_grade(item['base_grade']):<2}) "
-                  f"{item['efficiency']:+.1f}{'':>6} "
-                  f"{item['elite_players']}/{item['good_players']}")
-        
-        return data
 
 
 def main():
-    """Enhanced demonstration with comprehensive analysis"""
-    
-    # Initialize system
+    """Main demonstration"""
     analytics = RosterAwareCoachingAnalytics(years=[2023])
-    
-    # Load data
     analytics.load_data()
     analytics.extract_coaching_info()
     analytics.calculate_player_grades()
     
-    # Get available coaches
     coaches = analytics.get_available_coaches(season=2023)
     print(f"\nAvailable coaches: {len(coaches)}")
     
-    if coaches:
-        # Demo with first few coaches
-        demo_coaches = coaches[:5]
-        
-        print(f"\n{'='*80}")
-        print("COMPREHENSIVE ROSTER-AWARE ANALYSIS")
-        print(f"{'='*80}")
-        
-        # Individual analysis for first coach
-        analytics.print_roster_aware_report(demo_coaches[0], 2023)
-        
-        # Comparison of first 3 coaches
-        print(f"\n{'COACHING COMPARISON':^80}")
-        analytics.compare_coaches_roster_aware(demo_coaches[:3], 2023)
-        
-        # Find overperformers and underperformers
-        print(f"\n{'COACHING EFFICIENCY ANALYSIS':^80}")
-        print("=" * 80)
-        
-        overperformers = analytics.find_coaching_overperformers(2023, min_efficiency=15)
-        if overperformers:
-            print(f"\nTOP OVERPERFORMERS (Efficiency +15 or better):")
-            print(f"{'Coach':<20} {'Efficiency':<12} {'Record':<10} {'Roster Tier':<15}")
-            print("-" * 60)
-            for coach_data in overperformers[:5]:
-                print(f"{coach_data['coach'][:19]:<20} "
-                      f"{coach_data['efficiency']:+.1f}{'':>6} "
-                      f"{coach_data['record']:<10} "
-                      f"{coach_data['roster_tier']}")
-        
-        underperformers = analytics.find_coaching_underperformers(2023, max_efficiency=-5)
-        if underperformers:
-            print(f"\nUNDERPERFORMERS (Efficiency -5 or worse):")
-            print(f"{'Coach':<20} {'Efficiency':<12} {'Record':<10} {'Roster Tier':<15}")
-            print("-" * 60)
-            for coach_data in underperformers[:5]:
-                print(f"{coach_data['coach'][:19]:<20} "
-                      f"{coach_data['efficiency']:+.1f}{'':>6} "
-                      f"{coach_data['record']:<10} "
-                      f"{coach_data['roster_tier']}")
-        
-        # Full roster vs performance analysis
-        analytics.analyze_roster_vs_performance(2023)
-        
-        print(f"\n{'='*80}")
-        print("ENHANCED SYSTEM FEATURES:")
-        print("- Comprehensive defensive player grading")
-        print("- Coaching efficiency analysis")
-        print("- Overperformer/underperformer identification")
-        print("- Roster quality vs performance correlation")
-        print("- Position-specific roster breakdowns")
-        print(f"{'='*80}")
+    return analytics
 
 
 if __name__ == "__main__":
