@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from nfl_data_py import import_weekly_data, import_players, import_weekly_rosters, import_schedules, import_draft_picks, import_depth_charts
+import nflreadpy as nfl
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
@@ -18,7 +18,7 @@ import logging
 import warnings
 
 # Import injury integration
-from injuries import integrate_sportradar_injuries
+from ..injuries.injuries import integrate_sportradar_injuries
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -37,15 +37,26 @@ logger = logging.getLogger(__name__)
 
 # Load the enhanced data
 logging.info("Loading enhanced data from CSV...")
-df = pd.read_csv('data/nfl_dataset.csv')
+df = pd.read_csv('functions/data/data/nfl_dataset.csv')
 logging.info(f"Data loaded. Shape: {df.shape}")
 
 # Define prediction parameters EARLY (needed for injury loading)
 week_to_predict = 5  # UPDATE THIS FOR THE WEEK YOU WANT TO PREDICT
 year = 2025
 
-latest_rosters = import_weekly_rosters([year])
-schedule = import_schedules([year])
+latest_rosters = nfl.load_rosters_weekly(seasons=[year])
+if hasattr(latest_rosters, 'to_pandas'):
+    latest_rosters = latest_rosters.to_pandas()
+
+if 'full_name' in latest_rosters.columns:
+    latest_rosters = latest_rosters.rename(columns={'full_name': 'player_name'})
+
+if 'gsis_id' in latest_rosters.columns and 'player_id' not in latest_rosters.columns:
+    latest_rosters = latest_rosters.rename(columns={'gsis_id': 'player_id'})
+
+schedule = nfl.load_schedules(seasons=[year])
+if hasattr(schedule, 'to_pandas'):
+    schedule = schedule.to_pandas()
 
 print("\n🧹 CLEANING ROSTER DATA TO PREVENT DUPLICATES...")
 print(f"Original roster data: {len(latest_rosters)} rows")
@@ -73,7 +84,9 @@ else:
 
 # Load current depth charts for real-time role detection
 print("Loading current depth charts...")
-current_depth_charts = import_depth_charts([year])
+current_depth_charts = nfl.load_depth_charts(seasons=[year])
+if hasattr(current_depth_charts, 'to_pandas'):
+    current_depth_charts = current_depth_charts.to_pandas()
 print(f"Loaded {len(current_depth_charts)} depth chart entries")
 
 # LOAD INJURY DATA FROM SPORTRADAR API
@@ -875,7 +888,10 @@ class EnhancedRookiePredictor:
     def _load_draft_data(self):
         """Load draft data for current season"""
         try:
-            draft_data = import_draft_picks([self.current_season])
+            # Changed from import_draft_picks to load_draft_picks
+            draft_data = nfl.load_draft_picks(seasons=[self.current_season])
+            if hasattr(draft_data, 'to_pandas'):
+                draft_data = draft_data.to_pandas()
             print(f"Loaded {len(draft_data)} draft picks for {self.current_season}")
             return draft_data
         except Exception as e:
