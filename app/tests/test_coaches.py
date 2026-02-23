@@ -3,7 +3,7 @@
 Tests for /coaches endpoints.
 """
 
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 COACHING_UNAVAILABLE = {"player_grading": False, "coaching_analytics": False}
@@ -135,13 +135,16 @@ class TestGetCoachGrades:
             response = client.get("/coaches/Unknown Coach/grades")
         assert response.status_code == 404
 
-    def test_empty_grades_response(self, client, mock_coaching_analytics):
-        mock_coaching_analytics.grade_coach_performance.return_value = {}
+    def test_empty_grades_when_no_season_data(self, client):
+        """Grades is None when a coach has no entries in coaching_data."""
+        analytics = MagicMock()
+        analytics.get_available_coaches.return_value = ["Andy Reid"]
+        analytics.coaching_data = {}  # coach present in list but no data
         with patch("api.coaches.check_grading_systems", return_value=COACHING_AVAILABLE), \
-             patch("api.coaches.get_coaching_analytics", return_value=mock_coaching_analytics):
+             patch("api.coaches.get_coaching_analytics", return_value=analytics):
             body = client.get("/coaches/Andy Reid/grades").json()
         assert body["status"] == "success"
-        assert body["data"] is None
+        assert body["grades"] is None
 
     def test_returns_500_on_error(self, client):
         with patch("api.coaches.check_grading_systems", return_value=COACHING_AVAILABLE), \

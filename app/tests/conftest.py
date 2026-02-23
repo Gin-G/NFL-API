@@ -115,7 +115,7 @@ def sample_grades_df():
 @pytest.fixture
 def mock_coaching_analytics():
     analytics = MagicMock()
-    analytics.get_all_coaches.return_value = ["Andy Reid", "Kyle Shanahan"]
+    analytics.get_available_coaches.return_value = ["Andy Reid", "Kyle Shanahan"]
     analytics.coaching_data = {
         ("Andy Reid", 2023): {
             "teams": {"KC"},
@@ -131,29 +131,18 @@ def mock_coaching_analytics():
             ],
         },
     }
-    analytics.analyze_offensive_tendencies.return_value = {
-        "pass_rate": 0.62, "run_rate": 0.38
-    }
-    analytics.analyze_defensive_performance.return_value = {
-        "points_allowed_avg": 18.5
-    }
-    analytics.analyze_situational_performance.return_value = {
-        "red_zone_efficiency": 0.71
-    }
-    analytics.grade_coach_performance.return_value = {
-        "offensive_overall": 88.0,
-        "defensive_overall": 75.0,
-        "overall": 82.5,
+    analytics.analyze_roster_quality.return_value = {
+        "overall_avg_grade": 75.0,
+        "roster_tier": "Good",
+        "qb_avg_grade": 85.0,
+        "rb_avg_grade": 72.0,
+        "wr_te_avg_grade": 78.0,
+        "defense_avg_grade": 70.0,
     }
     analytics.get_letter_grade.side_effect = lambda score: (
         "A+" if score >= 95 else "A" if score >= 90 else "B+" if score >= 85
         else "B" if score >= 75 else "C"
     )
-    analytics._get_team_record.return_value = {"wins": 11, "losses": 6}
-    analytics._determine_coach_specialty.return_value = "offensive"
-    analytics.get_coach_strengths_weaknesses.return_value = {
-        "strengths": ["red zone"], "weaknesses": ["third down"]
-    }
     return analytics
 
 
