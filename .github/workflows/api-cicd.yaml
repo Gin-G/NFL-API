@@ -105,13 +105,24 @@ jobs:
     name: Smoke-Test Live API
     needs: build-and-deploy
     runs-on: ubuntu-latest
+    # API_URL comes from a GitHub Actions repository Variable (Settings →
+    # Variables → Repository variables → API_URL = https://nfl-api.nickknows.net).
+    # Variables are never secret-masked, unlike Secrets. Using a Secret for the
+    # URL causes GitHub to redact the substring matching ARGOCD_APP_NAME inside
+    # the env var value, producing an unusable masked URL at runtime.
     env:
-      # Derived from helm/nfl-api/values.yaml fqdn — not stored as a secret so
-      # it won't be masked in $GITHUB_OUTPUT and can be used safely in curl.
-      API_URL: https://nfl-api.nickknows.net
+      API_URL: ${{ vars.API_URL }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Diagnose — URL and connectivity
+        run: |
+          echo "curl: $(curl --version | head -1)"
+          echo "API_URL length: ${#API_URL}"
+          curl -sf --max-time 15 "${API_URL}/health" \
+            | jq '{status, systems}' \
+            || { echo "Health check failed — API_URL may be unset or unreachable"; exit 1; }
 
       - name: Wait for ArgoCD — Synced + Healthy
         env:
