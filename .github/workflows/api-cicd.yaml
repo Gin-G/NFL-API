@@ -31,20 +31,9 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install test dependencies
+      - name: Install dependencies
         working-directory: app
-        run: |
-          pip install --quiet \
-            "fastapi>=0.110.0" \
-            "uvicorn[standard]" \
-            pydantic \
-            httpx \
-            pytest \
-            pandas \
-            numpy \
-            "nfl-data-py" \
-            nflreadpy \
-            starlette
+        run: pip install --quiet -r requirements.txt
 
       - name: Run tests
         working-directory: app
