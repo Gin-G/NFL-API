@@ -57,6 +57,53 @@ class TestGetRosters:
             response = client.get("/players/rosters")
         assert response.status_code == 500
 
+    def test_deduplicates_players_across_weeks(self, client):
+        """Without a week filter, each player should appear exactly once."""
+        multi_week_df = pd.DataFrame([
+            {"player_id": "00-0033873", "player_name": "Patrick Mahomes",
+             "position": "QB", "team": "KC", "week": 1, "season": 2024},
+            {"player_id": "00-0033873", "player_name": "Patrick Mahomes",
+             "position": "QB", "team": "KC", "week": 2, "season": 2024},
+            {"player_id": "00-0033873", "player_name": "Patrick Mahomes",
+             "position": "QB", "team": "KC", "week": 3, "season": 2024},
+            {"player_id": "00-0031280", "player_name": "Travis Kelce",
+             "position": "TE", "team": "KC", "week": 1, "season": 2024},
+            {"player_id": "00-0031280", "player_name": "Travis Kelce",
+             "position": "TE", "team": "KC", "week": 2, "season": 2024},
+        ])
+        with patch("api.players.nfl.import_weekly_rosters", return_value=multi_week_df):
+            body = client.get("/players/rosters").json()
+        assert body["total_players"] == 2
+
+    def test_deduplication_keeps_latest_week(self, client):
+        """Deduplication should retain the most recent week's entry per player."""
+        multi_week_df = pd.DataFrame([
+            {"player_id": "00-0033873", "player_name": "Patrick Mahomes",
+             "position": "QB", "team": "KC", "week": 1, "season": 2024,
+             "jersey_number": 15},
+            {"player_id": "00-0033873", "player_name": "Patrick Mahomes",
+             "position": "QB", "team": "KC", "week": 5, "season": 2024,
+             "jersey_number": 15},
+        ])
+        with patch("api.players.nfl.import_weekly_rosters", return_value=multi_week_df):
+            body = client.get("/players/rosters").json()
+        assert body["total_players"] == 1
+        assert body["data"][0]["week"] == 5
+
+    def test_week_filter_bypasses_deduplication(self, client):
+        """When a week is specified, all players for that week are returned."""
+        multi_week_df = pd.DataFrame([
+            {"player_id": "00-0033873", "player_name": "Patrick Mahomes",
+             "position": "QB", "team": "KC", "week": 1, "season": 2024},
+            {"player_id": "00-0033873", "player_name": "Patrick Mahomes",
+             "position": "QB", "team": "KC", "week": 2, "season": 2024},
+            {"player_id": "00-0031280", "player_name": "Travis Kelce",
+             "position": "TE", "team": "KC", "week": 1, "season": 2024},
+        ])
+        with patch("api.players.nfl.import_weekly_rosters", return_value=multi_week_df):
+            body = client.get("/players/rosters?week=1").json()
+        assert body["total_players"] == 2
+
 
 class TestGetPlayerStats:
     def test_returns_200(self, client, sample_weekly_data_df):
@@ -98,6 +145,33 @@ class TestGetPlayerStats:
         with patch("api.players.nfl.import_weekly_data", side_effect=Exception("error")):
             response = client.get("/players/stats")
         assert response.status_code == 500
+
+    def test_returns_200_with_no_data_status_when_season_unavailable(self, client):
+        """A 404 from nfl_data_py (season not yet published) returns 200 with no_data status."""
+        with patch("api.players.nfl.import_weekly_data",
+                   side_effect=Exception("HTTP Error 404: Not Found")):
+            response = client.get("/players/stats?season=2025")
+        assert response.status_code == 200
+
+    def test_no_data_status_value(self, client):
+        with patch("api.players.nfl.import_weekly_data",
+                   side_effect=Exception("HTTP Error 404: Not Found")):
+            body = client.get("/players/stats?season=2025").json()
+        assert body["status"] == "no_data"
+
+    def test_no_data_has_empty_data_list(self, client):
+        with patch("api.players.nfl.import_weekly_data",
+                   side_effect=Exception("HTTP Error 404: Not Found")):
+            body = client.get("/players/stats?season=2025").json()
+        assert body["data"] == []
+        assert body["total_records"] == 0
+
+    def test_no_data_includes_message(self, client):
+        with patch("api.players.nfl.import_weekly_data",
+                   side_effect=Exception("HTTP Error 404: Not Found")):
+            body = client.get("/players/stats?season=2025").json()
+        assert "message" in body
+        assert "2025" in body["message"]
 
 
 class TestGetPlayerDetails:

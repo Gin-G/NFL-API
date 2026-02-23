@@ -26,16 +26,21 @@ async def get_rosters(
         season = get_current_nfl_season()
     try:
         rosters = nfl.import_weekly_rosters([season])
-        
+
         if week is not None:
             rosters = rosters[rosters['week'] == week]
-        
+        else:
+            # Without a specific week, deduplicate to show each player once
+            # (import_weekly_rosters returns one row per player per week).
+            # Sort so drop_duplicates keeps the latest week's entry.
+            rosters = rosters.sort_values('week').drop_duplicates(subset=['player_id'], keep='last')
+
         if team is not None:
             rosters = rosters[rosters['team'] == team.upper()]
-        
+
         if position is not None:
             rosters = rosters[rosters['position'] == position.upper()]
-        
+
         return {
             "status": "success",
             "season": season,
@@ -79,6 +84,17 @@ async def get_player_stats(
             "data": clean_data_for_json(stats)
         }
     except Exception as e:
+        error_str = str(e)
+        # nfl_data_py raises "HTTP Error 404: Not Found" when weekly data for a
+        # season hasn't been published yet (e.g. the current season is too new).
+        if "404" in error_str:
+            return {
+                "status": "no_data",
+                "season": season,
+                "total_records": 0,
+                "data": [],
+                "message": f"Weekly stats are not yet available for the {season} season. Try selecting an earlier year."
+            }
         logger.error(f"Error fetching player stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

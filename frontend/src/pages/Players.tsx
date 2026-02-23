@@ -60,6 +60,7 @@ function StatsPanel({ season, team, position, week }: { season: number; team?: s
 
   if (isLoading) return <div className="space-y-3">{Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} rows={3} />)}</div>
   if (error) return <ErrorCard message="Failed to load stats" onRetry={() => refetch()} />
+  if (data?.status === 'no_data') return <p className="text-slate-400 text-sm">{data.message}</p>
   if (!data?.data.length) return <p className="text-slate-400 text-sm">No stats found for these filters.</p>
 
   const stats = data.data

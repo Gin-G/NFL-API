@@ -130,6 +130,7 @@ export interface PlayerStatsResponse {
   season: number
   total_records: number
   data: PlayerStat[]
+  message?: string
 }
 
 export interface PlayerDetailResponse {
