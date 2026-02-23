@@ -18,6 +18,7 @@ on:
     paths:
       - app/**
       - frontend/**
+      - .github/workflows/**
   workflow_dispatch:
 
 jobs:
