@@ -55,19 +55,19 @@ async def get_player_stats(
     """Get player statistics with optional filters"""
     try:
         stats = nfl.import_weekly_data([season])
-        
+
         if player_id is not None:
             stats = stats[stats['player_id'] == player_id]
-        
+
         if position is not None:
             stats = stats[stats['position'] == position.upper()]
-        
+
         if team is not None:
             stats = stats[stats['recent_team'] == team.upper()]
-        
+
         if week is not None:
             stats = stats[stats['week'] == week]
-        
+
         return {
             "status": "success",
             "season": season,
@@ -76,51 +76,6 @@ async def get_player_stats(
         }
     except Exception as e:
         logger.error(f"Error fetching player stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/{player_id}")
-async def get_player_details(
-    player_id: str,
-    season: Optional[int] = Query(2023, description="Season year")
-):
-    """Get detailed information for a specific player"""
-    try:
-        # Get player stats
-        stats = nfl.import_weekly_data([season])
-        player_stats = stats[stats['player_id'] == player_id]
-        
-        # Get roster info
-        rosters = nfl.import_weekly_rosters([season])
-        player_roster = rosters[rosters['player_id'] == player_id]
-        
-        if player_stats.empty and player_roster.empty:
-            raise HTTPException(status_code=404, detail=f"Player {player_id} not found")
-        
-        # Combine data
-        player_info = {}
-        if not player_roster.empty:
-            latest_roster = player_roster.iloc[-1]
-            player_info = {
-                "player_id": player_id,
-                "player_name": latest_roster.get('player_name', 'Unknown'),
-                "position": latest_roster.get('position', 'Unknown'),
-                "team": latest_roster.get('team', 'Unknown'),
-                "height": latest_roster.get('height', None),
-                "weight": latest_roster.get('weight', None),
-                "college": latest_roster.get('college', None),
-                "rookie_year": latest_roster.get('rookie_year', None)
-            }
-        
-        return {
-            "status": "success",
-            "player_info": clean_data_for_json(player_info),
-            "season_stats": clean_data_for_json(player_stats) if not player_stats.empty else [],
-            "games_played": len(player_stats)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching player {player_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/grades")
@@ -235,4 +190,49 @@ async def get_player_grade_details(
         raise
     except Exception as e:
         logger.error(f"Error getting player grade details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{player_id}")
+async def get_player_details(
+    player_id: str,
+    season: Optional[int] = Query(2023, description="Season year")
+):
+    """Get detailed information for a specific player"""
+    try:
+        # Get player stats
+        stats = nfl.import_weekly_data([season])
+        player_stats = stats[stats['player_id'] == player_id]
+
+        # Get roster info
+        rosters = nfl.import_weekly_rosters([season])
+        player_roster = rosters[rosters['player_id'] == player_id]
+
+        if player_stats.empty and player_roster.empty:
+            raise HTTPException(status_code=404, detail=f"Player {player_id} not found")
+
+        # Combine data
+        player_info = {}
+        if not player_roster.empty:
+            latest_roster = player_roster.iloc[-1]
+            player_info = {
+                "player_id": player_id,
+                "player_name": latest_roster.get('player_name', 'Unknown'),
+                "position": latest_roster.get('position', 'Unknown'),
+                "team": latest_roster.get('team', 'Unknown'),
+                "height": latest_roster.get('height', None),
+                "weight": latest_roster.get('weight', None),
+                "college": latest_roster.get('college', None),
+                "rookie_year": latest_roster.get('rookie_year', None)
+            }
+
+        return {
+            "status": "success",
+            "player_info": clean_data_for_json(player_info),
+            "season_stats": clean_data_for_json(player_stats) if not player_stats.empty else [],
+            "games_played": len(player_stats)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching player {player_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
