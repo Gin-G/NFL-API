@@ -101,29 +101,14 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{}'
 
-  # ── 3. Wait for rollout, then smoke-test every live endpoint ──────────────
-  smoke-test:
-    name: Smoke-Test Live API
+  # ── 3. Wait for ArgoCD rollout ─────────────────────────────────────────────
+  # Isolated in its own job so that the ARGOCD_APP_NAME secret value ("nfl-api")
+  # is only registered for masking on THIS runner, not on the smoke-test runner.
+  wait-for-argo:
+    name: Wait for ArgoCD Rollout
     needs: build-and-deploy
     runs-on: ubuntu-latest
-    # IMPORTANT: API_URL is a GitHub Actions repository Variable (not a Secret).
-    # We use ${{ vars.API_URL }} inline in every run: script rather than via
-    # an env: block, because after the ArgoCD step registers ARGOCD_APP_NAME
-    # ("nfl-api") as a secret value, GitHub retroactively masks that substring
-    # in subsequent job-level env vars at runtime — making ${API_URL} resolve
-    # to the redacted string https://***.nickknows.net in the shell process.
-    # Inlining ${{ vars.API_URL }} embeds the literal URL in the shell script
-    # before the runner starts, bypassing the runtime env-var masking.
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Diagnose — curl version and API reachability
-        run: |
-          echo "curl: $(curl --version | head -1)"
-          curl -sf --max-time 15 "${{ vars.API_URL }}/health" \
-            | jq '{status, systems}'
-
       - name: Wait for ArgoCD — Synced + Healthy
         env:
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -150,6 +135,22 @@ jobs:
             echo "ERROR: App did not reach Synced/Healthy within 5 minutes"
             exit 1
           fi
+
+  # ── 4. Smoke-test every live endpoint ──────────────────────────────────────
+  # This job intentionally references NO secrets. Because each GitHub-hosted job
+  # runs on a fresh runner that only receives secrets explicitly used in that job,
+  # ARGOCD_APP_NAME ("nfl-api") is never registered for masking here — so
+  # ${{ vars.API_URL }} (https://nfl-api.nickknows.net) is never redacted.
+  smoke-test:
+    name: Smoke-Test Live API
+    needs: wait-for-argo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diagnose — curl version and API reachability
+        run: |
+          echo "curl: $(curl --version | head -1)"
+          curl -sf --max-time 15 "${{ vars.API_URL }}/health" \
+            | jq '{status, systems}'
 
       - name: GET / — root
         run: |
