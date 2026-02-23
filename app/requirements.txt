@@ -28,3 +28,4 @@ httpx==0.25.2
 # Utilities
 python-dotenv==1.0.0
 structlog==23.2.0
+aiofiles>=23.2.1  # required by fastapi StaticFiles

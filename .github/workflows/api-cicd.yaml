@@ -17,6 +17,7 @@ on:
   push:
     paths:
       - app/**
+      - frontend/**
   workflow_dispatch:
 
 jobs:
@@ -64,7 +65,7 @@ jobs:
       - name: Build and push NFL API image
         uses: docker/build-push-action@v5
         with:
-          context: app/.
+          context: .
           file: app/Dockerfile
           push: true
           tags: |
@@ -213,3 +214,8 @@ jobs:
           curl -sf --max-time 180 \
             "${{ steps.api.outputs.url }}/coaches/Andy%20Reid/grades?years=2024" \
             | jq -e '.status == "success"'
+
+      - name: GET /dashboard/ — frontend loads
+        run: |
+          curl -sf --max-time 30 "${{ steps.api.outputs.url }}/dashboard/" \
+            | grep -q '<div id="root">'

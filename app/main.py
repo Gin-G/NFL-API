@@ -6,8 +6,10 @@ Main application with modular router structure
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 import logging
+import os
 
 # Import routers
 from api.teams import router as teams_router
@@ -91,6 +93,11 @@ async def debug_info():
             "coaching_grading_file": os.path.exists("functions/coaching/grading.py")
         }
     }
+
+# Mount the React dashboard (only when the build exists)
+_dashboard_path = os.path.join(os.path.dirname(__file__), "static", "dashboard")
+if os.path.isdir(_dashboard_path):
+    app.mount("/dashboard", StaticFiles(directory=_dashboard_path, html=True), name="dashboard")
 
 if __name__ == "__main__":
     import uvicorn

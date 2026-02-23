@@ -1,3 +1,13 @@
+# ── Stage 1: Build React frontend ─────────────────────────────────────────────
+FROM node:20-alpine AS frontend-build
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install --prefer-offline
+COPY frontend/ .
+ENV VITE_API_BASE=""
+RUN npm run build
+
+# ── Stage 2: Python API ────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
 # Set environment variables
@@ -14,11 +24,14 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy requirements and install Python dependencies
-COPY requirements.txt .
+COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire application
-COPY . .
+# Copy the application source
+COPY app/ .
+
+# Copy built frontend assets
+COPY --from=frontend-build /frontend/dist/ ./static/dashboard/
 
 # Create __init__.py files for proper Python module structure
 RUN touch __init__.py && \
