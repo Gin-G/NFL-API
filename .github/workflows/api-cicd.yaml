@@ -154,9 +154,12 @@ jobs:
 
       - name: GET / — root
         run: |
-          BODY=$(curl -sf --max-time 30 "${{ vars.API_URL }}/")
-          echo "body: $BODY"
-          echo "$BODY" | jq -e '.status == "running"'
+          HTTP_CODE=$(curl -s -o /tmp/root.json -w '%{http_code}' \
+            --max-time 30 "${{ vars.API_URL }}/")
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/root.json
+          [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]
+          jq -e '.status == "running"' /tmp/root.json
 
       - name: GET /health
         run: |
