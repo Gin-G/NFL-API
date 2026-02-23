@@ -97,7 +97,8 @@ jobs:
           ARGOCD_APP_NAME: ${{ secrets.ARGOCD_APP_NAME }}
           ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
         run: |
-          SERVER="${ARGOCD_SERVER%/}"
+          SERVER="$(echo -n "${ARGOCD_SERVER}" | tr -d '[:space:]')"
+          SERVER="${SERVER%/}"
           curl --fail --silent --show-error \
             -X POST \
             "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/sync" \
