@@ -3,12 +3,13 @@ import { CheckCircle, XCircle, Users, Calendar, UserRound, Briefcase } from 'luc
 import { apiClient } from '../api/client'
 import type { HealthResponse } from '../api/types'
 import { useWeeklySchedule } from '../api/schedules'
+import { getCurrentNFLSeason, getCurrentNFLWeek } from '../utils/nflDate'
 import PageHeader from '../components/ui/PageHeader'
 import StatCard from '../components/ui/StatCard'
 import SkeletonCard from '../components/ui/SkeletonCard'
 
-const CURRENT_SEASON = 2024
-const CURRENT_WEEK = 18
+const CURRENT_SEASON = getCurrentNFLSeason()
+const CURRENT_WEEK = getCurrentNFLWeek(CURRENT_SEASON)
 
 function HealthBanner() {
   const { data, isLoading } = useQuery({

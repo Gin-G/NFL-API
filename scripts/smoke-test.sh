@@ -14,6 +14,17 @@ BASE_URL="${1:-http://localhost:8000}"
 # Prefer system curl over conda/brew shims that may have libssl warnings
 CURL=$(which -a curl 2>/dev/null | grep -v miniforge | grep -v homebrew | head -1 || echo curl)
 
+# Determine current NFL season from the real system date.
+# The season is named for the year it starts (September).
+# January–August belong to the previous year's season.
+_MONTH=$(date +%-m)  # 1-12, no leading zero
+_YEAR=$(date +%Y)
+if [ "$_MONTH" -ge 9 ]; then
+  NFL_SEASON="$_YEAR"
+else
+  NFL_SEASON=$((_YEAR - 1))
+fi
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 GREEN='\033[0;32m'
@@ -205,14 +216,14 @@ UNKNOWN_TEAM_STATUS=$(status_code "/teams/ZZZ")
 
 section "API: Schedules"
 
-SCHED=$(get "/schedules/?season=2024&week=1" 60)
+SCHED=$(get "/schedules/?season=$NFL_SEASON&week=1" 60)
 if [ -z "$SCHED" ]; then
-  fail "GET /schedules/?season=2024&week=1 — request failed"
+  fail "GET /schedules/?season=$NFL_SEASON&week=1 — request failed"
 else
   check_json "$SCHED" "assert d['status'] == 'success'" \
-    "GET /schedules/?season=2024&week=1 — status success"
+    "GET /schedules/?season=$NFL_SEASON&week=1 — status success"
   check_json "$SCHED" "assert d['total_games'] > 0" \
-    "GET /schedules/?season=2024&week=1 — total_games > 0"
+    "GET /schedules/?season=$NFL_SEASON&week=1 — total_games > 0"
   check_json "$SCHED" \
     "g=d['data'][0]; assert all(k in g for k in ('home_team','away_team','week','season'))" \
     "GET /schedules/ — game objects have required fields"
@@ -221,18 +232,18 @@ else
     "GET /schedules/?week=1 — all games are week 1"
 fi
 
-SCHED_WEEK=$(get "/schedules/2024/week/1" 60)
+SCHED_WEEK=$(get "/schedules/$NFL_SEASON/week/1" 60)
 if [ -z "$SCHED_WEEK" ]; then
-  fail "GET /schedules/2024/week/1 — request failed"
+  fail "GET /schedules/$NFL_SEASON/week/1 — request failed"
 else
-  check_json "$SCHED_WEEK" "assert d['season'] == 2024 and d['week'] == 1" \
-    "GET /schedules/2024/week/1 — season and week match path params"
+  check_json "$SCHED_WEEK" "assert d['season'] == $NFL_SEASON and d['week'] == 1" \
+    "GET /schedules/$NFL_SEASON/week/1 — season and week match path params"
   check_json "$SCHED_WEEK" "assert isinstance(d['games'], list)" \
-    "GET /schedules/2024/week/1 — games is a list"
+    "GET /schedules/$NFL_SEASON/week/1 — games is a list"
 fi
 
 # Team filter
-SCHED_KC=$(get "/schedules/?season=2024&team=KC" 60)
+SCHED_KC=$(get "/schedules/?season=$NFL_SEASON&team=KC" 60)
 if [ -n "$SCHED_KC" ]; then
   check_json "$SCHED_KC" \
     "games=d['data']; assert all(g.get('home_team')=='KC' or g.get('away_team')=='KC' for g in games)" \
@@ -243,9 +254,9 @@ fi
 
 section "API: Players"
 
-ROSTER=$(get "/players/rosters?season=2024&team=KC" 60)
+ROSTER=$(get "/players/rosters?season=$NFL_SEASON&team=KC" 60)
 if [ -z "$ROSTER" ]; then
-  fail "GET /players/rosters?season=2024&team=KC — request failed"
+  fail "GET /players/rosters?season=$NFL_SEASON&team=KC — request failed"
 else
   check_json "$ROSTER" "assert d['status'] == 'success'" \
     "GET /players/rosters — status success"
@@ -259,14 +270,14 @@ else
     "GET /players/rosters?team=KC — all players are on KC"
 fi
 
-STATS=$(get "/players/stats?season=2024&position=QB&week=1" 60)
+STATS=$(get "/players/stats?season=$NFL_SEASON&position=QB&week=1" 60)
 if [ -z "$STATS" ]; then
-  fail "GET /players/stats?season=2024&position=QB&week=1 — request failed"
+  fail "GET /players/stats?season=$NFL_SEASON&position=QB&week=1 — request failed"
 else
   check_json "$STATS" "assert d['status'] == 'success'" \
     "GET /players/stats — status success"
   check_json "$STATS" "assert d['total_records'] > 0" \
-    "GET /players/stats?season=2024&position=QB&week=1 — total_records > 0"
+    "GET /players/stats?season=$NFL_SEASON&position=QB&week=1 — total_records > 0"
   check_json "$STATS" \
     "p=d['data'][0]; assert all(k in p for k in ('player_id','player_name','season','week'))" \
     "GET /players/stats — stat records have required fields"
@@ -275,7 +286,7 @@ else
     "GET /players/stats?position=QB — all records are QBs"
 fi
 
-MAHOMES=$(get "/players/00-0033873?season=2024" 60)
+MAHOMES=$(get "/players/00-0033873?season=$NFL_SEASON" 60)
 if [ -z "$MAHOMES" ]; then
   fail "GET /players/00-0033873 — request failed"
 else
@@ -291,9 +302,9 @@ fi
 
 section "API: Coaches"
 
-COACHES=$(get "/coaches/?years=2024" 180)
+COACHES=$(get "/coaches/?years=$NFL_SEASON" 180)
 if [ -z "$COACHES" ]; then
-  fail "GET /coaches/?years=2024 — request failed"
+  fail "GET /coaches/?years=$NFL_SEASON — request failed"
 else
   check_json "$COACHES" "assert d['status'] == 'success'" \
     "GET /coaches/ — status success"
@@ -307,7 +318,7 @@ else
     "GET /coaches/ — season records have all required fields"
 fi
 
-ANALYSIS=$(get "/coaches/Andy%20Reid/analysis?years=2024" 180)
+ANALYSIS=$(get "/coaches/Andy%20Reid/analysis?years=$NFL_SEASON" 180)
 if [ -z "$ANALYSIS" ]; then
   fail "GET /coaches/Andy Reid/analysis — request failed"
 else
@@ -321,7 +332,7 @@ else
     "GET /coaches/Andy Reid/analysis — seasons list is non-empty"
 fi
 
-GRADES=$(get "/coaches/Andy%20Reid/grades?years=2024" 180)
+GRADES=$(get "/coaches/Andy%20Reid/grades?years=$NFL_SEASON" 180)
 if [ -z "$GRADES" ]; then
   fail "GET /coaches/Andy Reid/grades — request failed"
 else
@@ -337,7 +348,7 @@ else
     "GET /coaches/Andy Reid/grades — win_letter_grade is a valid letter grade"
 fi
 
-UNKNOWN_COACH_STATUS=$(status_code "/coaches/Nobody%20Here/grades?years=2024" 30)
+UNKNOWN_COACH_STATUS=$(status_code "/coaches/Nobody%20Here/grades?years=$NFL_SEASON" 30)
 [ "$UNKNOWN_COACH_STATUS" = "404" ] \
   && pass "GET /coaches/Nobody Here/grades — 404 for unknown coach" \
   || fail "GET /coaches/Nobody Here/grades — expected 404, got $UNKNOWN_COACH_STATUS"

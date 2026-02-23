@@ -8,18 +8,20 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 import nfl_data_py as nfl
 import logging
-from .utils import clean_data_for_json
+from .utils import clean_data_for_json, get_current_nfl_season
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/")
 async def get_schedules(
-    season: Optional[int] = Query(2023, description="Season year"),
+    season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)"),
     week: Optional[int] = Query(None, description="Specific week"),
     team: Optional[str] = Query(None, description="Team abbreviation")
 ):
     """Get NFL schedules with optional filters"""
+    if season is None:
+        season = get_current_nfl_season()
     try:
         schedules = nfl.import_schedules([season])
         

@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useSchedules } from '../api/schedules'
+import { getAvailableSeasons, getCurrentNFLSeason, getCurrentNFLWeek } from '../utils/nflDate'
 import type { Game } from '../api/types'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
 import ErrorCard from '../components/ui/ErrorCard'
 
-const SEASONS = [2020, 2021, 2022, 2023, 2024]
+const SEASONS = getAvailableSeasons()
 const MAX_WEEKS = 18
 
 function GameCard({ game }: { game: Game }) {
@@ -51,8 +52,9 @@ function GameCard({ game }: { game: Game }) {
 }
 
 export default function Schedule() {
-  const [season, setSeason] = useState(2024)
-  const [week, setWeek] = useState(1)
+  const defaultSeason = getCurrentNFLSeason()
+  const [season, setSeason] = useState(defaultSeason)
+  const [week, setWeek] = useState(getCurrentNFLWeek(defaultSeason))
 
   const { data, isLoading, error, refetch } = useSchedules(season, week)
 

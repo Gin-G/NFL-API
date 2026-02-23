@@ -7,8 +7,26 @@ Shared functions and utilities for the NFL API
 import pandas as pd
 import numpy as np
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+def get_current_nfl_season() -> int:
+    """Return the year of the current or most recently completed NFL season.
+
+    The NFL season is named for the year it starts (September).
+    January–August refer to the previous year's season (playoffs / off-season).
+
+    Examples
+    --------
+    Called on 2026-02-23  → 2025  (2025 season playoffs/Super Bowl window)
+    Called on 2026-09-10  → 2026  (2026 season has just kicked off)
+    Called on 2027-03-01  → 2026  (2026 season is complete, off-season)
+    """
+    now = datetime.now()
+    return now.year if now.month >= 9 else now.year - 1
+
 
 def clean_data_for_json(data):
     """Clean data to make it JSON serializable - simplified reliable version"""

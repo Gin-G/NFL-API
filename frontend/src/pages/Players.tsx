@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useRosters, usePlayerStats } from '../api/players'
+import { getAvailableSeasons, getCurrentNFLSeason } from '../utils/nflDate'
 import type { RosterPlayer, PlayerStat } from '../api/types'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
 import ErrorCard from '../components/ui/ErrorCard'
 import StatBarChart from '../components/charts/StatBarChart'
 
-const SEASONS = [2020, 2021, 2022, 2023, 2024]
+const SEASONS = getAvailableSeasons()
 const POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DT', 'DE', 'LB', 'CB', 'S']
 
 type Tab = 'roster' | 'stats'
@@ -94,7 +95,7 @@ function StatsPanel({ season, team, position, week }: { season: number; team?: s
 
 export default function Players() {
   const [tab, setTab] = useState<Tab>('roster')
-  const [season, setSeason] = useState(2024)
+  const [season, setSeason] = useState(getCurrentNFLSeason())
   const [team, setTeam] = useState('')
   const [position, setPosition] = useState('')
   const [week, setWeek] = useState<number | undefined>(undefined)

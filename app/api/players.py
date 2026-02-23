@@ -9,19 +9,21 @@ from typing import List, Optional
 import nfl_data_py as nfl
 import pandas as pd
 import logging
-from .utils import clean_data_for_json, get_player_grader, check_grading_systems
+from .utils import clean_data_for_json, get_player_grader, check_grading_systems, get_current_nfl_season
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/rosters")
 async def get_rosters(
-    season: Optional[int] = Query(2023, description="Season year"),
+    season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)"),
     week: Optional[int] = Query(None, description="Specific week"),
     team: Optional[str] = Query(None, description="Team abbreviation"),
     position: Optional[str] = Query(None, description="Player position")
 ):
     """Get player rosters with optional filters"""
+    if season is None:
+        season = get_current_nfl_season()
     try:
         rosters = nfl.import_weekly_rosters([season])
         
@@ -46,13 +48,15 @@ async def get_rosters(
 
 @router.get("/stats")
 async def get_player_stats(
-    season: Optional[int] = Query(2023, description="Season year"),
+    season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)"),
     player_id: Optional[str] = Query(None, description="Specific player ID"),
     position: Optional[str] = Query(None, description="Player position"),
     team: Optional[str] = Query(None, description="Team abbreviation"),
     week: Optional[int] = Query(None, description="Specific week")
 ):
     """Get player statistics with optional filters"""
+    if season is None:
+        season = get_current_nfl_season()
     try:
         stats = nfl.import_weekly_data([season])
 
@@ -80,15 +84,17 @@ async def get_player_stats(
 
 @router.get("/grades")
 async def get_player_grades(
-    years: List[int] = Query([2023], description="Years to analyze"),
+    years: Optional[List[int]] = Query(None, description="Years to analyze (defaults to current NFL season)"),
     min_games: int = Query(3, description="Minimum games played"),
     limit: int = Query(20, description="Maximum results to return")
 ):
     """Get player performance grades"""
+    if years is None:
+        years = [get_current_nfl_season()]
     systems = check_grading_systems()
     if not systems["player_grading"]:
         raise HTTPException(status_code=503, detail="Player grading system not available")
-    
+
     try:
         grader = get_player_grader(years)
         all_grades = grader.calculate_all_grades(min_games=min_games)
@@ -140,14 +146,16 @@ async def get_player_grades(
 @router.get("/grades/{player_name}")
 async def get_player_grade_details(
     player_name: str,
-    years: List[int] = Query([2023], description="Years to analyze"),
+    years: Optional[List[int]] = Query(None, description="Years to analyze (defaults to current NFL season)"),
     min_games: int = Query(1, description="Minimum games played")
 ):
     """Get detailed grade information for a specific player"""
+    if years is None:
+        years = [get_current_nfl_season()]
     systems = check_grading_systems()
     if not systems["player_grading"]:
         raise HTTPException(status_code=503, detail="Player grading system not available")
-    
+
     try:
         grader = get_player_grader(years)
         all_grades = grader.calculate_all_grades(min_games=min_games)
@@ -195,9 +203,11 @@ async def get_player_grade_details(
 @router.get("/{player_id}")
 async def get_player_details(
     player_id: str,
-    season: Optional[int] = Query(2023, description="Season year")
+    season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)")
 ):
     """Get detailed information for a specific player"""
+    if season is None:
+        season = get_current_nfl_season()
     try:
         # Get player stats
         stats = nfl.import_weekly_data([season])

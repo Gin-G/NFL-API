@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useCoaches, useCoachAnalysis, useCoachGrades } from '../api/coaches'
+import { getCurrentNFLSeason } from '../utils/nflDate'
 import type { Coach } from '../api/types'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
@@ -8,7 +9,7 @@ import GradeBadge from '../components/ui/GradeBadge'
 import WinPctBarChart from '../components/charts/WinPctBarChart'
 import { X, TrendingUp } from 'lucide-react'
 
-const DEFAULT_YEARS = [2024]
+const DEFAULT_YEARS = [getCurrentNFLSeason()]
 
 function CoachDetailPanel({
   coachName,

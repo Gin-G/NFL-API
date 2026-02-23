@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiClient } from './client'
+import { getCurrentNFLSeason } from '../utils/nflDate'
 import type {
   RostersResponse,
   PlayerStatsResponse,
@@ -57,7 +58,7 @@ export function usePlayerDetail(playerId: string, season: number) {
   })
 }
 
-export function usePlayerGrades(years: number[] = [2024], minGames = 3, limit = 20) {
+export function usePlayerGrades(years: number[] = [getCurrentNFLSeason()], minGames = 3, limit = 20) {
   return useQuery({
     queryKey: ['playerGrades', years, minGames, limit],
     queryFn: async () => {

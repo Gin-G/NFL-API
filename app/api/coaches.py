@@ -7,7 +7,7 @@ Handles all coach-related endpoints including grading
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
 import logging
-from .utils import clean_data_for_json, get_coaching_analytics, check_grading_systems
+from .utils import clean_data_for_json, get_coaching_analytics, check_grading_systems, get_current_nfl_season
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,9 +37,11 @@ def _get_coach_season_data(analytics, coach_name, season=None):
 @router.get("/")
 async def get_coaches(
     season: Optional[int] = Query(None, description="Filter by season"),
-    years: List[int] = Query([2023, 2024], description="Years to load data for"),
+    years: Optional[List[int]] = Query(None, description="Years to load data for (defaults to current NFL season)"),
 ):
     """Get all available coaches"""
+    if years is None:
+        years = [get_current_nfl_season()]
     systems = check_grading_systems()
     if not systems["coaching_analytics"]:
         raise HTTPException(status_code=503, detail="Coaching analytics system not available")
@@ -67,9 +69,11 @@ async def get_coaches(
 async def get_coach_analysis(
     coach_name: str,
     season: Optional[int] = Query(None, description="Specific season"),
-    years: List[int] = Query([2023, 2024], description="Years to load data for"),
+    years: Optional[List[int]] = Query(None, description="Years to load data for (defaults to current NFL season)"),
 ):
     """Get comprehensive coaching analysis including roster quality breakdown"""
+    if years is None:
+        years = [get_current_nfl_season()]
     systems = check_grading_systems()
     if not systems["coaching_analytics"]:
         raise HTTPException(status_code=503, detail="Coaching analytics system not available")
@@ -124,9 +128,11 @@ async def get_coach_analysis(
 async def get_coach_grades(
     coach_name: str,
     season: Optional[int] = Query(None, description="Specific season"),
-    years: List[int] = Query([2023, 2024], description="Years to load data for"),
+    years: Optional[List[int]] = Query(None, description="Years to load data for (defaults to current NFL season)"),
 ):
     """Get coaching performance grades derived from win rate and roster quality"""
+    if years is None:
+        years = [get_current_nfl_season()]
     systems = check_grading_systems()
     if not systems["coaching_analytics"]:
         raise HTTPException(status_code=503, detail="Coaching analytics system not available")
@@ -193,9 +199,11 @@ async def get_coach_grades(
 async def compare_coaches(
     coach_names: List[str],
     season: Optional[int] = Query(None, description="Specific season"),
-    years: List[int] = Query([2023, 2024], description="Years to load data for"),
+    years: Optional[List[int]] = Query(None, description="Years to load data for (defaults to current NFL season)"),
 ):
     """Compare multiple coaches side by side"""
+    if years is None:
+        years = [get_current_nfl_season()]
     systems = check_grading_systems()
     if not systems["coaching_analytics"]:
         raise HTTPException(status_code=503, detail="Coaching analytics system not available")

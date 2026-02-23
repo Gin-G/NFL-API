@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiClient } from './client'
+import { getCurrentNFLSeason } from '../utils/nflDate'
 import type {
   CoachesResponse,
   CoachAnalysisResponse,
@@ -13,7 +14,7 @@ function yearsParams(years: number[]) {
   return p.toString()
 }
 
-export function useCoaches(years: number[] = [2024], season?: number) {
+export function useCoaches(years: number[] = [getCurrentNFLSeason()], season?: number) {
   return useQuery({
     queryKey: ['coaches', years, season],
     queryFn: async () => {
@@ -26,7 +27,7 @@ export function useCoaches(years: number[] = [2024], season?: number) {
   })
 }
 
-export function useCoachAnalysis(coachName: string, years: number[] = [2024], season?: number) {
+export function useCoachAnalysis(coachName: string, years: number[] = [getCurrentNFLSeason()], season?: number) {
   return useQuery({
     queryKey: ['coachAnalysis', coachName, years, season],
     queryFn: async () => {
@@ -40,7 +41,7 @@ export function useCoachAnalysis(coachName: string, years: number[] = [2024], se
   })
 }
 
-export function useCoachGrades(coachName: string, years: number[] = [2024], season?: number) {
+export function useCoachGrades(coachName: string, years: number[] = [getCurrentNFLSeason()], season?: number) {
   return useQuery({
     queryKey: ['coachGrades', coachName, years, season],
     queryFn: async () => {
@@ -54,7 +55,7 @@ export function useCoachGrades(coachName: string, years: number[] = [2024], seas
   })
 }
 
-export function useCoachCompare(coachNames: string[], years: number[] = [2024], season?: number) {
+export function useCoachCompare(coachNames: string[], years: number[] = [getCurrentNFLSeason()], season?: number) {
   return useQuery({
     queryKey: ['coachCompare', coachNames, years, season],
     queryFn: async () => {
