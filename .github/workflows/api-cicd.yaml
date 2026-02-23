@@ -106,24 +106,23 @@ jobs:
     name: Smoke-Test Live API
     needs: build-and-deploy
     runs-on: ubuntu-latest
-    # API_URL comes from a GitHub Actions repository Variable (Settings →
-    # Variables → Repository variables → API_URL = https://nfl-api.nickknows.net).
-    # Variables are never secret-masked, unlike Secrets. Using a Secret for the
-    # URL causes GitHub to redact the substring matching ARGOCD_APP_NAME inside
-    # the env var value, producing an unusable masked URL at runtime.
-    env:
-      API_URL: ${{ vars.API_URL }}
+    # IMPORTANT: API_URL is a GitHub Actions repository Variable (not a Secret).
+    # We use ${{ vars.API_URL }} inline in every run: script rather than via
+    # an env: block, because after the ArgoCD step registers ARGOCD_APP_NAME
+    # ("nfl-api") as a secret value, GitHub retroactively masks that substring
+    # in subsequent job-level env vars at runtime — making ${API_URL} resolve
+    # to the redacted string https://***.nickknows.net in the shell process.
+    # Inlining ${{ vars.API_URL }} embeds the literal URL in the shell script
+    # before the runner starts, bypassing the runtime env-var masking.
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Diagnose — URL and connectivity
+      - name: Diagnose — curl version and API reachability
         run: |
           echo "curl: $(curl --version | head -1)"
-          echo "API_URL length: ${#API_URL}"
-          curl -sf --max-time 15 "${API_URL}/health" \
-            | jq '{status, systems}' \
-            || { echo "Health check failed — API_URL may be unset or unreachable"; exit 1; }
+          curl -sf --max-time 15 "${{ vars.API_URL }}/health" \
+            | jq '{status, systems}'
 
       - name: Wait for ArgoCD — Synced + Healthy
         env:
@@ -154,30 +153,30 @@ jobs:
 
       - name: GET / — root
         run: |
-          curl -sf --max-time 30 "${API_URL}/" \
+          curl -sf --max-time 30 "${{ vars.API_URL }}/" \
             | jq -e '.status == "running"'
 
       - name: GET /health
         run: |
-          curl -sf --max-time 30 "${API_URL}/health" \
+          curl -sf --max-time 30 "${{ vars.API_URL }}/health" \
             | jq -e '.status == "healthy"'
 
       - name: GET /teams/ — list
         run: |
-          TOTAL=$(curl -sf --max-time 30 "${API_URL}/teams/" \
+          TOTAL=$(curl -sf --max-time 30 "${{ vars.API_URL }}/teams/" \
             | jq '.total_teams')
           echo "Total teams: $TOTAL"
           [ "$TOTAL" -gt 0 ]
 
       - name: GET /teams/KC — detail
         run: |
-          curl -sf --max-time 30 "${API_URL}/teams/KC" \
+          curl -sf --max-time 30 "${{ vars.API_URL }}/teams/KC" \
             | jq -e '.data.team_abbr == "KC"'
 
       - name: GET /schedules/?season=2024&week=1
         run: |
           TOTAL=$(curl -sf --max-time 60 \
-            "${API_URL}/schedules/?season=2024&week=1" \
+            "${{ vars.API_URL }}/schedules/?season=2024&week=1" \
             | jq '.total_games')
           echo "Games (2024 wk 1): $TOTAL"
           [ "$TOTAL" -gt 0 ]
@@ -185,7 +184,7 @@ jobs:
       - name: GET /players/rosters?season=2024&team=KC
         run: |
           TOTAL=$(curl -sf --max-time 60 \
-            "${API_URL}/players/rosters?season=2024&team=KC" \
+            "${{ vars.API_URL }}/players/rosters?season=2024&team=KC" \
             | jq '.total_players')
           echo "KC roster players: $TOTAL"
           [ "$TOTAL" -gt 0 ]
@@ -193,7 +192,7 @@ jobs:
       - name: GET /players/stats?season=2024&position=QB&week=1
         run: |
           TOTAL=$(curl -sf --max-time 60 \
-            "${API_URL}/players/stats?season=2024&position=QB&week=1" \
+            "${{ vars.API_URL }}/players/stats?season=2024&position=QB&week=1" \
             | jq '.total_records')
           echo "QB week 1 records: $TOTAL"
           [ "$TOTAL" -gt 0 ]
@@ -201,13 +200,13 @@ jobs:
       - name: GET /players/00-0033873 — Mahomes
         run: |
           curl -sf --max-time 60 \
-            "${API_URL}/players/00-0033873?season=2024" \
+            "${{ vars.API_URL }}/players/00-0033873?season=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /coaches/?years=2024
         run: |
           TOTAL=$(curl -sf --max-time 180 \
-            "${API_URL}/coaches/?years=2024" \
+            "${{ vars.API_URL }}/coaches/?years=2024" \
             | jq '.total_coaches')
           echo "Coaches 2024: $TOTAL"
           [ "$TOTAL" -gt 0 ]
@@ -215,16 +214,16 @@ jobs:
       - name: GET /coaches/Andy Reid/analysis?years=2024
         run: |
           curl -sf --max-time 180 \
-            "${API_URL}/coaches/Andy%20Reid/analysis?years=2024" \
+            "${{ vars.API_URL }}/coaches/Andy%20Reid/analysis?years=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /coaches/Andy Reid/grades?years=2024
         run: |
           curl -sf --max-time 180 \
-            "${API_URL}/coaches/Andy%20Reid/grades?years=2024" \
+            "${{ vars.API_URL }}/coaches/Andy%20Reid/grades?years=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /dashboard/ — frontend loads
         run: |
-          curl -sf --max-time 30 "${API_URL}/dashboard/" \
+          curl -sf --max-time 30 "${{ vars.API_URL }}/dashboard/" \
             | grep -q '<div id="root">'
