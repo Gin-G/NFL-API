@@ -5,6 +5,6 @@ webapp:
   path: /
   replicaCount: 1
   container: 
-    image: docker.io/ncging/nfl-api:2026-02-23.19.58
+    image: docker.io/ncging/nfl-api:2026-02-23.21.08
     imagePullPolicy: Always
     port: 8000
