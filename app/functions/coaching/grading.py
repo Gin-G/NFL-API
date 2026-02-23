@@ -7,6 +7,7 @@ Updated to use nflreadpy instead of nfl_data_py
 import pandas as pd
 import numpy as np
 import nflreadpy as nfl
+import nfl_data_py as nfl_dp
 from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
@@ -46,14 +47,12 @@ class RosterAwareCoachingAnalytics:
         if pbp_list:
             self.pbp_data = pd.concat(pbp_list, ignore_index=True)
         
-        # Load schedule data using new API
+        # Load schedule data using nfl_data_py (returns pandas directly, more reliable)
         print("- Loading schedule data...")
         schedule_list = []
         for year in self.years:
             try:
-                # load_schedules() replaces import_schedules()
-                # Convert Polars to Pandas
-                year_schedule = nfl.load_schedules(seasons=[year]).to_pandas()
+                year_schedule = nfl_dp.import_schedules([year])
                 schedule_list.append(year_schedule)
                 print(f"  - {year}: {len(year_schedule)} games loaded")
             except Exception as e:

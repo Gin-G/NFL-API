@@ -105,16 +105,13 @@ jobs:
     name: Smoke-Test Live API
     needs: build-and-deploy
     runs-on: ubuntu-latest
+    env:
+      # Derived from helm/nfl-api/values.yaml fqdn — not stored as a secret so
+      # it won't be masked in $GITHUB_OUTPUT and can be used safely in curl.
+      API_URL: https://nfl-api.nickknows.net
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Derive API base URL from Helm values
-        id: api
-        run: |
-          FQDN=$(grep 'fqdn:' helm/nfl-api/values.yaml | awk '{print $2}' | tr -d '[:space:]')
-          echo "url=https://${FQDN}" >> $GITHUB_OUTPUT
-          echo "API URL: https://${FQDN}"
 
       - name: Wait for ArgoCD — Synced + Healthy
         env:
@@ -145,30 +142,30 @@ jobs:
 
       - name: GET / — root
         run: |
-          curl -sf --max-time 30 "${{ steps.api.outputs.url }}/" \
-            | jq -e '.status == "ok"'
+          curl -sf --max-time 30 "${API_URL}/" \
+            | jq -e '.status == "running"'
 
       - name: GET /health
         run: |
-          curl -sf --max-time 30 "${{ steps.api.outputs.url }}/health" \
+          curl -sf --max-time 30 "${API_URL}/health" \
             | jq -e '.status == "healthy"'
 
       - name: GET /teams/ — list
         run: |
-          TOTAL=$(curl -sf --max-time 30 "${{ steps.api.outputs.url }}/teams/" \
+          TOTAL=$(curl -sf --max-time 30 "${API_URL}/teams/" \
             | jq '.total_teams')
           echo "Total teams: $TOTAL"
           [ "$TOTAL" -gt 0 ]
 
       - name: GET /teams/KC — detail
         run: |
-          curl -sf --max-time 30 "${{ steps.api.outputs.url }}/teams/KC" \
-            | jq -e '.team_abbr == "KC"'
+          curl -sf --max-time 30 "${API_URL}/teams/KC" \
+            | jq -e '.data.team_abbr == "KC"'
 
       - name: GET /schedules/?season=2024&week=1
         run: |
           TOTAL=$(curl -sf --max-time 60 \
-            "${{ steps.api.outputs.url }}/schedules/?season=2024&week=1" \
+            "${API_URL}/schedules/?season=2024&week=1" \
             | jq '.total_games')
           echo "Games (2024 wk 1): $TOTAL"
           [ "$TOTAL" -gt 0 ]
@@ -176,7 +173,7 @@ jobs:
       - name: GET /players/rosters?season=2024&team=KC
         run: |
           TOTAL=$(curl -sf --max-time 60 \
-            "${{ steps.api.outputs.url }}/players/rosters?season=2024&team=KC" \
+            "${API_URL}/players/rosters?season=2024&team=KC" \
             | jq '.total_players')
           echo "KC roster players: $TOTAL"
           [ "$TOTAL" -gt 0 ]
@@ -184,7 +181,7 @@ jobs:
       - name: GET /players/stats?season=2024&position=QB&week=1
         run: |
           TOTAL=$(curl -sf --max-time 60 \
-            "${{ steps.api.outputs.url }}/players/stats?season=2024&position=QB&week=1" \
+            "${API_URL}/players/stats?season=2024&position=QB&week=1" \
             | jq '.total_records')
           echo "QB week 1 records: $TOTAL"
           [ "$TOTAL" -gt 0 ]
@@ -192,13 +189,13 @@ jobs:
       - name: GET /players/00-0033873 — Mahomes
         run: |
           curl -sf --max-time 60 \
-            "${{ steps.api.outputs.url }}/players/00-0033873?season=2024" \
+            "${API_URL}/players/00-0033873?season=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /coaches/?years=2024
         run: |
           TOTAL=$(curl -sf --max-time 180 \
-            "${{ steps.api.outputs.url }}/coaches/?years=2024" \
+            "${API_URL}/coaches/?years=2024" \
             | jq '.total_coaches')
           echo "Coaches 2024: $TOTAL"
           [ "$TOTAL" -gt 0 ]
@@ -206,16 +203,16 @@ jobs:
       - name: GET /coaches/Andy Reid/analysis?years=2024
         run: |
           curl -sf --max-time 180 \
-            "${{ steps.api.outputs.url }}/coaches/Andy%20Reid/analysis?years=2024" \
+            "${API_URL}/coaches/Andy%20Reid/analysis?years=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /coaches/Andy Reid/grades?years=2024
         run: |
           curl -sf --max-time 180 \
-            "${{ steps.api.outputs.url }}/coaches/Andy%20Reid/grades?years=2024" \
+            "${API_URL}/coaches/Andy%20Reid/grades?years=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /dashboard/ — frontend loads
         run: |
-          curl -sf --max-time 30 "${{ steps.api.outputs.url }}/dashboard/" \
+          curl -sf --max-time 30 "${API_URL}/dashboard/" \
             | grep -q '<div id="root">'
