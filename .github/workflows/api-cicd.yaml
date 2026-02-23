@@ -1,5 +1,6 @@
 # Runs tests, builds and pushes a container image for FastAPI, updates the Helm
-# chart, and triggers an ArgoCD sync so changes go live immediately.
+# chart, triggers an ArgoCD sync so changes go live, then smoke-tests all
+# endpoints against the running deployment.
 #
 # Required GitHub secrets:
 #   DOCKERHUB_USERNAME   - DockerHub login
@@ -7,6 +8,8 @@
 #   ARGOCD_SERVER        - ArgoCD base URL, e.g. https://argocd.nickknows.net
 #   ARGOCD_APP_NAME      - ArgoCD application name, e.g. nfl-api
 #   ARGOCD_TOKEN         - ArgoCD API token (Settings → Accounts → Generate Token)
+#
+# The live API URL is derived automatically from helm/nfl-api/values.yaml (fqdn field).
 
 name: NFL API CI/CD
 
@@ -95,3 +98,118 @@ jobs:
             -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{}'
+
+  # ── 3. Wait for rollout, then smoke-test every live endpoint ──────────────
+  smoke-test:
+    name: Smoke-Test Live API
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive API base URL from Helm values
+        id: api
+        run: |
+          FQDN=$(grep 'fqdn:' helm/nfl-api/values.yaml | awk '{print $2}' | tr -d '[:space:]')
+          echo "url=https://${FQDN}" >> $GITHUB_OUTPUT
+          echo "API URL: https://${FQDN}"
+
+      - name: Wait for ArgoCD — Synced + Healthy
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_APP_NAME: ${{ secrets.ARGOCD_APP_NAME }}
+          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+        run: |
+          SERVER="$(echo -n "${ARGOCD_SERVER}" | tr -d '[:space:]')"
+          SERVER="${SERVER%/}"
+          echo "Giving ArgoCD 15 s to start the rollout..."
+          sleep 15
+          echo "Polling ArgoCD for Synced/Healthy (max 5 min)..."
+          STATUS="unknown/unknown"
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf \
+              -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
+              "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}" \
+              | jq -r '(.status.sync.status) + "/" + (.status.health.status)' 2>/dev/null \
+              || echo "unknown/unknown")
+            echo "  [$i/30] $STATUS"
+            [ "$STATUS" = "Synced/Healthy" ] && { echo "App is live!"; break; }
+            sleep 10
+          done
+          if [ "$STATUS" != "Synced/Healthy" ]; then
+            echo "ERROR: App did not reach Synced/Healthy within 5 minutes"
+            exit 1
+          fi
+
+      - name: GET / — root
+        run: |
+          curl -sf --max-time 30 "${{ steps.api.outputs.url }}/" \
+            | jq -e '.status == "ok"'
+
+      - name: GET /health
+        run: |
+          curl -sf --max-time 30 "${{ steps.api.outputs.url }}/health" \
+            | jq -e '.status == "healthy"'
+
+      - name: GET /teams/ — list
+        run: |
+          TOTAL=$(curl -sf --max-time 30 "${{ steps.api.outputs.url }}/teams/" \
+            | jq '.total_teams')
+          echo "Total teams: $TOTAL"
+          [ "$TOTAL" -gt 0 ]
+
+      - name: GET /teams/KC — detail
+        run: |
+          curl -sf --max-time 30 "${{ steps.api.outputs.url }}/teams/KC" \
+            | jq -e '.team_abbr == "KC"'
+
+      - name: GET /schedules/?season=2024&week=1
+        run: |
+          TOTAL=$(curl -sf --max-time 60 \
+            "${{ steps.api.outputs.url }}/schedules/?season=2024&week=1" \
+            | jq '.total_games')
+          echo "Games (2024 wk 1): $TOTAL"
+          [ "$TOTAL" -gt 0 ]
+
+      - name: GET /players/rosters?season=2024&team=KC
+        run: |
+          TOTAL=$(curl -sf --max-time 60 \
+            "${{ steps.api.outputs.url }}/players/rosters?season=2024&team=KC" \
+            | jq '.total_players')
+          echo "KC roster players: $TOTAL"
+          [ "$TOTAL" -gt 0 ]
+
+      - name: GET /players/stats?season=2024&position=QB&week=1
+        run: |
+          TOTAL=$(curl -sf --max-time 60 \
+            "${{ steps.api.outputs.url }}/players/stats?season=2024&position=QB&week=1" \
+            | jq '.total_records')
+          echo "QB week 1 records: $TOTAL"
+          [ "$TOTAL" -gt 0 ]
+
+      - name: GET /players/00-0033873 — Mahomes
+        run: |
+          curl -sf --max-time 60 \
+            "${{ steps.api.outputs.url }}/players/00-0033873?season=2024" \
+            | jq -e '.status == "success"'
+
+      - name: GET /coaches/?years=2024
+        run: |
+          TOTAL=$(curl -sf --max-time 180 \
+            "${{ steps.api.outputs.url }}/coaches/?years=2024" \
+            | jq '.total_coaches')
+          echo "Coaches 2024: $TOTAL"
+          [ "$TOTAL" -gt 0 ]
+
+      - name: GET /coaches/Andy Reid/analysis?years=2024
+        run: |
+          curl -sf --max-time 180 \
+            "${{ steps.api.outputs.url }}/coaches/Andy%20Reid/analysis?years=2024" \
+            | jq -e '.status == "success"'
+
+      - name: GET /coaches/Andy Reid/grades?years=2024
+        run: |
+          curl -sf --max-time 180 \
+            "${{ steps.api.outputs.url }}/coaches/Andy%20Reid/grades?years=2024" \
+            | jq -e '.status == "success"'
