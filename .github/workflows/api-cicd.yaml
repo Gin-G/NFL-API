@@ -154,8 +154,9 @@ jobs:
 
       - name: GET / — root
         run: |
-          curl -sf --max-time 30 "${{ vars.API_URL }}/" \
-            | jq -e '.status == "running"'
+          BODY=$(curl -sf --max-time 30 "${{ vars.API_URL }}/")
+          echo "body: $BODY"
+          echo "$BODY" | jq -e '.status == "running"'
 
       - name: GET /health
         run: |
