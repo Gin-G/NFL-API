@@ -7,6 +7,9 @@ Main application with modular router structure
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Scope
 from datetime import datetime
 import logging
 import os
@@ -94,10 +97,28 @@ async def debug_info():
         }
     }
 
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles that falls back to index.html for React Router deep links.
+
+    Paths without a file extension (e.g. /dashboard/teams) are treated as
+    client-side routes and served with index.html. Paths that look like
+    asset requests but are missing (e.g. /dashboard/assets/gone.js) still
+    return 404 so the browser is not silently handed wrong content.
+    """
+
+    async def get_response(self, path: str, scope: Scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404 and "." not in path.rsplit("/", 1)[-1]:
+                return await super().get_response("index.html", scope)
+            raise
+
+
 # Mount the React dashboard (only when the build exists)
 _dashboard_path = os.path.join(os.path.dirname(__file__), "static", "dashboard")
 if os.path.isdir(_dashboard_path):
-    app.mount("/dashboard", StaticFiles(directory=_dashboard_path, html=True), name="dashboard")
+    app.mount("/dashboard", SPAStaticFiles(directory=_dashboard_path, html=True), name="dashboard")
 
 if __name__ == "__main__":
     import uvicorn
