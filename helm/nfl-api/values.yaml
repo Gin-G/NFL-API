@@ -4,7 +4,15 @@ webapp:
   fqdn: nfl-api.nickknows.net
   path: /
   replicaCount: 1
-  container: 
+  container:
     image: docker.io/ncging/nfl-api:2026-02-24.17.03
     imagePullPolicy: Always
     port: 8000
+    env:
+      - name: ANTHROPIC_API_KEY
+        secretName: nfl-api-secrets
+        secretKey: ANTHROPIC_API_KEY
+  secrets:
+    path: nfl-api
+    anthropicKeyProperty: anthropic_api_key
+    targetSecret: nfl-api-secrets

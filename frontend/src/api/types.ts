@@ -251,6 +251,18 @@ export interface TeamStaffResponse {
   data: StaffMember[]
 }
 
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface ChatResponse {
+  response: string
+  history: ChatMessage[]
+}
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 export interface HealthResponse {

@@ -19,6 +19,7 @@ from api.teams import router as teams_router
 from api.schedules import router as schedules_router
 from api.players import router as players_router
 from api.coaches import router as coaches_router
+from api.chat import router as chat_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +46,7 @@ app.include_router(teams_router, prefix="/teams", tags=["teams"])
 app.include_router(schedules_router, prefix="/schedules", tags=["schedules"])
 app.include_router(players_router, prefix="/players", tags=["players"])
 app.include_router(coaches_router, prefix="/coaches", tags=["coaches"])
+app.include_router(chat_router, prefix="/chat", tags=["chat"])
 
 @app.get("/")
 async def root():

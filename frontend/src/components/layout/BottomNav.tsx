@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, Calendar, UserRound, Briefcase } from 'lucide-react'
+import { LayoutDashboard, Users, Calendar, UserRound, Briefcase, MessageCircle } from 'lucide-react'
 
 const navItems = [
   { to: '/', label: 'Overview', icon: LayoutDashboard },
@@ -7,6 +7,7 @@ const navItems = [
   { to: '/schedule', label: 'Schedule', icon: Calendar },
   { to: '/players', label: 'Players', icon: UserRound },
   { to: '/coaches', label: 'Coaches', icon: Briefcase },
+  { to: '/chat', label: 'Chat', icon: MessageCircle },
 ]
 
 export default function BottomNav() {

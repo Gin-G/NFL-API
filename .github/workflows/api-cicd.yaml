@@ -242,3 +242,12 @@ jobs:
         run: |
           curl -sf --max-time 30 "${{ vars.API_URL }}/dashboard/" \
             | grep -q '<div id="root">'
+
+      - name: POST /chat/ — endpoint reachable (200 or 503 accepted)
+        run: |
+          HTTP=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 \
+            -X POST "${{ vars.API_URL }}/chat/" \
+            -H "Content-Type: application/json" \
+            -d '{"message":"ping","history":[]}')
+          echo "Chat endpoint: $HTTP"
+          [ "$HTTP" = "200" ] || [ "$HTTP" = "503" ]
