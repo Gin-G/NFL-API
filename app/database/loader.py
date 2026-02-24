@@ -163,6 +163,7 @@ def load_rosters(db: Session, season: int) -> int:
         return 0
     logger.info("Loading rosters for season %d…", season)
     df = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
+    df = df.drop_duplicates(subset=["player_id", "season", "week"], keep="last")
     count = 0
     for row in df.itertuples(index=False):
         player_id = _col(row, "player_id")
@@ -207,6 +208,7 @@ def load_player_stats(db: Session, season: int) -> int:
     logger.info("Loading player stats for season %d…", season)
     try:
         df = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
+        df = df.drop_duplicates(subset=["player_id", "season", "week"], keep="last")
     except Exception as exc:
         logger.warning("Skipping player stats for %d: %s", season, exc)
         return 0
@@ -296,11 +298,14 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
             load_schedules(db, season)
         except Exception as exc:
             logger.error("Failed to load schedules for %d: %s", season, exc)
+            db.rollback()
         try:
             load_rosters(db, season)
         except Exception as exc:
             logger.error("Failed to load rosters for %d: %s", season, exc)
+            db.rollback()
         try:
             load_player_stats(db, season)
         except Exception as exc:
             logger.error("Failed to load player stats for %d: %s", season, exc)
+            db.rollback()
