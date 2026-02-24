@@ -1,11 +1,11 @@
 db:
-  name: nfl-api
+  name: nfl-api-db
   group: nfl-api
   instances: 3
   size: 10Gi
   secretPath: nfl-api
   app:
-    name: nfl-api
+    name: nfl-api-db
     owner: ging
   superuser:
     userKey: dbsu
