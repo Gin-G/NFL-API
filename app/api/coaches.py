@@ -214,14 +214,15 @@ async def get_coach_analysis(
     db: Session = Depends(get_db),
 ):
     """Get coach season records and (when available) roster quality breakdown."""
-    # --- DB path ---
-    if db.query(Schedule).limit(1).count():
-        q = db.query(Schedule)
-        if season is not None:
-            q = q.filter(Schedule.season == season)
-        elif years:
-            q = q.filter(Schedule.season.in_(years))
-        records = _build_coaching_records(q.all())
+    # --- DB path (only when the DB has data for the requested seasons) ---
+    q = db.query(Schedule)
+    if season is not None:
+        q = q.filter(Schedule.season == season)
+    elif years:
+        q = q.filter(Schedule.season.in_(years))
+    schedules = q.all()
+    if schedules:
+        records = _build_coaching_records(schedules)
         if coach_name not in records:
             raise HTTPException(status_code=404, detail=f"Coach '{coach_name}' not found")
         seasons_data = _format_seasons(records[coach_name])
@@ -291,14 +292,15 @@ async def get_coach_grades(
     db: Session = Depends(get_db),
 ):
     """Get coaching performance grades derived from win rate."""
-    # --- DB path ---
-    if db.query(Schedule).limit(1).count():
-        q = db.query(Schedule)
-        if season is not None:
-            q = q.filter(Schedule.season == season)
-        elif years:
-            q = q.filter(Schedule.season.in_(years))
-        records = _build_coaching_records(q.all())
+    # --- DB path (only when the DB has data for the requested seasons) ---
+    q = db.query(Schedule)
+    if season is not None:
+        q = q.filter(Schedule.season == season)
+    elif years:
+        q = q.filter(Schedule.season.in_(years))
+    schedules = q.all()
+    if schedules:
+        records = _build_coaching_records(schedules)
         if coach_name not in records:
             raise HTTPException(status_code=404, detail=f"Coach '{coach_name}' not found")
 
@@ -392,14 +394,15 @@ async def compare_coaches(
     db: Session = Depends(get_db),
 ):
     """Compare multiple coaches side by side."""
-    # --- DB path ---
-    if db.query(Schedule).limit(1).count():
-        q = db.query(Schedule)
-        if season is not None:
-            q = q.filter(Schedule.season == season)
-        elif years:
-            q = q.filter(Schedule.season.in_(years))
-        records = _build_coaching_records(q.all())
+    # --- DB path (only when the DB has data for the requested seasons) ---
+    q = db.query(Schedule)
+    if season is not None:
+        q = q.filter(Schedule.season == season)
+    elif years:
+        q = q.filter(Schedule.season.in_(years))
+    schedules = q.all()
+    if schedules:
+        records = _build_coaching_records(schedules)
         missing = [c for c in coach_names if c not in records]
         if missing:
             raise HTTPException(status_code=404, detail=f"Coaches not found: {missing}")
