@@ -135,6 +135,8 @@ jobs:
             echo "ERROR: App did not reach Synced/Healthy within 5 minutes"
             exit 1
           fi
+          echo "Giving the ingress/load-balancer 20 s to finish routing to the new pod..."
+          sleep 20
 
   # ── 4. Smoke-test every live endpoint ──────────────────────────────────────
   # This job intentionally references NO secrets. Because each GitHub-hosted job
@@ -146,11 +148,23 @@ jobs:
     needs: wait-for-argo
     runs-on: ubuntu-latest
     steps:
-      - name: Diagnose — curl version and API reachability
+      - name: Wait for API to be fully ready
         run: |
           echo "curl: $(curl --version | head -1)"
-          curl -sf --max-time 15 "${{ vars.API_URL }}/health" \
-            | jq '{status, systems}'
+          echo "Polling ${{ vars.API_URL }}/ until status == running (max 60 s)..."
+          for i in $(seq 1 12); do
+            STATUS=$(curl -sf --max-time 10 "${{ vars.API_URL }}/" 2>/dev/null \
+              | jq -r '.status' 2>/dev/null || echo "")
+            if [ "$STATUS" = "running" ]; then
+              echo "API is ready (attempt $i)"
+              exit 0
+            fi
+            echo "  [$i/12] status='$STATUS' — retrying in 5 s..."
+            sleep 5
+          done
+          echo "ERROR: API did not return status=running within 60 s"
+          curl -v --max-time 10 "${{ vars.API_URL }}/" || true
+          exit 1
 
       - name: GET / — root
         run: |
@@ -165,9 +179,9 @@ jobs:
       - name: GET /teams/ — list
         run: |
           TOTAL=$(curl -sf --max-time 30 "${{ vars.API_URL }}/teams/" \
-            | jq '.total_teams')
+            | jq '.total_teams // 0')
           echo "Total teams: $TOTAL"
-          [ "$TOTAL" -gt 0 ]
+          [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /teams/KC — detail
         run: |
@@ -178,25 +192,25 @@ jobs:
         run: |
           TOTAL=$(curl -sf --max-time 60 \
             "${{ vars.API_URL }}/schedules/?season=2024&week=1" \
-            | jq '.total_games')
+            | jq '.total_games // 0')
           echo "Games (2024 wk 1): $TOTAL"
-          [ "$TOTAL" -gt 0 ]
+          [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /players/rosters?season=2024&team=KC
         run: |
           TOTAL=$(curl -sf --max-time 60 \
             "${{ vars.API_URL }}/players/rosters?season=2024&team=KC" \
-            | jq '.total_players')
+            | jq '.total_players // 0')
           echo "KC roster players: $TOTAL"
-          [ "$TOTAL" -gt 0 ]
+          [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /players/stats?season=2024&position=QB&week=1
         run: |
           TOTAL=$(curl -sf --max-time 60 \
             "${{ vars.API_URL }}/players/stats?season=2024&position=QB&week=1" \
-            | jq '.total_records')
+            | jq '.total_records // 0')
           echo "QB week 1 records: $TOTAL"
-          [ "$TOTAL" -gt 0 ]
+          [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /players/00-0033873 — Mahomes
         run: |
@@ -208,9 +222,9 @@ jobs:
         run: |
           TOTAL=$(curl -sf --max-time 180 \
             "${{ vars.API_URL }}/coaches/?years=2024" \
-            | jq '.total_coaches')
+            | jq '.total_coaches // 0')
           echo "Coaches 2024: $TOTAL"
-          [ "$TOTAL" -gt 0 ]
+          [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /coaches/Andy Reid/analysis?years=2024
         run: |
