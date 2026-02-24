@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Values.webapp.name }}-db-loader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.webapp.name }}
+    group: {{ .Values.webapp.group }}
+  annotations:
+    # Helm hook (for direct `helm upgrade` use)
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    # ArgoCD hook — excluded from sync-status so it never causes OutOfSync.
+    # Runs after every successful sync; old Job is deleted before a new one starts.
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation,HookSucceeded
+spec:
+  activeDeadlineSeconds: 7200
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.webapp.name }}-db-loader
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: loader
+          image: {{ .Values.webapp.container.image }}
+          imagePullPolicy: {{ .Values.webapp.container.imagePullPolicy }}
+          command: ["python", "-m", "scripts.load_data"]
+          workingDir: /app
+          env:
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.appUserSecret }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.appUserSecret }}
+                  key: password
+            - name: DATABASE_URL
+              value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.{{ .Release.Namespace }}.svc.cluster.local:5432/nfl-api"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
