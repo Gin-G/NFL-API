@@ -8,8 +8,10 @@ webapp:
     image: docker.io/ncging/nfl-api:2026-02-24.20.45
     imagePullPolicy: Always
     port: 8000
-    memory: "2Gi"
-    cpu: "1"
+    memoryLimit: "1Gi"
+    memoryRequest: "256Mi"
+    cpuLimit: "1"
+    cpuRequest: "100m"
     env:
       - name: ANTHROPIC_API_KEY
         secretName: nfl-api-secrets
