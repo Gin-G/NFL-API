@@ -33,6 +33,21 @@ def _current_nfl_season() -> int:
     return now.year if now.month >= 9 else now.year - 1
 
 
+def _is_already_loaded(db, current_season: int) -> bool:
+    """Return True if teams and current-season stats are already in the DB."""
+    from database.models import Team, PlayerStat
+    try:
+        team_count = db.query(Team).limit(1).count()
+        if team_count == 0:
+            return False
+        stat_count = db.query(PlayerStat).filter(
+            PlayerStat.season == current_season
+        ).limit(1).count()
+        return stat_count > 0
+    except Exception:
+        return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Load NFL data into PostgreSQL/SQLite")
     parser.add_argument(
@@ -47,11 +62,15 @@ def main() -> None:
         default=None,
         help="Last season to load (default: current NFL season)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Load data even if the DB already appears populated",
+    )
     args = parser.parse_args()
 
     end = args.end_season or _current_nfl_season()
     seasons = list(range(args.start_season, end + 1))
-    logger.info("Loading seasons %d–%d (%d total)", seasons[0], seasons[-1], len(seasons))
 
     from database.session import engine, SessionLocal
     from database.models import Base
@@ -62,6 +81,15 @@ def main() -> None:
 
     db = SessionLocal()
     try:
+        if not args.force and _is_already_loaded(db, end):
+            logger.info(
+                "DB already contains teams and season %d stats — nothing to do. "
+                "Run with --force to reload.",
+                end,
+            )
+            return
+
+        logger.info("Loading seasons %d–%d (%d total)", seasons[0], seasons[-1], len(seasons))
         load_all_data(db, seasons)
     finally:
         db.close()
