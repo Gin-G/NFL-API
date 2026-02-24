@@ -14,6 +14,43 @@ from .utils import clean_data_for_json, get_player_grader, check_grading_systems
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def _normalize_roster_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Map nflreadpy load_rosters_weekly column names to the expected API schema.
+
+    nflreadpy uses different column names than the legacy nfl_data_py:
+      gsis_id  → player_id
+      full_name → player_name
+    Heights are returned as numeric inches; convert to "ft-in" string.
+    Rename is a no-op when columns are already in the expected format (tests).
+    """
+    df = df.rename(columns={'gsis_id': 'player_id', 'full_name': 'player_name'})
+    if 'player_display_name' not in df.columns:
+        df = df.copy()
+        df['player_display_name'] = df.get('player_name')
+    # Convert numeric height (inches) to "ft-in" string when not already a string
+    if 'height' in df.columns and df['height'].dtype != object:
+        df = df.copy() if 'player_display_name' not in df.columns else df
+        df['height'] = df['height'].apply(
+            lambda h: f"{int(h)//12}-{int(h)%12}" if pd.notna(h) else None
+        )
+    return df
+
+
+def _normalize_stats_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Map nflreadpy load_player_stats column names to the expected API schema.
+
+    nflreadpy uses:
+      team                 → recent_team
+      passing_interceptions → interceptions
+    Rename is a no-op when columns are already in the expected format (tests).
+    """
+    return df.rename(columns={
+        'team': 'recent_team',
+        'passing_interceptions': 'interceptions',
+    })
+
+
 @router.get("/rosters")
 async def get_rosters(
     season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)"),
@@ -25,13 +62,13 @@ async def get_rosters(
     if season is None:
         season = get_current_nfl_season()
     try:
-        rosters = _to_pandas(nfl.load_rosters_weekly(seasons=[season]))
+        rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
 
         if week is not None:
             rosters = rosters[rosters['week'] == week]
         else:
             # Without a specific week, deduplicate to show each player once
-            # (import_weekly_rosters returns one row per player per week).
+            # (load_rosters_weekly returns one row per player per week).
             # Sort so drop_duplicates keeps the latest week's entry.
             rosters = rosters.sort_values('week').drop_duplicates(subset=['player_id'], keep='last')
 
@@ -63,7 +100,7 @@ async def get_player_stats(
     if season is None:
         season = get_current_nfl_season()
     try:
-        stats = _to_pandas(nfl.load_player_stats(seasons=[season]))
+        stats = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
 
         if player_id is not None:
             stats = stats[stats['player_id'] == player_id]
@@ -226,11 +263,11 @@ async def get_player_details(
         season = get_current_nfl_season()
     try:
         # Get player stats
-        stats = _to_pandas(nfl.load_player_stats(seasons=[season]))
+        stats = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
         player_stats = stats[stats['player_id'] == player_id]
 
         # Get roster info
-        rosters = _to_pandas(nfl.load_rosters_weekly(seasons=[season]))
+        rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
         player_roster = rosters[rosters['player_id'] == player_id]
 
         if player_stats.empty and player_roster.empty:
