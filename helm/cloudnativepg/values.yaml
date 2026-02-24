@@ -1,7 +1,7 @@
 db:
   name: nfl-api-db
   group: nfl-api
-  instances: 3
+  instances: 1
   size: 10Gi
   secretPath: nfl-api
   app:
