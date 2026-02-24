@@ -136,12 +136,18 @@ jobs:
           done
           if [ "$STATUS" != "Synced/Healthy" ]; then
             echo "ERROR: App did not reach Synced/Healthy within 5 minutes"
-            echo "--- OutOfSync resources ---"
+            echo "--- All resource statuses ---"
             curl -sf \
               -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
               "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}" \
-              | jq '.status.resources[] | select(.status == "OutOfSync") | {kind, name, namespace, status, health}' \
-              || echo "(could not fetch resource list)"
+              | jq '{
+                  syncStatus: .status.sync.status,
+                  syncRevision: .status.sync.revision,
+                  operationState: .status.operationState.phase,
+                  operationMessage: .status.operationState.message,
+                  resources: [.status.resources[] | {kind, name, status, health: .health.status}]
+                }' \
+              || echo "(could not fetch app status)"
             exit 1
           fi
           echo "Giving the ingress/load-balancer 20 s to finish routing to the new pod..."
