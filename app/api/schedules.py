@@ -31,15 +31,19 @@ async def get_schedules(
     if season is None:
         season = get_current_nfl_season()
     try:
-        q = db.query(Schedule).filter(Schedule.season == season)
-        if week is not None:
-            q = q.filter(Schedule.week == week)
-        if team is not None:
-            t = team.upper()
-            q = q.filter(
-                (Schedule.home_team == t) | (Schedule.away_team == t)
-            )
-        rows = q.all()
+        rows = []
+        try:
+            q = db.query(Schedule).filter(Schedule.season == season)
+            if week is not None:
+                q = q.filter(Schedule.week == week)
+            if team is not None:
+                t = team.upper()
+                q = q.filter(
+                    (Schedule.home_team == t) | (Schedule.away_team == t)
+                )
+            rows = q.all()
+        except Exception as db_err:
+            logger.warning("DB unavailable, falling back to nflreadpy: %s", db_err)
         if rows:
             data = [_orm_to_dict(r) for r in rows]
             return {
@@ -76,10 +80,14 @@ async def get_schedules(
 async def get_weekly_schedule(season: int, week: int, db: Session = Depends(get_db)):
     """Get schedule for a specific week."""
     try:
-        rows = db.query(Schedule).filter(
-            Schedule.season == season,
-            Schedule.week == week,
-        ).all()
+        rows = []
+        try:
+            rows = db.query(Schedule).filter(
+                Schedule.season == season,
+                Schedule.week == week,
+            ).all()
+        except Exception as db_err:
+            logger.warning("DB unavailable, falling back to nflreadpy: %s", db_err)
         if rows:
             return {
                 "status": "success",

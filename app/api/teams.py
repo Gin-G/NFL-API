@@ -23,7 +23,11 @@ router = APIRouter()
 async def get_teams(db: Session = Depends(get_db)):
     """Get all NFL teams."""
     try:
-        rows = db.query(TeamModel).all()
+        rows = []
+        try:
+            rows = db.query(TeamModel).all()
+        except Exception as db_err:
+            logger.warning("DB unavailable, falling back to nflreadpy: %s", db_err)
         if rows:
             data = [_orm_to_dict(r) for r in rows]
             return {
@@ -48,9 +52,13 @@ async def get_teams(db: Session = Depends(get_db)):
 async def get_team_details(team_abbr: str, db: Session = Depends(get_db)):
     """Get details for a specific team."""
     try:
-        row = db.query(TeamModel).filter(
-            TeamModel.team_abbr == team_abbr.upper()
-        ).first()
+        row = None
+        try:
+            row = db.query(TeamModel).filter(
+                TeamModel.team_abbr == team_abbr.upper()
+            ).first()
+        except Exception as db_err:
+            logger.warning("DB unavailable, falling back to nflreadpy: %s", db_err)
         if row:
             return {
                 "status": "success",

@@ -193,21 +193,24 @@ def _execute_tool(name: str, inputs: dict, db: Session = None):
             limit = min(int(inputs.get("limit") or 20), 50)
 
             if db is not None:
-                q = db.query(PlayerStat).filter(PlayerStat.season == season)
-                if inputs.get("position"):
-                    q = q.filter(PlayerStat.position == inputs["position"].upper())
-                if inputs.get("team"):
-                    q = q.filter(PlayerStat.recent_team == inputs["team"].upper())
-                if inputs.get("week") is not None:
-                    q = q.filter(PlayerStat.week == inputs["week"])
-                sort_by = inputs.get("sort_by", "fantasy_points")
-                col = getattr(PlayerStat, sort_by, None)
-                if col is not None:
-                    asc = inputs.get("sort_order", "desc") == "asc"
-                    q = q.order_by(col.asc() if asc else col.desc())
-                rows = q.limit(limit).all()
-                if rows:
-                    return [_orm_to_dict(r) for r in rows]
+                try:
+                    q = db.query(PlayerStat).filter(PlayerStat.season == season)
+                    if inputs.get("position"):
+                        q = q.filter(PlayerStat.position == inputs["position"].upper())
+                    if inputs.get("team"):
+                        q = q.filter(PlayerStat.recent_team == inputs["team"].upper())
+                    if inputs.get("week") is not None:
+                        q = q.filter(PlayerStat.week == inputs["week"])
+                    sort_by = inputs.get("sort_by", "fantasy_points")
+                    col = getattr(PlayerStat, sort_by, None)
+                    if col is not None:
+                        asc = inputs.get("sort_order", "desc") == "asc"
+                        q = q.order_by(col.asc() if asc else col.desc())
+                    rows = q.limit(limit).all()
+                    if rows:
+                        return [_orm_to_dict(r) for r in rows]
+                except Exception as db_err:
+                    logger.warning("DB unavailable for get_player_stats: %s", db_err)
 
             # Fallback: nflreadpy
             stats = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
@@ -227,24 +230,26 @@ def _execute_tool(name: str, inputs: dict, db: Session = None):
             season = inputs.get("season") or get_current_nfl_season()
 
             if db is not None:
-                q = db.query(PlayerRoster).filter(PlayerRoster.season == season)
-                if inputs.get("week") is not None:
-                    q = q.filter(PlayerRoster.week == inputs["week"])
-                if inputs.get("team"):
-                    q = q.filter(PlayerRoster.team == inputs["team"].upper())
-                if inputs.get("position"):
-                    q = q.filter(PlayerRoster.position == inputs["position"].upper())
-                rows = q.limit(50).all()
-                if rows:
-                    if inputs.get("week") is None:
-                        # Deduplicate to latest week per player
-                        seen: dict = {}
-                        for r in rows:
-                            existing = seen.get(r.player_id)
-                            if existing is None or r.week > existing.week:
-                                seen[r.player_id] = r
-                        rows = list(seen.values())[:50]
-                    return [_orm_to_dict(r) for r in rows]
+                try:
+                    q = db.query(PlayerRoster).filter(PlayerRoster.season == season)
+                    if inputs.get("week") is not None:
+                        q = q.filter(PlayerRoster.week == inputs["week"])
+                    if inputs.get("team"):
+                        q = q.filter(PlayerRoster.team == inputs["team"].upper())
+                    if inputs.get("position"):
+                        q = q.filter(PlayerRoster.position == inputs["position"].upper())
+                    rows = q.limit(50).all()
+                    if rows:
+                        if inputs.get("week") is None:
+                            seen: dict = {}
+                            for r in rows:
+                                existing = seen.get(r.player_id)
+                                if existing is None or r.week > existing.week:
+                                    seen[r.player_id] = r
+                            rows = list(seen.values())[:50]
+                        return [_orm_to_dict(r) for r in rows]
+                except Exception as db_err:
+                    logger.warning("DB unavailable for get_player_roster: %s", db_err)
 
             # Fallback: nflreadpy
             rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
@@ -264,15 +269,18 @@ def _execute_tool(name: str, inputs: dict, db: Session = None):
             season = inputs.get("season") or get_current_nfl_season()
 
             if db is not None:
-                q = db.query(Schedule).filter(Schedule.season == season)
-                if inputs.get("week") is not None:
-                    q = q.filter(Schedule.week == inputs["week"])
-                if inputs.get("team"):
-                    t = inputs["team"].upper()
-                    q = q.filter((Schedule.home_team == t) | (Schedule.away_team == t))
-                rows = q.limit(50).all()
-                if rows:
-                    return [_orm_to_dict(r) for r in rows]
+                try:
+                    q = db.query(Schedule).filter(Schedule.season == season)
+                    if inputs.get("week") is not None:
+                        q = q.filter(Schedule.week == inputs["week"])
+                    if inputs.get("team"):
+                        t = inputs["team"].upper()
+                        q = q.filter((Schedule.home_team == t) | (Schedule.away_team == t))
+                    rows = q.limit(50).all()
+                    if rows:
+                        return [_orm_to_dict(r) for r in rows]
+                except Exception as db_err:
+                    logger.warning("DB unavailable for get_schedules: %s", db_err)
 
             # Fallback: nflreadpy
             schedules = _to_pandas(nfl.load_schedules(seasons=[season]))
@@ -287,9 +295,12 @@ def _execute_tool(name: str, inputs: dict, db: Session = None):
 
         elif name == "get_teams":
             if db is not None:
-                rows = db.query(TeamModel).all()
-                if rows:
-                    return [_orm_to_dict(r) for r in rows]
+                try:
+                    rows = db.query(TeamModel).all()
+                    if rows:
+                        return [_orm_to_dict(r) for r in rows]
+                except Exception as db_err:
+                    logger.warning("DB unavailable for get_teams: %s", db_err)
 
             # Fallback: nflreadpy
             teams = _to_pandas(nfl.load_teams())

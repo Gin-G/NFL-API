@@ -62,14 +62,18 @@ async def get_rosters(
     if season is None:
         season = get_current_nfl_season()
     try:
-        q = db.query(PlayerRoster).filter(PlayerRoster.season == season)
-        if week is not None:
-            q = q.filter(PlayerRoster.week == week)
-        if team is not None:
-            q = q.filter(PlayerRoster.team == team.upper())
-        if position is not None:
-            q = q.filter(PlayerRoster.position == position.upper())
-        rows = q.all()
+        rows = []
+        try:
+            q = db.query(PlayerRoster).filter(PlayerRoster.season == season)
+            if week is not None:
+                q = q.filter(PlayerRoster.week == week)
+            if team is not None:
+                q = q.filter(PlayerRoster.team == team.upper())
+            if position is not None:
+                q = q.filter(PlayerRoster.position == position.upper())
+            rows = q.all()
+        except Exception as db_err:
+            logger.warning("DB unavailable, falling back to nflreadpy: %s", db_err)
 
         if rows:
             if week is None:
@@ -127,16 +131,20 @@ async def get_player_stats(
     if season is None:
         season = get_current_nfl_season()
     try:
-        q = db.query(PlayerStat).filter(PlayerStat.season == season)
-        if player_id is not None:
-            q = q.filter(PlayerStat.player_id == player_id)
-        if position is not None:
-            q = q.filter(PlayerStat.position == position.upper())
-        if team is not None:
-            q = q.filter(PlayerStat.recent_team == team.upper())
-        if week is not None:
-            q = q.filter(PlayerStat.week == week)
-        rows = q.all()
+        rows = []
+        try:
+            q = db.query(PlayerStat).filter(PlayerStat.season == season)
+            if player_id is not None:
+                q = q.filter(PlayerStat.player_id == player_id)
+            if position is not None:
+                q = q.filter(PlayerStat.position == position.upper())
+            if team is not None:
+                q = q.filter(PlayerStat.recent_team == team.upper())
+            if week is not None:
+                q = q.filter(PlayerStat.week == week)
+            rows = q.all()
+        except Exception as db_err:
+            logger.warning("DB unavailable, falling back to nflreadpy: %s", db_err)
 
         if rows:
             data = [_orm_to_dict(r) for r in rows]
@@ -306,14 +314,18 @@ async def get_player_details(
         season = get_current_nfl_season()
     try:
         # Try DB first
-        stat_rows = db.query(PlayerStat).filter(
-            PlayerStat.player_id == player_id,
-            PlayerStat.season == season,
-        ).all()
-        roster_rows = db.query(PlayerRoster).filter(
-            PlayerRoster.player_id == player_id,
-            PlayerRoster.season == season,
-        ).all()
+        stat_rows, roster_rows = [], []
+        try:
+            stat_rows = db.query(PlayerStat).filter(
+                PlayerStat.player_id == player_id,
+                PlayerStat.season == season,
+            ).all()
+            roster_rows = db.query(PlayerRoster).filter(
+                PlayerRoster.player_id == player_id,
+                PlayerRoster.season == season,
+            ).all()
+        except Exception as db_err:
+            logger.warning("DB unavailable, falling back to nflreadpy: %s", db_err)
 
         if stat_rows or roster_rows:
             player_info: dict = {}
