@@ -310,45 +310,55 @@ async def chat(request: ChatRequest):
     messages = [{"role": m.role, "content": m.content} for m in request.history]
     messages.append({"role": "user", "content": request.message})
 
-    for _ in range(MAX_ITERATIONS):
-        resp = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
+    try:
+        for _ in range(MAX_ITERATIONS):
+            resp = client.messages.create(
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            )
+
+            if resp.stop_reason == "end_turn":
+                text = "".join(b.text for b in resp.content if b.type == "text")
+                messages.append({"role": "assistant", "content": text})
+                # Return only plain-text message pairs in history (no raw tool blocks)
+                history = [
+                    ChatMessage(role=m["role"], content=m["content"])
+                    for m in messages
+                    if isinstance(m.get("content"), str)
+                ]
+                return ChatResponse(response=text, history=history)
+
+            if resp.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": resp.content})
+                tool_results = [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(
+                            _execute_tool(block.name, block.input), default=str
+                        ),
+                    }
+                    for block in resp.content
+                    if block.type == "tool_use"
+                ]
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                # Unexpected stop reason — bail out of the loop
+                break
+
+        raise HTTPException(
+            status_code=500,
+            detail="Chat loop did not produce a final response.",
         )
 
-        if resp.stop_reason == "end_turn":
-            text = "".join(b.text for b in resp.content if b.type == "text")
-            messages.append({"role": "assistant", "content": text})
-            # Return only plain-text message pairs in history (no raw tool blocks)
-            history = [
-                ChatMessage(role=m["role"], content=m["content"])
-                for m in messages
-                if isinstance(m.get("content"), str)
-            ]
-            return ChatResponse(response=text, history=history)
-
-        if resp.stop_reason == "tool_use":
-            messages.append({"role": "assistant", "content": resp.content})
-            tool_results = [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(
-                        _execute_tool(block.name, block.input), default=str
-                    ),
-                }
-                for block in resp.content
-                if block.type == "tool_use"
-            ]
-            messages.append({"role": "user", "content": tool_results})
-        else:
-            # Unexpected stop reason — bail out of the loop
-            break
-
-    raise HTTPException(
-        status_code=500,
-        detail="Chat loop did not produce a final response.",
-    )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Anthropic API error: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Chat service error: {exc}",
+        )
