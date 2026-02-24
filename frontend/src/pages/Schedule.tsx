@@ -8,44 +8,74 @@ import SkeletonCard from '../components/ui/SkeletonCard'
 import ErrorCard from '../components/ui/ErrorCard'
 
 const SEASONS = getAvailableSeasons()
-const MAX_WEEKS = 18
+const MAX_WEEKS = 22
+
+const PLAYOFF_ROUND: Record<number, string> = {
+  19: 'Wild Card',
+  20: 'Divisional',
+  21: 'Conference',
+  22: 'Super Bowl',
+}
+
+function weekLabel(week: number): string {
+  return PLAYOFF_ROUND[week] ?? `Week ${week}`
+}
 
 function GameCard({ game }: { game: Game }) {
   const finished = game.home_score !== null && game.away_score !== null
   const awayWon = finished && (game.away_score ?? 0) > (game.home_score ?? 0)
   const homeWon = finished && (game.home_score ?? 0) > (game.away_score ?? 0)
+  const isOT = finished && game.overtime === 1
 
   return (
     <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
       <div className="flex justify-between text-xs text-slate-400 mb-3">
-        <span>{game.gameday ?? ''} {game.gametime ?? ''}</span>
-        <span>{game.game_type ?? 'REG'}{game.div_game ? ' · DIV' : ''}</span>
+        <span>{game.gameday ?? ''}{game.gametime ? ` · ${game.gametime}` : ''}</span>
+        <span className="flex items-center gap-1">
+          {game.div_game ? <span className="text-slate-500">DIV ·</span> : null}
+          {game.game_type && game.game_type !== 'REG' ? (
+            <span className="text-amber-400 font-semibold">{game.game_type}</span>
+          ) : null}
+        </span>
       </div>
 
       <div className="grid grid-cols-3 items-center gap-2">
         <div className={`text-center ${awayWon ? 'text-white' : 'text-slate-400'}`}>
           <p className={`text-lg font-bold ${awayWon ? 'text-white' : ''}`}>{game.away_team}</p>
+          {game.away_qb_name && (
+            <p className="text-xs text-slate-500 truncate">{game.away_qb_name}</p>
+          )}
           {finished && (
-            <p className={`text-2xl font-bold ${awayWon ? 'text-brand-gold' : ''}`}>
+            <p className={`text-2xl font-bold mt-1 ${awayWon ? 'text-brand-gold' : ''}`}>
               {game.away_score}
             </p>
           )}
         </div>
         <div className="text-center text-slate-500 text-sm font-medium">
-          {finished ? 'FINAL' : 'vs'}
+          {finished ? (isOT ? 'FINAL/OT' : 'FINAL') : 'vs'}
         </div>
         <div className={`text-center ${homeWon ? 'text-white' : 'text-slate-400'}`}>
           <p className={`text-lg font-bold ${homeWon ? 'text-white' : ''}`}>{game.home_team}</p>
+          {game.home_qb_name && (
+            <p className="text-xs text-slate-500 truncate">{game.home_qb_name}</p>
+          )}
           {finished && (
-            <p className={`text-2xl font-bold ${homeWon ? 'text-brand-gold' : ''}`}>
+            <p className={`text-2xl font-bold mt-1 ${homeWon ? 'text-brand-gold' : ''}`}>
               {game.home_score}
             </p>
           )}
         </div>
       </div>
 
+      {(game.away_coach || game.home_coach) && (
+        <div className="flex justify-between mt-2 text-xs text-slate-600">
+          <span className="truncate max-w-[45%]">{game.away_coach ?? ''}</span>
+          <span className="truncate max-w-[45%] text-right">{game.home_coach ?? ''}</span>
+        </div>
+      )}
+
       {game.stadium && (
-        <p className="text-xs text-slate-500 text-center mt-2 truncate">{game.stadium}</p>
+        <p className="text-xs text-slate-500 text-center mt-1 truncate">{game.stadium}</p>
       )}
     </div>
   )
@@ -86,7 +116,7 @@ export default function Schedule() {
           >
             <ChevronLeft size={18} />
           </button>
-          <span className="text-white font-semibold w-8 text-center">{week}</span>
+          <span className="text-white font-semibold min-w-[80px] text-center">{weekLabel(week)}</span>
           <button
             onClick={() => setWeek((w) => Math.min(MAX_WEEKS, w + 1))}
             disabled={week === MAX_WEEKS}

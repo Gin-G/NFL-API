@@ -209,3 +209,82 @@ class TestCompareCoaches:
              patch("api.coaches.get_coaching_analytics", side_effect=Exception("error")):
             response = client.post("/coaches/compare", json=["Andy Reid"])
         assert response.status_code == 500
+
+
+class TestMultiYearCoaches:
+    """Full career history: coaches with seasons across multiple years."""
+
+    def _make_multi_year_analytics(self):
+        from unittest.mock import MagicMock
+        analytics = MagicMock()
+        # Coach with 4-year career history
+        analytics.get_available_coaches.return_value = ["Andy Reid"]
+        analytics.coaching_data = {
+            ("Andy Reid", 2020): {
+                "teams": {"KC"},
+                "games": [{"result": "W"}] * 14 + [{"result": "L"}] * 2,
+            },
+            ("Andy Reid", 2021): {
+                "teams": {"KC"},
+                "games": [{"result": "W"}] * 12 + [{"result": "L"}] * 5,
+            },
+            ("Andy Reid", 2022): {
+                "teams": {"KC"},
+                "games": [{"result": "W"}] * 14 + [{"result": "L"}] * 3,
+            },
+            ("Andy Reid", 2023): {
+                "teams": {"KC"},
+                "games": [{"result": "W"}] * 11 + [{"result": "L"}] * 6,
+            },
+        }
+        analytics.analyze_roster_quality.return_value = {
+            "overall_avg_grade": 75.0,
+            "roster_tier": "Good",
+            "qb_avg_grade": 85.0,
+            "rb_avg_grade": 72.0,
+            "wr_te_avg_grade": 78.0,
+            "defense_avg_grade": 70.0,
+        }
+        analytics.get_letter_grade.return_value = "B"
+        return analytics
+
+    def test_coach_has_all_seasons(self, client):
+        analytics = self._make_multi_year_analytics()
+        with patch("api.coaches.check_grading_systems", return_value=COACHING_AVAILABLE), \
+             patch("api.coaches.get_coaching_analytics", return_value=analytics):
+            body = client.get("/coaches/").json()
+        coach = body["data"][0]
+        assert coach["name"] == "Andy Reid"
+        assert len(coach["seasons"]) == 4
+
+    def test_seasons_are_sorted_ascending(self, client):
+        analytics = self._make_multi_year_analytics()
+        with patch("api.coaches.check_grading_systems", return_value=COACHING_AVAILABLE), \
+             patch("api.coaches.get_coaching_analytics", return_value=analytics):
+            body = client.get("/coaches/").json()
+        seasons = [s["season"] for s in body["data"][0]["seasons"]]
+        assert seasons == sorted(seasons)
+
+    def test_win_loss_record_per_season(self, client):
+        analytics = self._make_multi_year_analytics()
+        with patch("api.coaches.check_grading_systems", return_value=COACHING_AVAILABLE), \
+             patch("api.coaches.get_coaching_analytics", return_value=analytics):
+            body = client.get("/coaches/").json()
+        season_2020 = next(s for s in body["data"][0]["seasons"] if s["season"] == 2020)
+        assert season_2020["wins"] == 14
+        assert season_2020["losses"] == 2
+        assert season_2020["record"] == "14-2"
+
+    def test_analysis_returns_all_seasons(self, client):
+        analytics = self._make_multi_year_analytics()
+        with patch("api.coaches.check_grading_systems", return_value=COACHING_AVAILABLE), \
+             patch("api.coaches.get_coaching_analytics", return_value=analytics):
+            body = client.get("/coaches/Andy Reid/analysis").json()
+        assert len(body["seasons"]) == 4
+
+    def test_grades_returns_all_seasons(self, client):
+        analytics = self._make_multi_year_analytics()
+        with patch("api.coaches.check_grading_systems", return_value=COACHING_AVAILABLE), \
+             patch("api.coaches.get_coaching_analytics", return_value=analytics):
+            body = client.get("/coaches/Andy Reid/grades").json()
+        assert len(body["grades"]) == 4

@@ -47,6 +47,32 @@ function RosterTable({ players }: { players: RosterPlayer[] }) {
   )
 }
 
+// Numeric fields that should be summed when aggregating across weeks
+const SUMABLE_STAT_FIELDS: (keyof PlayerStat)[] = [
+  'completions', 'attempts', 'passing_yards', 'passing_tds', 'interceptions',
+  'carries', 'rushing_yards', 'rushing_tds',
+  'receptions', 'targets', 'receiving_yards', 'receiving_tds',
+  'fantasy_points', 'fantasy_points_ppr',
+]
+
+/** Collapse weekly rows into one row per player by summing numeric stats. */
+function aggregateByPlayer(stats: PlayerStat[]): PlayerStat[] {
+  const byPlayer = new Map<string, PlayerStat>()
+  for (const s of stats) {
+    const existing = byPlayer.get(s.player_id)
+    if (!existing) {
+      byPlayer.set(s.player_id, { ...s })
+    } else {
+      for (const field of SUMABLE_STAT_FIELDS) {
+        const a = existing[field] as number | null
+        const b = s[field] as number | null
+        ;(existing as unknown as Record<string, unknown>)[field] = (a ?? 0) + (b ?? 0)
+      }
+    }
+  }
+  return Array.from(byPlayer.values())
+}
+
 function statLeaders(stats: PlayerStat[], field: keyof PlayerStat, n = 10) {
   return stats
     .filter((s) => typeof s[field] === 'number' && (s[field] as number) > 0)
@@ -63,32 +89,55 @@ function StatsPanel({ season, team, position, week }: { season: number; team?: s
   if (data?.status === 'no_data') return <p className="text-slate-400 text-sm">{data.message}</p>
   if (!data?.data.length) return <p className="text-slate-400 text-sm">No stats found for these filters.</p>
 
-  const stats = data.data
+  // When no specific week is selected, aggregate weekly rows into season totals
+  const stats = week === undefined ? aggregateByPlayer(data.data) : data.data
   const showPassing = !position || position === 'QB'
   const showRushing = !position || ['QB', 'RB'].includes(position)
   const showReceiving = !position || ['WR', 'TE', 'RB'].includes(position)
 
   return (
     <div className="space-y-8">
-      <p className="text-slate-400 text-sm">{data.total_records} records</p>
+      <p className="text-slate-400 text-sm">
+        {week === undefined
+          ? `${stats.length} players — season totals`
+          : `${data.total_records} records — week ${week}`}
+      </p>
 
       {showPassing && (
-        <div>
-          <h3 className="text-sm font-semibold text-slate-300 mb-3">Passing Yards Leaders</h3>
-          <StatBarChart data={statLeaders(stats, 'passing_yards')} label="Pass Yds" />
-        </div>
+        <>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-300 mb-3">Passing Yards Leaders</h3>
+            <StatBarChart data={statLeaders(stats, 'passing_yards')} label="Pass Yds" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-300 mb-3">Passing TDs Leaders</h3>
+            <StatBarChart data={statLeaders(stats, 'passing_tds')} label="Pass TDs" color="#22c55e" />
+          </div>
+        </>
       )}
       {showRushing && (
-        <div>
-          <h3 className="text-sm font-semibold text-slate-300 mb-3">Rushing Yards Leaders</h3>
-          <StatBarChart data={statLeaders(stats, 'rushing_yards')} label="Rush Yds" color="#d4b94e" />
-        </div>
+        <>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-300 mb-3">Rushing Yards Leaders</h3>
+            <StatBarChart data={statLeaders(stats, 'rushing_yards')} label="Rush Yds" color="#d4b94e" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-300 mb-3">Rushing TDs Leaders</h3>
+            <StatBarChart data={statLeaders(stats, 'rushing_tds')} label="Rush TDs" color="#f97316" />
+          </div>
+        </>
       )}
       {showReceiving && (
-        <div>
-          <h3 className="text-sm font-semibold text-slate-300 mb-3">Receiving Yards Leaders</h3>
-          <StatBarChart data={statLeaders(stats, 'receiving_yards')} label="Rec Yds" color="#3b82f6" />
-        </div>
+        <>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-300 mb-3">Receiving Yards Leaders</h3>
+            <StatBarChart data={statLeaders(stats, 'receiving_yards')} label="Rec Yds" color="#3b82f6" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-300 mb-3">Receiving TDs Leaders</h3>
+            <StatBarChart data={statLeaders(stats, 'receiving_tds')} label="Rec TDs" color="#a855f7" />
+          </div>
+        </>
       )}
     </div>
   )

@@ -42,8 +42,8 @@ export function getCurrentNFLWeek(season: number, date: Date = new Date()): numb
 
   // Jan / Feb belong to the playoff window of the previous year's season.
   // By the time we reach this branch, season === currentSeason, meaning
-  // we are in the Jan/Feb tail of that season — it is complete or nearly so.
-  if (month <= 2) return 18
+  // we are in the Jan/Feb tail of that season — playoffs/Super Bowl window.
+  if (month <= 2) return 22
 
   // Before the season has started (before September of the season year)
   if (year < season || (year === season && month < 9)) return 1

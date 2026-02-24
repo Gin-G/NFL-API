@@ -14,40 +14,33 @@ warnings.filterwarnings('ignore')
 class RosterAwareCoachingAnalytics:
     """Fixed coaching analytics system with proper roster evaluation"""
     
-    def __init__(self, years=None):
+    def __init__(self, years=None, max_pbp_years: int = 5):
         if years is None:
             years = [2023]
         self.years = years
+        # PBP is expensive — only load for the most recent seasons.
+        # Schedule data (W-L records) is loaded for all years.
+        self.pbp_years = years[-max_pbp_years:] if max_pbp_years > 0 else []
         self.pbp_data = None
         self.schedule_data = None
         self.coaching_data = {}
         self.player_grades = None
-        
+
         print("NFL Roster-Aware Coaching Analytics System (FIXED)")
         print("=" * 60)
     
     def load_data(self):
-        """Load all necessary data using nflreadpy"""
+        """Load all necessary data using nflreadpy.
+
+        Schedules (W-L records) are loaded for every year in ``self.years``.
+        Play-by-play data (needed for defensive player grades) is loaded only
+        for ``self.pbp_years`` (the most recent N seasons) to keep startup time
+        reasonable when many seasons are requested.
+        """
         print("Loading NFL data with nflreadpy...")
-        
-        # Load play-by-play data using new API
-        print("- Loading play-by-play data...")
-        pbp_list = []
-        for year in self.years:
-            try:
-                # load_pbp() replaces import_pbp_data()
-                # nflreadpy returns Polars DataFrames, convert to Pandas
-                year_pbp = nfl.load_pbp(seasons=[year]).to_pandas()
-                pbp_list.append(year_pbp)
-                print(f"  - {year}: {len(year_pbp)} plays loaded")
-            except Exception as e:
-                print(f"  - Error loading {year}: {e}")
-        
-        if pbp_list:
-            self.pbp_data = pd.concat(pbp_list, ignore_index=True)
-        
-        # Load schedule data using nflreadpy
-        print("- Loading schedule data...")
+
+        # Load schedule data for ALL requested years (fast, used for W-L records)
+        print(f"- Loading schedule data for {len(self.years)} seasons...")
         schedule_list = []
         for year in self.years:
             try:
@@ -56,20 +49,38 @@ class RosterAwareCoachingAnalytics:
                 print(f"  - {year}: {len(year_schedule)} games loaded")
             except Exception as e:
                 print(f"  - Error loading schedule for {year}: {e}")
-        
+
         if schedule_list:
             self.schedule_data = pd.concat(schedule_list, ignore_index=True)
-        
+
+        # Load play-by-play only for recent seasons (used for roster quality grades)
+        if self.pbp_years:
+            print(f"- Loading play-by-play data for {len(self.pbp_years)} recent seasons: {self.pbp_years}")
+            pbp_list = []
+            for year in self.pbp_years:
+                try:
+                    year_pbp = nfl.load_pbp(seasons=[year]).to_pandas()
+                    pbp_list.append(year_pbp)
+                    print(f"  - {year}: {len(year_pbp)} plays loaded")
+                except Exception as e:
+                    print(f"  - Error loading PBP for {year}: {e}")
+
+            if pbp_list:
+                self.pbp_data = pd.concat(pbp_list, ignore_index=True)
+        else:
+            print("- Skipping play-by-play data (max_pbp_years=0)")
+
         print("Data loading complete!")
     
     def calculate_player_grades(self):
         """Calculate simplified but properly scaled player grades"""
         print("Calculating player grades for roster analysis...")
         
-        # Load weekly data for offensive players using new API
+        # Load weekly data for offensive players — use pbp_years to keep this fast
         # load_player_stats() replaces import_weekly_data()
         # Convert Polars to Pandas
-        weekly_data = nfl.load_player_stats(seasons=self.years).to_pandas()
+        stat_years = self.pbp_years if self.pbp_years else self.years[-1:]
+        weekly_data = nfl.load_player_stats(seasons=stat_years).to_pandas()
         
         # Filter to meaningful performances
         weekly_data = weekly_data[
