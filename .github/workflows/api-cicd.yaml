@@ -99,7 +99,7 @@ jobs:
             "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/sync" \
             -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d '{}')
+            -d '{"prune": true}')
           echo "ArgoCD sync response: $HTTP"
           # 200 = sync started; 400 = already syncing / no diff — both acceptable
           [ "$HTTP" = "200" ] || [ "$HTTP" = "400" ] || { echo "Unexpected ArgoCD response: $HTTP"; exit 1; }
