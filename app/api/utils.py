@@ -121,6 +121,14 @@ def clean_data_for_json(data):
         else:
             return None
 
+def _orm_to_dict(obj) -> dict:
+    """Convert a SQLAlchemy ORM row to a plain Python dict.
+
+    Strips SA internal state keys (those starting with '_').
+    """
+    return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+
+
 def check_grading_systems():
     """Check availability of grading systems"""
     systems = {

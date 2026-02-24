@@ -2,6 +2,9 @@
 """
 Chat API Router
 LLM-powered chatbot using Claude tool-use to answer NFL data questions.
+
+Tool execution queries the database first; falls back to nflreadpy when the
+DB has no data for the requested criteria.
 """
 
 import os
@@ -11,10 +14,13 @@ from typing import List
 
 import nflreadpy as nfl
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from .utils import clean_data_for_json, get_current_nfl_season, _to_pandas
+from .utils import clean_data_for_json, get_current_nfl_season, _to_pandas, _orm_to_dict
+from database.session import get_db
+from database.models import PlayerStat, PlayerRoster, Schedule, Team as TeamModel
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,11 +30,11 @@ MAX_ITERATIONS = 5
 MAX_TOKENS = 2048
 
 SYSTEM_PROMPT = (
-    "You are an NFL analytics assistant with access to real NFL data. "
-    "Answer questions about NFL statistics, schedules, teams, players, and coaches. "
-    "Use the provided tools to fetch accurate, up-to-date data. "
-    "Be concise and informative. Format numbers clearly (e.g., '1,234 yards'). "
-    "When ranking players or comparing stats, always use the data tools to get accurate numbers."
+    "You are an NFL analytics assistant. "
+    "You MUST use the provided tools for every factual answer — "
+    "never use your training knowledge for statistics, rosters, scores, or records. "
+    "If a tool returns no data, say so honestly. "
+    "Be concise. Format numbers clearly (e.g., '1,234 yards')."
 )
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
@@ -179,14 +185,32 @@ def _normalize_roster_df(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Tool execution ────────────────────────────────────────────────────────────
 
-def _execute_tool(name: str, inputs: dict):
+def _execute_tool(name: str, inputs: dict, db: Session = None):
     """Execute a named tool call and return JSON-serialisable results."""
     try:
         if name == "get_player_stats":
             season = inputs.get("season") or get_current_nfl_season()
-            stats = _normalize_stats_df(
-                _to_pandas(nfl.load_player_stats(seasons=[season]))
-            )
+            limit = min(int(inputs.get("limit") or 20), 50)
+
+            if db is not None:
+                q = db.query(PlayerStat).filter(PlayerStat.season == season)
+                if inputs.get("position"):
+                    q = q.filter(PlayerStat.position == inputs["position"].upper())
+                if inputs.get("team"):
+                    q = q.filter(PlayerStat.recent_team == inputs["team"].upper())
+                if inputs.get("week") is not None:
+                    q = q.filter(PlayerStat.week == inputs["week"])
+                sort_by = inputs.get("sort_by", "fantasy_points")
+                col = getattr(PlayerStat, sort_by, None)
+                if col is not None:
+                    asc = inputs.get("sort_order", "desc") == "asc"
+                    q = q.order_by(col.asc() if asc else col.desc())
+                rows = q.limit(limit).all()
+                if rows:
+                    return [_orm_to_dict(r) for r in rows]
+
+            # Fallback: nflreadpy
+            stats = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
             if inputs.get("position"):
                 stats = stats[stats["position"] == inputs["position"].upper()]
             if inputs.get("team"):
@@ -197,14 +221,33 @@ def _execute_tool(name: str, inputs: dict):
             if sort_by and sort_by in stats.columns:
                 ascending = inputs.get("sort_order", "desc") == "asc"
                 stats = stats.sort_values(sort_by, ascending=ascending)
-            limit = min(int(inputs.get("limit") or 20), 50)
             return clean_data_for_json(stats.head(limit))
 
         elif name == "get_player_roster":
             season = inputs.get("season") or get_current_nfl_season()
-            rosters = _normalize_roster_df(
-                _to_pandas(nfl.load_rosters_weekly(seasons=[season]))
-            )
+
+            if db is not None:
+                q = db.query(PlayerRoster).filter(PlayerRoster.season == season)
+                if inputs.get("week") is not None:
+                    q = q.filter(PlayerRoster.week == inputs["week"])
+                if inputs.get("team"):
+                    q = q.filter(PlayerRoster.team == inputs["team"].upper())
+                if inputs.get("position"):
+                    q = q.filter(PlayerRoster.position == inputs["position"].upper())
+                rows = q.limit(50).all()
+                if rows:
+                    if inputs.get("week") is None:
+                        # Deduplicate to latest week per player
+                        seen: dict = {}
+                        for r in rows:
+                            existing = seen.get(r.player_id)
+                            if existing is None or r.week > existing.week:
+                                seen[r.player_id] = r
+                        rows = list(seen.values())[:50]
+                    return [_orm_to_dict(r) for r in rows]
+
+            # Fallback: nflreadpy
+            rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
             if inputs.get("week") is not None:
                 rosters = rosters[rosters["week"] == inputs["week"]]
             else:
@@ -219,6 +262,19 @@ def _execute_tool(name: str, inputs: dict):
 
         elif name == "get_schedules":
             season = inputs.get("season") or get_current_nfl_season()
+
+            if db is not None:
+                q = db.query(Schedule).filter(Schedule.season == season)
+                if inputs.get("week") is not None:
+                    q = q.filter(Schedule.week == inputs["week"])
+                if inputs.get("team"):
+                    t = inputs["team"].upper()
+                    q = q.filter((Schedule.home_team == t) | (Schedule.away_team == t))
+                rows = q.limit(50).all()
+                if rows:
+                    return [_orm_to_dict(r) for r in rows]
+
+            # Fallback: nflreadpy
             schedules = _to_pandas(nfl.load_schedules(seasons=[season]))
             if inputs.get("week") is not None:
                 schedules = schedules[schedules["week"] == inputs["week"]]
@@ -230,6 +286,12 @@ def _execute_tool(name: str, inputs: dict):
             return clean_data_for_json(schedules.head(50))
 
         elif name == "get_teams":
+            if db is not None:
+                rows = db.query(TeamModel).all()
+                if rows:
+                    return [_orm_to_dict(r) for r in rows]
+
+            # Fallback: nflreadpy
             teams = _to_pandas(nfl.load_teams())
             return clean_data_for_json(teams)
 
@@ -288,7 +350,7 @@ class ChatResponse(BaseModel):
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     """LLM-powered chat endpoint. Requires ANTHROPIC_API_KEY environment variable."""
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -323,7 +385,6 @@ async def chat(request: ChatRequest):
             if resp.stop_reason == "end_turn":
                 text = "".join(b.text for b in resp.content if b.type == "text")
                 messages.append({"role": "assistant", "content": text})
-                # Return only plain-text message pairs in history (no raw tool blocks)
                 history = [
                     ChatMessage(role=m["role"], content=m["content"])
                     for m in messages
@@ -338,7 +399,7 @@ async def chat(request: ChatRequest):
                         "type": "tool_result",
                         "tool_use_id": block.id,
                         "content": json.dumps(
-                            _execute_tool(block.name, block.input), default=str
+                            _execute_tool(block.name, block.input, db=db), default=str
                         ),
                     }
                     for block in resp.content
@@ -346,7 +407,6 @@ async def chat(request: ChatRequest):
                 ]
                 messages.append({"role": "user", "content": tool_results})
             else:
-                # Unexpected stop reason — bail out of the loop
                 break
 
         raise HTTPException(

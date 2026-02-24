@@ -171,7 +171,11 @@ class TestChatToolUseLoop:
             with patch.dict(sys.modules, {"anthropic": mock_module}):
                 with patch("api.chat._execute_tool", return_value=[]) as mock_exec:
                     client.post("/chat/", json={"message": "test", "history": []})
-        mock_exec.assert_called_once_with("get_player_stats", {"season": 2024, "week": 4, "sort_by": "receiving_yards"})
+        mock_exec.assert_called_once_with(
+            "get_player_stats",
+            {"season": 2024, "week": 4, "sort_by": "receiving_yards"},
+            db=mock_exec.call_args.kwargs["db"],
+        )
 
 
 # ── Request validation ────────────────────────────────────────────────────────

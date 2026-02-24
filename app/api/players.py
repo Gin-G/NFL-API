@@ -1,53 +1,52 @@
 #!/usr/bin/env python3
 """
 Players API Router
-Handles all player-related endpoints including grading
+Handles all player-related endpoints including grading.
+
+DB-first: queries PlayerStat / PlayerRoster tables; falls back to nflreadpy
+when the tables have no data for the requested season.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List, Optional
+from sqlalchemy.orm import Session
 import nflreadpy as nfl
 import pandas as pd
 import logging
-from .utils import clean_data_for_json, get_player_grader, check_grading_systems, get_current_nfl_season, _to_pandas
+from .utils import (
+    clean_data_for_json,
+    get_player_grader,
+    check_grading_systems,
+    get_current_nfl_season,
+    _to_pandas,
+    _orm_to_dict,
+)
+from database.session import get_db
+from database.models import PlayerRoster, PlayerStat
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 def _normalize_roster_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Map nflreadpy load_rosters_weekly column names to the expected API schema.
-
-    nflreadpy uses different column names than the legacy nfl_data_py:
-      gsis_id  → player_id
-      full_name → player_name
-    Heights are returned as numeric inches; convert to "ft-in" string.
-    Rename is a no-op when columns are already in the expected format (tests).
-    """
-    df = df.rename(columns={'gsis_id': 'player_id', 'full_name': 'player_name'})
-    if 'player_display_name' not in df.columns:
+    """Map nflreadpy load_rosters_weekly column names to the expected API schema."""
+    df = df.rename(columns={"gsis_id": "player_id", "full_name": "player_name"})
+    if "player_display_name" not in df.columns:
         df = df.copy()
-        df['player_display_name'] = df.get('player_name')
-    # Convert numeric height (inches) to "ft-in" string when not already a string
-    if 'height' in df.columns and df['height'].dtype != object:
-        df = df.copy() if 'player_display_name' not in df.columns else df
-        df['height'] = df['height'].apply(
+        df["player_display_name"] = df.get("player_name")
+    if "height" in df.columns and df["height"].dtype != object:
+        df = df.copy() if "player_display_name" not in df.columns else df
+        df["height"] = df["height"].apply(
             lambda h: f"{int(h)//12}-{int(h)%12}" if pd.notna(h) else None
         )
     return df
 
 
 def _normalize_stats_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Map nflreadpy load_player_stats column names to the expected API schema.
-
-    nflreadpy uses:
-      team                 → recent_team
-      passing_interceptions → interceptions
-    Rename is a no-op when columns are already in the expected format (tests).
-    """
+    """Map nflreadpy load_player_stats column names to the expected API schema."""
     return df.rename(columns={
-        'team': 'recent_team',
-        'passing_interceptions': 'interceptions',
+        "team": "recent_team",
+        "passing_interceptions": "interceptions",
     })
 
 
@@ -56,37 +55,64 @@ async def get_rosters(
     season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)"),
     week: Optional[int] = Query(None, description="Specific week"),
     team: Optional[str] = Query(None, description="Team abbreviation"),
-    position: Optional[str] = Query(None, description="Player position")
+    position: Optional[str] = Query(None, description="Player position"),
+    db: Session = Depends(get_db),
 ):
-    """Get player rosters with optional filters"""
+    """Get player rosters with optional filters."""
     if season is None:
         season = get_current_nfl_season()
     try:
+        q = db.query(PlayerRoster).filter(PlayerRoster.season == season)
+        if week is not None:
+            q = q.filter(PlayerRoster.week == week)
+        if team is not None:
+            q = q.filter(PlayerRoster.team == team.upper())
+        if position is not None:
+            q = q.filter(PlayerRoster.position == position.upper())
+        rows = q.all()
+
+        if rows:
+            if week is None:
+                # Deduplicate: keep only the latest week entry per player
+                seen: dict = {}
+                for r in rows:
+                    existing = seen.get(r.player_id)
+                    if existing is None or r.week > existing.week:
+                        seen[r.player_id] = r
+                rows = list(seen.values())
+
+            data = [_orm_to_dict(r) for r in rows]
+            return {
+                "status": "success",
+                "season": season,
+                "total_players": len(data),
+                "data": data,
+            }
+
+        # Fallback: nflreadpy
         rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
 
         if week is not None:
-            rosters = rosters[rosters['week'] == week]
+            rosters = rosters[rosters["week"] == week]
         else:
-            # Without a specific week, deduplicate to show each player once
-            # (load_rosters_weekly returns one row per player per week).
-            # Sort so drop_duplicates keeps the latest week's entry.
-            rosters = rosters.sort_values('week').drop_duplicates(subset=['player_id'], keep='last')
+            rosters = rosters.sort_values("week").drop_duplicates(subset=["player_id"], keep="last")
 
         if team is not None:
-            rosters = rosters[rosters['team'] == team.upper()]
+            rosters = rosters[rosters["team"] == team.upper()]
 
         if position is not None:
-            rosters = rosters[rosters['position'] == position.upper()]
+            rosters = rosters[rosters["position"] == position.upper()]
 
         return {
             "status": "success",
             "season": season,
             "total_players": len(rosters),
-            "data": clean_data_for_json(rosters)
+            "data": clean_data_for_json(rosters),
         }
     except Exception as e:
-        logger.error(f"Error fetching rosters: {e}")
+        logger.error("Error fetching rosters: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/stats")
 async def get_player_stats(
@@ -94,54 +120,75 @@ async def get_player_stats(
     player_id: Optional[str] = Query(None, description="Specific player ID"),
     position: Optional[str] = Query(None, description="Player position"),
     team: Optional[str] = Query(None, description="Team abbreviation"),
-    week: Optional[int] = Query(None, description="Specific week")
+    week: Optional[int] = Query(None, description="Specific week"),
+    db: Session = Depends(get_db),
 ):
-    """Get player statistics with optional filters"""
+    """Get player statistics with optional filters."""
     if season is None:
         season = get_current_nfl_season()
     try:
+        q = db.query(PlayerStat).filter(PlayerStat.season == season)
+        if player_id is not None:
+            q = q.filter(PlayerStat.player_id == player_id)
+        if position is not None:
+            q = q.filter(PlayerStat.position == position.upper())
+        if team is not None:
+            q = q.filter(PlayerStat.recent_team == team.upper())
+        if week is not None:
+            q = q.filter(PlayerStat.week == week)
+        rows = q.all()
+
+        if rows:
+            data = [_orm_to_dict(r) for r in rows]
+            return {
+                "status": "success",
+                "season": season,
+                "total_records": len(data),
+                "data": data,
+            }
+
+        # Fallback: nflreadpy
         stats = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
 
         if player_id is not None:
-            stats = stats[stats['player_id'] == player_id]
-
+            stats = stats[stats["player_id"] == player_id]
         if position is not None:
-            stats = stats[stats['position'] == position.upper()]
-
+            stats = stats[stats["position"] == position.upper()]
         if team is not None:
-            stats = stats[stats['recent_team'] == team.upper()]
-
+            stats = stats[stats["recent_team"] == team.upper()]
         if week is not None:
-            stats = stats[stats['week'] == week]
+            stats = stats[stats["week"] == week]
 
         return {
             "status": "success",
             "season": season,
             "total_records": len(stats),
-            "data": clean_data_for_json(stats)
+            "data": clean_data_for_json(stats),
         }
     except Exception as e:
         error_str = str(e)
-        # nfl_data_py raises "HTTP Error 404: Not Found" when weekly data for a
-        # season hasn't been published yet (e.g. the current season is too new).
         if "404" in error_str:
             return {
                 "status": "no_data",
                 "season": season,
                 "total_records": 0,
                 "data": [],
-                "message": f"Weekly stats are not yet available for the {season} season. Try selecting an earlier year."
+                "message": (
+                    f"Weekly stats are not yet available for the {season} season. "
+                    "Try selecting an earlier year."
+                ),
             }
-        logger.error(f"Error fetching player stats: {e}")
+        logger.error("Error fetching player stats: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/grades")
 async def get_player_grades(
     years: Optional[List[int]] = Query(None, description="Years to analyze (defaults to current NFL season)"),
     min_games: int = Query(3, description="Minimum games played"),
-    limit: int = Query(20, description="Maximum results to return")
+    limit: int = Query(20, description="Maximum results to return"),
 ):
-    """Get player performance grades"""
+    """Get player performance grades."""
     if years is None:
         years = [get_current_nfl_season()]
     systems = check_grading_systems()
@@ -151,58 +198,54 @@ async def get_player_grades(
     try:
         grader = get_player_grader(years)
         all_grades = grader.calculate_all_grades(min_games=min_games)
-        
-        # Handle if all_grades is a dict instead of DataFrame
+
         if isinstance(all_grades, dict):
-            if not all_grades or all(df.empty for df in all_grades.values() if hasattr(df, 'empty')):
+            if not all_grades or all(
+                df.empty for df in all_grades.values() if hasattr(df, "empty")
+            ):
                 return {"status": "success", "message": "No grades calculated", "data": []}
-            
-            # Combine all DataFrames from the dict
+
             grade_dfs = []
             for category, df in all_grades.items():
-                if hasattr(df, 'empty') and not df.empty:
+                if hasattr(df, "empty") and not df.empty:
                     df_copy = df.copy()
-                    df_copy['grade_category'] = category
+                    df_copy["grade_category"] = category
                     grade_dfs.append(df_copy)
-            
+
             if not grade_dfs:
                 return {"status": "success", "message": "No grades calculated", "data": []}
-            
+
             combined_grades = pd.concat(grade_dfs, ignore_index=True)
-            
-            # Get top players from combined data
-            if 'numeric_grade' in combined_grades.columns:
-                top_players = combined_grades.nlargest(limit, 'numeric_grade')
+            if "numeric_grade" in combined_grades.columns:
+                top_players = combined_grades.nlargest(limit, "numeric_grade")
             else:
                 top_players = combined_grades.head(limit)
-            
-        elif hasattr(all_grades, 'empty'):
-            # Original DataFrame logic
+
+        elif hasattr(all_grades, "empty"):
             if all_grades.empty:
                 return {"status": "success", "message": "No grades calculated", "data": []}
-            
-            # Get top players
             outliers = grader.identify_performance_outliers(all_grades)
             top_players = grader.get_top_performers(outliers, n=limit)
         else:
             return {"status": "error", "message": "Unexpected data format from grading system"}
-        
+
         return {
             "status": "success",
             "total_players": len(top_players),
-            "data": clean_data_for_json(top_players)
+            "data": clean_data_for_json(top_players),
         }
     except Exception as e:
-        logger.error(f"Error calculating player grades: {e}")
+        logger.error("Error calculating player grades: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/grades/{player_name}")
 async def get_player_grade_details(
     player_name: str,
     years: Optional[List[int]] = Query(None, description="Years to analyze (defaults to current NFL season)"),
-    min_games: int = Query(1, description="Minimum games played")
+    min_games: int = Query(1, description="Minimum games played"),
 ):
-    """Get detailed grade information for a specific player"""
+    """Get detailed grade information for a specific player."""
     if years is None:
         years = [get_current_nfl_season()]
     systems = check_grading_systems()
@@ -212,90 +255,119 @@ async def get_player_grade_details(
     try:
         grader = get_player_grader(years)
         all_grades = grader.calculate_all_grades(min_games=min_games)
-        
-        # Handle different return types from grading system
+
         if isinstance(all_grades, dict):
-            # Combine all DataFrames
             grade_dfs = []
             for category, df in all_grades.items():
-                if hasattr(df, 'empty') and not df.empty:
+                if hasattr(df, "empty") and not df.empty:
                     df_copy = df.copy()
-                    df_copy['grade_category'] = category
+                    df_copy["grade_category"] = category
                     grade_dfs.append(df_copy)
-            
+
             if not grade_dfs:
                 raise HTTPException(status_code=404, detail=f"No grades found for player '{player_name}'")
-            
+
             combined_grades = pd.concat(grade_dfs, ignore_index=True)
-            
-            # Filter to specific player
-            if 'player_name' in combined_grades.columns:
-                player_data = combined_grades[combined_grades['player_name'].str.contains(player_name, case=False)]
+
+            if "player_name" in combined_grades.columns:
+                player_data = combined_grades[
+                    combined_grades["player_name"].str.contains(player_name, case=False)
+                ]
             else:
-                raise HTTPException(status_code=404, detail=f"Player name column not found")
-            
+                raise HTTPException(status_code=404, detail="Player name column not found")
         else:
             outliers = grader.identify_performance_outliers(all_grades)
-            player_data = outliers[outliers['player_name'].str.contains(player_name, case=False)]
-        
+            player_data = outliers[outliers["player_name"].str.contains(player_name, case=False)]
+
         if player_data.empty:
             raise HTTPException(status_code=404, detail=f"Player '{player_name}' not found")
-        
+
         return {
             "status": "success",
             "player_name": player_name,
             "total_records": len(player_data),
-            "data": clean_data_for_json(player_data)
+            "data": clean_data_for_json(player_data),
         }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting player grade details: {e}")
+        logger.error("Error getting player grade details: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/{player_id}")
 async def get_player_details(
     player_id: str,
-    season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)")
+    season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)"),
+    db: Session = Depends(get_db),
 ):
-    """Get detailed information for a specific player"""
+    """Get detailed information for a specific player."""
     if season is None:
         season = get_current_nfl_season()
     try:
-        # Get player stats
-        stats = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
-        player_stats = stats[stats['player_id'] == player_id]
+        # Try DB first
+        stat_rows = db.query(PlayerStat).filter(
+            PlayerStat.player_id == player_id,
+            PlayerStat.season == season,
+        ).all()
+        roster_rows = db.query(PlayerRoster).filter(
+            PlayerRoster.player_id == player_id,
+            PlayerRoster.season == season,
+        ).all()
 
-        # Get roster info
+        if stat_rows or roster_rows:
+            player_info: dict = {}
+            if roster_rows:
+                latest = max(roster_rows, key=lambda r: r.week or 0)
+                player_info = {
+                    "player_id": player_id,
+                    "player_name": latest.player_name or "Unknown",
+                    "position": latest.position or "Unknown",
+                    "team": latest.team or "Unknown",
+                    "height": latest.height,
+                    "weight": latest.weight,
+                    "college": latest.college,
+                    "rookie_year": latest.rookie_year,
+                }
+            return {
+                "status": "success",
+                "player_info": player_info,
+                "season_stats": [_orm_to_dict(r) for r in stat_rows],
+                "games_played": len(stat_rows),
+            }
+
+        # Fallback: nflreadpy
+        stats = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
+        player_stats = stats[stats["player_id"] == player_id]
+
         rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
-        player_roster = rosters[rosters['player_id'] == player_id]
+        player_roster = rosters[rosters["player_id"] == player_id]
 
         if player_stats.empty and player_roster.empty:
             raise HTTPException(status_code=404, detail=f"Player {player_id} not found")
 
-        # Combine data
         player_info = {}
         if not player_roster.empty:
             latest_roster = player_roster.iloc[-1]
             player_info = {
                 "player_id": player_id,
-                "player_name": latest_roster.get('player_name', 'Unknown'),
-                "position": latest_roster.get('position', 'Unknown'),
-                "team": latest_roster.get('team', 'Unknown'),
-                "height": latest_roster.get('height', None),
-                "weight": latest_roster.get('weight', None),
-                "college": latest_roster.get('college', None),
-                "rookie_year": latest_roster.get('rookie_year', None)
+                "player_name": latest_roster.get("player_name", "Unknown"),
+                "position": latest_roster.get("position", "Unknown"),
+                "team": latest_roster.get("team", "Unknown"),
+                "height": latest_roster.get("height", None),
+                "weight": latest_roster.get("weight", None),
+                "college": latest_roster.get("college", None),
+                "rookie_year": latest_roster.get("rookie_year", None),
             }
 
         return {
             "status": "success",
             "player_info": clean_data_for_json(player_info),
             "season_stats": clean_data_for_json(player_stats) if not player_stats.empty else [],
-            "games_played": len(player_stats)
+            "games_played": len(player_stats),
         }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching player {player_id}: {e}")
+        logger.error("Error fetching player %s: %s", player_id, e)
         raise HTTPException(status_code=500, detail=str(e))

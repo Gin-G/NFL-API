@@ -10,9 +10,39 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 # Ensure app directory is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+# ---------------------------------------------------------------------------
+# In-memory SQLite DB for tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def _test_engine():
+    """Session-scoped SQLite in-memory engine with all tables created."""
+    from database.models import Base
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    return engine
+
+
+@pytest.fixture
+def db_session(_test_engine):
+    """Per-test DB session. Rolls back after each test."""
+    Session = sessionmaker(bind=_test_engine)
+    session = Session()
+    yield session
+    session.rollback()
+    session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -147,11 +177,20 @@ def mock_coaching_analytics():
 
 
 # ---------------------------------------------------------------------------
-# Test client
+# Test client — injects an empty in-memory SQLite DB via get_db override.
+# Routers find the DB empty and fall through to nflreadpy, which existing
+# tests mock at the module level.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def client():
+def client(db_session):
     from main import app
+    from database.session import get_db
+
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
     with TestClient(app) as c:
         yield c
+    app.dependency_overrides.clear()

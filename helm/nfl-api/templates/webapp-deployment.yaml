@@ -28,16 +28,16 @@ spec:
         env:
         {{- range .Values.webapp.container.env }}
         - name: {{ .name }}
+          {{- if .value }}
+          value: {{ .value | quote }}
+          {{- else }}
           valueFrom:
             secretKeyRef:
               name: {{ .secretName }}
               key: {{ .secretKey }}
               optional: true
+          {{- end }}
         {{- end }}
         {{- end }}
         ports:
         - containerPort: {{ .Values.webapp.container.port }}
-        resources:
-          limits:
-            cpu: '0'
-            memory: '0'

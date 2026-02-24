@@ -25,6 +25,16 @@ from api.chat import router as chat_router
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Create DB tables on startup (no-op if they already exist; gracefully skipped
+# if the DB is unavailable at startup time — routers will fall back to nflreadpy)
+try:
+    from database.session import engine
+    from database.models import Base
+    Base.metadata.create_all(engine)
+    logger.info("DB tables verified/created.")
+except Exception as _db_startup_err:
+    logger.warning("DB unavailable at startup (tables not created): %s", _db_startup_err)
+
 # Initialize FastAPI app
 app = FastAPI(
     title="NFL Analytics API",

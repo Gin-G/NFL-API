@@ -8,11 +8,24 @@ webapp:
     image: docker.io/ncging/nfl-api:2026-02-24.18.39
     imagePullPolicy: Always
     port: 8000
+    memory: "2Gi"
+    cpu: "1"
     env:
       - name: ANTHROPIC_API_KEY
         secretName: nfl-api-secrets
         secretKey: ANTHROPIC_API_KEY
+      - name: PGUSER
+        secretName: nfl-api-app-user
+        secretKey: username
+      - name: PGPASSWORD
+        secretName: nfl-api-app-user
+        secretKey: password
+      - name: DATABASE_URL
+        value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-rw.nfl-api.svc.cluster.local:5432/nfl-api"
   secrets:
     path: nfl-api
     anthropicKeyProperty: anthropic_api_key
     targetSecret: nfl-api-secrets
+
+db:
+  appUserSecret: nfl-api-app-user
