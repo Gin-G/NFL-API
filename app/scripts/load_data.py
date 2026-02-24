@@ -90,7 +90,7 @@ def main() -> None:
             return
 
         logger.info("Loading seasons %d–%d (%d total)", seasons[0], seasons[-1], len(seasons))
-        load_all_data(db, seasons)
+        load_all_data(db, seasons, force=args.force)
     finally:
         db.close()
 

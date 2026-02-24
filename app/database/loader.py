@@ -276,10 +276,21 @@ def load_player_stats(db: Session, season: int) -> int:
     return count
 
 
-def load_all_data(db: Session, seasons: list) -> None:
-    """Load all nflreadpy data into the DB. Idempotent (upsert via merge)."""
+def _season_loaded(db: Session, season: int) -> bool:
+    """Return True if schedule data for this season is already in the DB."""
+    try:
+        return db.query(Schedule).filter(Schedule.season == season).limit(1).count() > 0
+    except Exception:
+        return False
+
+
+def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
+    """Load all nflreadpy data into the DB. Resumable — skips seasons already present."""
     load_teams(db)
     for season in seasons:
+        if not force and _season_loaded(db, season):
+            logger.info("Season %d already in DB, skipping", season)
+            continue
         logger.info("=== Processing season %d ===", season)
         try:
             load_schedules(db, season)
