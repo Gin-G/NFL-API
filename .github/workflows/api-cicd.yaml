@@ -94,12 +94,15 @@ jobs:
         run: |
           SERVER="$(echo -n "${ARGOCD_SERVER}" | tr -d '[:space:]')"
           SERVER="${SERVER%/}"
-          curl --fail --silent --show-error \
+          HTTP=$(curl --silent --show-error -o /dev/null -w "%{http_code}" \
             -X POST \
             "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/sync" \
             -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d '{}'
+            -d '{}')
+          echo "ArgoCD sync response: $HTTP"
+          # 200 = sync started; 400 = already syncing / no diff — both acceptable
+          [ "$HTTP" = "200" ] || [ "$HTTP" = "400" ] || { echo "Unexpected ArgoCD response: $HTTP"; exit 1; }
 
   # ── 3. Wait for ArgoCD rollout ─────────────────────────────────────────────
   # Isolated in its own job so that the ARGOCD_APP_NAME secret value ("nfl-api")
