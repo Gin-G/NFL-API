@@ -122,20 +122,20 @@ jobs:
           SERVER="${SERVER%/}"
           echo "Giving ArgoCD 15 s to start the rollout..."
           sleep 15
-          echo "Polling ArgoCD for Synced/Healthy (max 5 min)..."
+          echo "Polling ArgoCD for Synced/Healthy (max 10 min)..."
           STATUS="unknown/unknown"
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             STATUS=$(curl -sf \
               -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
               "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}" \
               | jq -r '(.status.sync.status) + "/" + (.status.health.status)' 2>/dev/null \
               || echo "unknown/unknown")
-            echo "  [$i/30] $STATUS"
+            echo "  [$i/60] $STATUS"
             [ "$STATUS" = "Synced/Healthy" ] && { echo "App is live!"; break; }
             sleep 10
           done
           if [ "$STATUS" != "Synced/Healthy" ]; then
-            echo "ERROR: App did not reach Synced/Healthy within 5 minutes"
+            echo "ERROR: App did not reach Synced/Healthy within 10 minutes"
             echo "--- All resource statuses ---"
             curl -sf \
               -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
