@@ -6,9 +6,9 @@ Handles all schedule-related endpoints
 
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
-import nfl_data_py as nfl
+import nflreadpy as nfl
 import logging
-from .utils import clean_data_for_json, get_current_nfl_season
+from .utils import clean_data_for_json, get_current_nfl_season, _to_pandas
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -23,8 +23,8 @@ async def get_schedules(
     if season is None:
         season = get_current_nfl_season()
     try:
-        schedules = nfl.import_schedules([season])
-        
+        schedules = _to_pandas(nfl.load_schedules(seasons=[season]))
+
         if week is not None:
             schedules = schedules[schedules['week'] == week]
         
@@ -49,7 +49,7 @@ async def get_schedules(
 async def get_weekly_schedule(season: int, week: int):
     """Get schedule for a specific week"""
     try:
-        schedules = nfl.import_schedules([season])
+        schedules = _to_pandas(nfl.load_schedules(seasons=[season]))
         week_games = schedules[schedules['week'] == week]
         
         return {

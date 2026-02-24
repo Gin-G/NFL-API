@@ -7,7 +7,13 @@ Handles all coach-related endpoints including grading
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
 import logging
-from .utils import clean_data_for_json, get_coaching_analytics, check_grading_systems, get_current_nfl_season
+from .utils import (
+    clean_data_for_json,
+    get_coaching_analytics,
+    get_sportradar_coaches_client,
+    check_grading_systems,
+    get_current_nfl_season,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,6 +38,46 @@ def _get_coach_season_data(analytics, coach_name, season=None):
                 "games_coached": len(games),
             })
     return sorted(results, key=lambda x: x["season"])
+
+
+@router.get("/staff")
+async def get_coaching_staff(
+    team: Optional[str] = Query(None, description="Filter by team abbreviation (e.g. KC)"),
+):
+    """Get current HC / OC / DC / STC for every NFL team via SportRadar.
+
+    Returns ``configured: false`` (with an empty data list) when
+    ``SPORTRADAR_API_KEY`` is not set, so the API remains functional
+    without a key.
+
+    The first call fetches all 32 team profiles from SportRadar and caches
+    the result for 24 hours.  Subsequent calls are instant.
+    """
+    client = get_sportradar_coaches_client()
+    if client is None:
+        return {
+            "status": "success",
+            "configured": False,
+            "message": (
+                "SportRadar API key not configured. "
+                "Set the SPORTRADAR_API_KEY environment variable to enable this endpoint."
+            ),
+            "data": [],
+        }
+
+    try:
+        staff = client.get_all_team_staff()
+        if team:
+            staff = [s for s in staff if s["team_abbr"].upper() == team.upper()]
+        return {
+            "status": "success",
+            "configured": True,
+            "total_teams": len(staff),
+            "data": staff,
+        }
+    except Exception as e:
+        logger.error(f"Error fetching coaching staff: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/")

@@ -6,6 +6,7 @@ import type {
   CoachAnalysisResponse,
   CoachGradesResponse,
   CoachCompareResponse,
+  TeamStaffResponse,
 } from './types'
 
 function yearsParams(years: number[]) {
@@ -52,6 +53,22 @@ export function useCoachGrades(coachName: string, years: number[] = [getCurrentN
     },
     enabled: !!coachName,
     staleTime: 1000 * 60 * 10,
+  })
+}
+
+/** Fetch HC/OC/DC/STC for all teams (or one team via teamAbbr). */
+export function useTeamStaff(teamAbbr?: string) {
+  return useQuery({
+    queryKey: ['teamStaff', teamAbbr ?? 'all'],
+    queryFn: async () => {
+      const url = teamAbbr
+        ? `/coaches/staff?team=${encodeURIComponent(teamAbbr)}`
+        : '/coaches/staff'
+      const { data } = await apiClient.get<TeamStaffResponse>(url)
+      return data
+    },
+    // Staff rarely changes — cache for 24 hours
+    staleTime: 1000 * 60 * 60 * 24,
   })
 }
 

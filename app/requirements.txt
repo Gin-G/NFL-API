@@ -6,7 +6,6 @@ python-multipart==0.0.6
 
 # NFL Data and Analysis
 nflreadpy
-nfl-data-py
 pandas==2.1.4
 numpy==1.24.3
 scipy==1.11.4

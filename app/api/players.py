@@ -6,10 +6,10 @@ Handles all player-related endpoints including grading
 
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
-import nfl_data_py as nfl
+import nflreadpy as nfl
 import pandas as pd
 import logging
-from .utils import clean_data_for_json, get_player_grader, check_grading_systems, get_current_nfl_season
+from .utils import clean_data_for_json, get_player_grader, check_grading_systems, get_current_nfl_season, _to_pandas
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,7 +25,7 @@ async def get_rosters(
     if season is None:
         season = get_current_nfl_season()
     try:
-        rosters = nfl.import_weekly_rosters([season])
+        rosters = _to_pandas(nfl.load_rosters_weekly(seasons=[season]))
 
         if week is not None:
             rosters = rosters[rosters['week'] == week]
@@ -63,7 +63,7 @@ async def get_player_stats(
     if season is None:
         season = get_current_nfl_season()
     try:
-        stats = nfl.import_weekly_data([season])
+        stats = _to_pandas(nfl.load_player_stats(seasons=[season]))
 
         if player_id is not None:
             stats = stats[stats['player_id'] == player_id]
@@ -226,11 +226,11 @@ async def get_player_details(
         season = get_current_nfl_season()
     try:
         # Get player stats
-        stats = nfl.import_weekly_data([season])
+        stats = _to_pandas(nfl.load_player_stats(seasons=[season]))
         player_stats = stats[stats['player_id'] == player_id]
 
         # Get roster info
-        rosters = nfl.import_weekly_rosters([season])
+        rosters = _to_pandas(nfl.load_rosters_weekly(seasons=[season]))
         player_roster = rosters[rosters['player_id'] == player_id]
 
         if player_stats.empty and player_roster.empty:

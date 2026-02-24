@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { useCoaches, useCoachAnalysis, useCoachGrades } from '../api/coaches'
-import { getCurrentNFLSeason } from '../utils/nflDate'
+import { useCoaches, useCoachAnalysis, useCoachGrades, useTeamStaff } from '../api/coaches'
+import { getAvailableSeasons } from '../utils/nflDate'
 import type { Coach } from '../api/types'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
@@ -9,7 +9,8 @@ import GradeBadge from '../components/ui/GradeBadge'
 import WinPctBarChart from '../components/charts/WinPctBarChart'
 import { X, TrendingUp } from 'lucide-react'
 
-const DEFAULT_YEARS = [getCurrentNFLSeason()]
+// Load all available seasons so coaches show their full career history
+const ALL_YEARS = getAvailableSeasons(1999)
 
 function CoachDetailPanel({
   coachName,
@@ -22,6 +23,14 @@ function CoachDetailPanel({
 }) {
   const { data: analysisData, isLoading: analysisLoading } = useCoachAnalysis(coachName, years)
   const { data: gradesData, isLoading: gradesLoading } = useCoachGrades(coachName, years)
+  const { data: staffData } = useTeamStaff()
+
+  // Find the team entry where this coach is the head coach
+  const staffEntry = staffData?.configured
+    ? staffData.data.find(
+        (s) => s.head_coach?.toLowerCase() === coachName.toLowerCase()
+      )
+    : undefined
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 overflow-y-auto">
@@ -31,6 +40,29 @@ function CoachDetailPanel({
         </button>
 
         <h2 className="text-xl font-bold text-white mb-1">{coachName}</h2>
+
+        {staffEntry && (
+          <div className="flex flex-wrap gap-3 mb-4">
+            {staffEntry.offensive_coordinator && (
+              <div className="bg-slate-700/60 rounded-lg px-3 py-1.5 text-xs">
+                <span className="text-slate-400 mr-1">OC</span>
+                <span className="text-white font-medium">{staffEntry.offensive_coordinator}</span>
+              </div>
+            )}
+            {staffEntry.defensive_coordinator && (
+              <div className="bg-slate-700/60 rounded-lg px-3 py-1.5 text-xs">
+                <span className="text-slate-400 mr-1">DC</span>
+                <span className="text-white font-medium">{staffEntry.defensive_coordinator}</span>
+              </div>
+            )}
+            {staffEntry.special_teams_coordinator && (
+              <div className="bg-slate-700/60 rounded-lg px-3 py-1.5 text-xs">
+                <span className="text-slate-400 mr-1">STC</span>
+                <span className="text-white font-medium">{staffEntry.special_teams_coordinator}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         {(analysisLoading || gradesLoading) && <SkeletonCard rows={6} />}
 
@@ -169,7 +201,7 @@ function CoachCard({ coach, onClick }: { coach: Coach; onClick: () => void }) {
 }
 
 export default function Coaches() {
-  const [years] = useState<number[]>(DEFAULT_YEARS)
+  const years = ALL_YEARS
   const [selected, setSelected] = useState<string | null>(null)
   const [search, setSearch] = useState('')
 

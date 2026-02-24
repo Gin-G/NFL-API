@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useTeams, useTeam } from '../api/teams'
+import { useTeamStaff } from '../api/coaches'
 import type { Team } from '../api/types'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
@@ -23,6 +24,19 @@ function groupTeams(teams: Team[]) {
 
 function TeamDetailPanel({ abbr, onClose }: { abbr: string; onClose: () => void }) {
   const { data, isLoading, error, refetch } = useTeam(abbr)
+  const { data: staffData } = useTeamStaff(abbr)
+
+  // Pick the entry for this team (filter is applied server-side but guard client-side too)
+  const staff = staffData?.configured
+    ? staffData.data.find((s) => s.team_abbr.toUpperCase() === abbr.toUpperCase())
+    : undefined
+
+  const hasStaff =
+    staff &&
+    (staff.head_coach ||
+      staff.offensive_coordinator ||
+      staff.defensive_coordinator ||
+      staff.special_teams_coordinator)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
@@ -53,6 +67,7 @@ function TeamDetailPanel({ abbr, onClose }: { abbr: string; onClose: () => void 
                 <p className="text-slate-400 text-sm">{data.data.team_conf} · {data.data.team_division}</p>
               </div>
             </div>
+
             <div className="space-y-2 text-sm">
               <Row label="Abbreviation" value={data.data.team_abbr} />
               <Row label="Nickname" value={data.data.team_nick ?? '—'} />
@@ -68,6 +83,28 @@ function TeamDetailPanel({ abbr, onClose }: { abbr: string; onClose: () => void 
                 </div>
               )}
             </div>
+
+            {hasStaff && (
+              <div className="mt-4 pt-4 border-t border-slate-700">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
+                  Coaching Staff
+                </p>
+                <div className="space-y-2 text-sm">
+                  {staff!.head_coach && (
+                    <Row label="Head Coach" value={staff!.head_coach} />
+                  )}
+                  {staff!.offensive_coordinator && (
+                    <Row label="Off. Coordinator" value={staff!.offensive_coordinator} />
+                  )}
+                  {staff!.defensive_coordinator && (
+                    <Row label="Def. Coordinator" value={staff!.defensive_coordinator} />
+                  )}
+                  {staff!.special_teams_coordinator && (
+                    <Row label="ST Coordinator" value={staff!.special_teams_coordinator} />
+                  )}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

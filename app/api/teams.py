@@ -5,9 +5,9 @@ Handles all team-related endpoints
 """
 
 from fastapi import APIRouter, HTTPException
-import nfl_data_py as nfl
+import nflreadpy as nfl
 import logging
-from .utils import clean_data_for_json
+from .utils import clean_data_for_json, _to_pandas
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -16,7 +16,7 @@ router = APIRouter()
 async def get_teams():
     """Get all NFL teams"""
     try:
-        teams_data = nfl.import_team_desc()
+        teams_data = _to_pandas(nfl.load_teams())
         cleaned_data = clean_data_for_json(teams_data)
         return {
             "status": "success",
@@ -31,7 +31,7 @@ async def get_teams():
 async def get_team_details(team_abbr: str):
     """Get details for a specific team"""
     try:
-        teams_data = nfl.import_team_desc()
+        teams_data = _to_pandas(nfl.load_teams())
         team = teams_data[teams_data['team_abbr'] == team_abbr.upper()]
         
         if team.empty:

@@ -216,21 +216,21 @@ class TestApiAndDashboardCoexist:
             assert combined_client.get("/health").status_code == 200
 
     def test_teams_not_shadowed(self, combined_client, sample_teams_df):
-        with patch("api.teams.nfl.import_team_desc", return_value=sample_teams_df):
+        with patch("api.teams.nfl.load_teams", return_value=sample_teams_df):
             resp = combined_client.get("/teams/")
         assert resp.status_code == 200
         assert resp.json()["status"] == "success"
 
     def test_schedules_not_shadowed(self, combined_client, sample_schedules_df):
-        with patch("api.schedules.nfl.import_schedules", return_value=sample_schedules_df):
+        with patch("api.schedules.nfl.load_schedules", return_value=sample_schedules_df):
             assert combined_client.get("/schedules/?season=2023").status_code == 200
 
     def test_players_rosters_not_shadowed(self, combined_client, sample_rosters_df):
-        with patch("api.players.nfl.import_weekly_rosters", return_value=sample_rosters_df):
+        with patch("api.players.nfl.load_rosters_weekly", return_value=sample_rosters_df):
             assert combined_client.get("/players/rosters?season=2023").status_code == 200
 
     def test_players_stats_not_shadowed(self, combined_client, sample_weekly_data_df):
-        with patch("api.players.nfl.import_weekly_data", return_value=sample_weekly_data_df):
+        with patch("api.players.nfl.load_player_stats", return_value=sample_weekly_data_df):
             assert combined_client.get("/players/stats?season=2023").status_code == 200
 
     def test_docs_not_shadowed(self, combined_client):
@@ -241,7 +241,7 @@ class TestApiAndDashboardCoexist:
         html = combined_client.get("/dashboard/").text
         assert EXPECTED_ROOT_DIV in html
 
-        with patch("api.teams.nfl.import_team_desc", return_value=sample_teams_df):
+        with patch("api.teams.nfl.load_teams", return_value=sample_teams_df):
             api_resp = combined_client.get("/teams/").json()
         assert api_resp["status"] == "success"
 

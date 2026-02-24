@@ -4,12 +4,22 @@ API Utilities
 Shared functions and utilities for the NFL API
 """
 
+import os
 import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+def _to_pandas(df):
+    """Convert a Polars DataFrame to Pandas, or return as-is if already Pandas.
+
+    nflreadpy returns Polars DataFrames; test fixtures supply Pandas DataFrames
+    directly.  This helper lets both paths work without changing either.
+    """
+    return df.to_pandas() if hasattr(df, "to_pandas") else df
 
 
 def get_current_nfl_season() -> int:
@@ -142,6 +152,20 @@ def get_player_grader(years):
     except Exception as e:
         logger.error(f"Failed to initialize player grader: {e}")
         raise
+
+def get_sportradar_coaches_client():
+    """Return a SportradarCoachesClient if SPORTRADAR_API_KEY is set, else None."""
+    api_key = os.getenv("SPORTRADAR_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from functions.data.sportradar_coaches import SportradarCoachesClient
+        access_level = os.getenv("SPORTRADAR_ACCESS_LEVEL", "trial")
+        return SportradarCoachesClient(api_key, access_level)
+    except Exception as e:
+        logger.error(f"Failed to initialise SportradarCoachesClient: {e}")
+        return None
+
 
 def get_coaching_analytics(years):
     """Get coaching analytics instance"""

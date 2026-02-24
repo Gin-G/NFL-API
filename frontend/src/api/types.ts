@@ -232,6 +232,25 @@ export interface CoachCompareResponse {
   >
 }
 
+// ─── Coaching Staff (SportRadar) ──────────────────────────────────────────────
+
+export interface StaffMember {
+  team_abbr: string
+  team_name: string
+  head_coach: string | null
+  offensive_coordinator: string | null
+  defensive_coordinator: string | null
+  special_teams_coordinator: string | null
+}
+
+export interface TeamStaffResponse {
+  status: string
+  configured: boolean
+  total_teams?: number
+  message?: string
+  data: StaffMember[]
+}
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 export interface HealthResponse {
