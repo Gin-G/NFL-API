@@ -17,10 +17,10 @@ webapp:
         secretName: nfl-api-secrets
         secretKey: ANTHROPIC_API_KEY
       - name: PGUSER
-        secretName: nfl-api-app-user
+        secretName: nfl-api-db-app-user
         secretKey: username
       - name: PGPASSWORD
-        secretName: nfl-api-app-user
+        secretName: nfl-api-db-app-user
         secretKey: password
       - name: DATABASE_URL
         value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api"
@@ -30,4 +30,4 @@ webapp:
     targetSecret: nfl-api-secrets
 
 db:
-  appUserSecret: nfl-api-app-user
+  appUserSecret: nfl-api-db-app-user
