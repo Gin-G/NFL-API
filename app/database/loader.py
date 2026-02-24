@@ -157,7 +157,10 @@ def load_schedules(db: Session, season: int) -> int:
 
 
 def load_rosters(db: Session, season: int) -> int:
-    """Load/update weekly roster data for a season."""
+    """Load/update weekly roster data for a season. Available from 2002 onwards."""
+    if season < 2002:
+        logger.info("Skipping rosters for %d — data only available from 2002", season)
+        return 0
     logger.info("Loading rosters for season %d…", season)
     df = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
     count = 0
