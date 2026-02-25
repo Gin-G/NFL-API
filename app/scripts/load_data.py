@@ -46,13 +46,20 @@ def _is_already_loaded(db, current_season: int) -> bool:
         ).limit(1).count()
         if stat_count == 0:
             return False
-        # PBP table is created dynamically — missing table means not loaded
-        pbp_count = db.execute(
-            text("SELECT COUNT(*) FROM play_by_play WHERE season = :s"),
-            {"s": current_season},
-        ).scalar()
-        return bool(pbp_count and pbp_count > 0)
+        # PBP table is created dynamically — missing table means not loaded.
+        # Run in a savepoint so a missing-table error doesn't abort the whole
+        # transaction (PostgreSQL aborts the entire txn on any error).
+        try:
+            pbp_count = db.execute(
+                text("SELECT COUNT(*) FROM play_by_play WHERE season = :s"),
+                {"s": current_season},
+            ).scalar()
+            return bool(pbp_count and pbp_count > 0)
+        except Exception:
+            db.rollback()
+            return False
     except Exception:
+        db.rollback()
         return False
 
 
