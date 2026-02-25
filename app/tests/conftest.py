@@ -123,6 +123,26 @@ def sample_weekly_data_df():
 
 
 @pytest.fixture
+def sample_pbp_df():
+    return pd.DataFrame([
+        {
+            "game_id": "2023_01_KC_DET", "play_id": 1, "season": 2023, "week": 1,
+            "posteam": "KC", "defteam": "DET", "play_type": "pass", "down": 1,
+            "yards_gained": 12, "epa": 0.5, "success": 1,
+            "fourth_down_converted": 0, "fourth_down_failed": 0,
+            "third_down_converted": 0, "third_down_failed": 0,
+        },
+        {
+            "game_id": "2023_01_KC_DET", "play_id": 2, "season": 2023, "week": 1,
+            "posteam": "KC", "defteam": "DET", "play_type": "run", "down": 2,
+            "yards_gained": 4, "epa": -0.1, "success": 0,
+            "fourth_down_converted": 0, "fourth_down_failed": 0,
+            "third_down_converted": 0, "third_down_failed": 0,
+        },
+    ])
+
+
+@pytest.fixture
 def sample_grades_df():
     return pd.DataFrame([
         {

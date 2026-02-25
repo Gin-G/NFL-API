@@ -158,6 +158,101 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "get_play_by_play",
+        "description": (
+            "Fetch individual play records from the play-by-play database. "
+            "If game_id is provided, returns all plays for that game. "
+            "Otherwise returns up to `limit` plays matching the filters. "
+            "Use to answer questions about specific plays, situations, or game drives."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "game_id": {
+                    "type": "string",
+                    "description": "Game ID e.g. 2024_01_KC_DET — returns all plays for that game",
+                },
+                "season": {
+                    "type": "integer",
+                    "description": "Season year, e.g. 2024",
+                },
+                "week": {
+                    "type": "integer",
+                    "description": "Week number (1-22)",
+                },
+                "team": {
+                    "type": "string",
+                    "description": "Possession team abbreviation, e.g. KC",
+                },
+                "def_team": {
+                    "type": "string",
+                    "description": "Defending team abbreviation",
+                },
+                "play_type": {
+                    "type": "string",
+                    "description": "Play type: pass, run, punt, kickoff, field_goal, etc.",
+                },
+                "down": {
+                    "type": "integer",
+                    "description": "Down number (1-4)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max plays to return when game_id not specified (default 25, max 100)",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_coach_breakdown",
+        "description": (
+            "Full coaching breakdown: formation tendencies (shotgun %, no-huddle, play-action), "
+            "personnel grouping usage (11/12/21 personnel frequency + EPA), "
+            "run scheme (inside/outside rate, L/M/R direction), "
+            "pass detail (avg air yards, deep/screen/intermediate split, direction), "
+            "defensive scheme (personnel groupings, blitz rate, box density, pressure), "
+            "and derived strengths, weaknesses, and tendency labels. "
+            "Use for questions about a coach's style, preferred formations, or scheme identity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "coach_name": {
+                    "type": "string",
+                    "description": "Full coach name, e.g. 'Andy Reid'",
+                },
+                "season": {
+                    "type": "integer",
+                    "description": "Season year, e.g. 2024. Omit for all available seasons.",
+                },
+            },
+            "required": ["coach_name"],
+        },
+    },
+    {
+        "name": "get_coaching_tendencies",
+        "description": (
+            "Fetch aggregated play-calling tendencies for a named NFL head coach. "
+            "Returns offensive metrics (pass rate, EPA, red zone, 4th down aggressiveness) "
+            "and defensive metrics (EPA allowed, stop rates, sack rate). "
+            "Use for questions about coaching strategy, aggressiveness, or play-calling style."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "coach_name": {
+                    "type": "string",
+                    "description": "Full coach name exactly as stored, e.g. 'Andy Reid'",
+                },
+                "season": {
+                    "type": "integer",
+                    "description": "Season year, e.g. 2024. Omit for all available seasons.",
+                },
+            },
+            "required": ["coach_name"],
+        },
+    },
 ]
 
 
@@ -332,6 +427,179 @@ def _execute_tool(name: str, inputs: dict, db: Session = None):
                     "seasons": sorted(seasons, key=lambda x: x["season"]),
                 })
             return result
+
+        elif name == "get_coach_breakdown":
+            from .coaching_pbp import (
+                compute_formation_breakdown,
+                compute_personnel_breakdown,
+                compute_run_scheme,
+                compute_pass_detail,
+                compute_defense_scheme,
+                compute_strengths_weaknesses,
+            )
+            from .coaches import (
+                _compute_offense_tendencies,
+                _compute_defense_tendencies,
+                _sample_plays,
+            )
+            from database.models import Schedule as ScheduleModel
+            from sqlalchemy import or_
+
+            coach_name = inputs.get("coach_name", "")
+            season = inputs.get("season")
+
+            if db is None:
+                return {"error": "Database not available"}
+
+            q = db.query(ScheduleModel).filter(
+                or_(
+                    ScheduleModel.home_coach == coach_name,
+                    ScheduleModel.away_coach == coach_name,
+                )
+            )
+            if season is not None:
+                q = q.filter(ScheduleModel.season == season)
+            games = q.all()
+
+            if not games:
+                return {"error": f"Coach '{coach_name}' not found in schedule data"}
+
+            season_team_pairs: set = set()
+            for g in games:
+                if g.home_coach == coach_name:
+                    season_team_pairs.add((g.season, g.home_team))
+                if g.away_coach == coach_name:
+                    season_team_pairs.add((g.season, g.away_team))
+
+            results = []
+            for s, team in sorted(season_team_pairs):
+                try:
+                    off = _compute_offense_tendencies(db, team, s)
+                    dfn = _compute_defense_tendencies(db, team, s)
+                    form = compute_formation_breakdown(db, team, s)
+                    pers = compute_personnel_breakdown(db, team, s)
+                    runs = compute_run_scheme(db, team, s)
+                    passes = compute_pass_detail(db, team, s)
+                    def_sch = compute_defense_scheme(db, team, s)
+                    insights = compute_strengths_weaknesses(
+                        off, dfn, form, runs, passes, def_sch
+                    )
+                    results.append({
+                        "season": s, "team": team,
+                        "offense": {**off, "formation": form, "personnel": pers,
+                                    "run_scheme": runs, "passing": passes},
+                        "defense": {**dfn, "scheme": def_sch},
+                        "strengths": insights["strengths"],
+                        "weaknesses": insights["weaknesses"],
+                        "tendencies": insights["tendencies"],
+                    })
+                except Exception:
+                    results.append({
+                        "season": s, "team": team,
+                        "status": "no_data", "message": "PBP not yet loaded",
+                    })
+
+            return clean_data_for_json(results)
+
+        elif name == "get_play_by_play":
+            from sqlalchemy import text as sa_text
+            conditions: list = []
+            params: dict = {}
+            game_id = inputs.get("game_id")
+            if game_id:
+                conditions.append("game_id = :game_id")
+                params["game_id"] = game_id
+            if inputs.get("season") is not None:
+                conditions.append("season = :season")
+                params["season"] = inputs["season"]
+            if inputs.get("week") is not None:
+                conditions.append("week = :week")
+                params["week"] = inputs["week"]
+            if inputs.get("team"):
+                conditions.append("posteam = :team")
+                params["team"] = inputs["team"].upper()
+            if inputs.get("def_team"):
+                conditions.append("defteam = :def_team")
+                params["def_team"] = inputs["def_team"].upper()
+            if inputs.get("play_type"):
+                conditions.append("play_type = :play_type")
+                params["play_type"] = inputs["play_type"].lower()
+            if inputs.get("down") is not None:
+                conditions.append("down = :down")
+                params["down"] = inputs["down"]
+
+            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+            cap_n = min(int(inputs.get("limit") or 25), 100)
+            cap = "" if game_id else f"LIMIT {cap_n}"
+
+            try:
+                sql = f"SELECT * FROM play_by_play {where} ORDER BY game_id, play_id {cap}"
+                rows = db.execute(sa_text(sql), params).mappings().all()
+                return {"plays": [dict(r) for r in rows], "total": len(rows)}
+            except Exception:
+                return {"plays": [], "message": "PBP not yet loaded"}
+
+        elif name == "get_coaching_tendencies":
+            from .coaches import (
+                _compute_offense_tendencies,
+                _compute_defense_tendencies,
+                _sample_plays,
+            )
+            from database.models import Schedule as ScheduleModel
+            from sqlalchemy import or_
+
+            coach_name = inputs.get("coach_name", "")
+            season = inputs.get("season")
+
+            if db is None:
+                return {"error": "Database not available"}
+
+            q = db.query(ScheduleModel).filter(
+                or_(
+                    ScheduleModel.home_coach == coach_name,
+                    ScheduleModel.away_coach == coach_name,
+                )
+            )
+            if season is not None:
+                q = q.filter(ScheduleModel.season == season)
+            games = q.all()
+
+            if not games:
+                return {"error": f"Coach '{coach_name}' not found in schedule data"}
+
+            season_team_pairs: set = set()
+            for g in games:
+                if g.home_coach == coach_name:
+                    season_team_pairs.add((g.season, g.home_team))
+                if g.away_coach == coach_name:
+                    season_team_pairs.add((g.season, g.away_team))
+
+            results = []
+            for s, team in sorted(season_team_pairs):
+                try:
+                    offense = _compute_offense_tendencies(db, team, s)
+                    defense = _compute_defense_tendencies(db, team, s)
+                    fourth_sample = _sample_plays(db, team, s, "fourth_down")
+                    third_sample = _sample_plays(db, team, s, "third_down")
+                    results.append({
+                        "coach": coach_name,
+                        "season": s,
+                        "team": team,
+                        "offense": offense,
+                        "defense": defense,
+                        "fourth_down_sample": fourth_sample,
+                        "third_down_sample": third_sample,
+                    })
+                except Exception:
+                    results.append({
+                        "coach": coach_name,
+                        "season": s,
+                        "team": team,
+                        "status": "no_data",
+                        "message": "PBP not yet loaded",
+                    })
+
+            return clean_data_for_json(results)
 
         else:
             return {"error": f"Unknown tool: {name}"}

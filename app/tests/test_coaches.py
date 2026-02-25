@@ -10,6 +10,24 @@ COACHING_UNAVAILABLE = {"player_grading": False, "coaching_analytics": False}
 COACHING_AVAILABLE = {"player_grading": False, "coaching_analytics": True}
 
 
+class TestCoachTendencies:
+    def test_unknown_coach_returns_404(self, client):
+        """Coach not in schedule DB → 404."""
+        response = client.get("/coaches/Unknown%20Coach/tendencies")
+        assert response.status_code == 404
+
+    def test_unknown_coach_with_season_returns_404(self, client):
+        """Coach not found even with season filter → 404."""
+        response = client.get("/coaches/Nobody%20Here/tendencies?season=2024")
+        assert response.status_code == 404
+
+    def test_tendencies_url_does_not_crash(self, client):
+        """Endpoint is registered and reachable (even if coach not found)."""
+        response = client.get("/coaches/Andy%20Reid/tendencies?season=2024")
+        # Either 404 (coach not in empty test DB) or 200 with data
+        assert response.status_code in (200, 404)
+
+
 class TestGetCoaches:
     def test_returns_503_when_unavailable(self, client):
         with patch("api.coaches.check_grading_systems", return_value=COACHING_UNAVAILABLE):

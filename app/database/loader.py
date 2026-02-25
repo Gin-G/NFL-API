@@ -286,6 +286,51 @@ def _season_loaded(db: Session, season: int) -> bool:
         return False
 
 
+def _pbp_season_loaded(db: Session, season: int) -> bool:
+    """Return True if PBP data for this season is already in the DB."""
+    try:
+        from sqlalchemy import text
+        n = db.execute(
+            text("SELECT COUNT(*) FROM play_by_play WHERE season = :s"), {"s": season}
+        ).scalar()
+        return bool(n and n > 0)
+    except Exception:
+        return False  # table doesn't exist yet
+
+
+def load_pbp(db: Session, season: int) -> int:
+    """Load play-by-play data for a season using fast pandas to_sql bulk insert."""
+    if season < 2002:
+        return 0
+    if _pbp_season_loaded(db, season):
+        logger.info("PBP season %d already in DB, skipping", season)
+        return 0
+    logger.info("Loading PBP for season %d...", season)
+    try:
+        df = _to_pandas(nfl.load_pbp(seasons=[season]))
+    except Exception as exc:
+        logger.warning("Skipping PBP for %d: %s", season, exc)
+        return 0
+    df.columns = [c.lower() for c in df.columns]
+    if "season" not in df.columns:
+        df = df.copy()
+        df["season"] = season
+    df = df.replace([float("inf"), float("-inf")], None)
+    df = df.drop_duplicates(subset=["game_id", "play_id"], keep="last")
+    count = len(df)
+    df.to_sql(
+        "play_by_play",
+        con=db.connection(),
+        if_exists="append",
+        index=False,
+        method="multi",
+        chunksize=500,
+    )
+    db.commit()
+    logger.info("PBP loaded for %d: %d plays", season, count)
+    return count
+
+
 def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
     """Load all nflreadpy data into the DB. Resumable — skips seasons already present."""
     load_teams(db)
@@ -308,4 +353,9 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
             load_player_stats(db, season)
         except Exception as exc:
             logger.error("Failed to load player stats for %d: %s", season, exc)
+            db.rollback()
+        try:
+            load_pbp(db, season)
+        except Exception as exc:
+            logger.error("Failed to load PBP for %d: %s", season, exc)
             db.rollback()

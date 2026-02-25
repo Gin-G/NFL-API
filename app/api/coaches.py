@@ -10,6 +10,7 @@ Falls back to nflreadpy-based analytics when the DB is empty.
 from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List, Optional
 import logging
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from .utils import (
@@ -384,6 +385,282 @@ async def get_coach_grades(
     except Exception as e:
         logger.error(f"Error grading coach {coach_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{coach_name}/tendencies")
+async def get_coach_tendencies(
+    coach_name: str,
+    season: Optional[int] = Query(None, description="Season year, e.g. 2024"),
+    db: Session = Depends(get_db),
+):
+    """
+    Get play-calling tendencies for a coach derived from play-by-play data.
+
+    Requires the play_by_play table to be populated (run the data loader first).
+    Returns offensive and defensive aggregations plus sample plays for key situations.
+    """
+    # Find which (season, team) pairs this coach is associated with via schedules
+    q = db.query(Schedule).filter(
+        or_(Schedule.home_coach == coach_name, Schedule.away_coach == coach_name)
+    )
+    if season is not None:
+        q = q.filter(Schedule.season == season)
+    games = q.all()
+
+    if not games:
+        raise HTTPException(status_code=404, detail=f"Coach '{coach_name}' not found")
+
+    # Build set of (season, team) pairs
+    season_team_pairs: set = set()
+    for g in games:
+        if g.home_coach == coach_name:
+            season_team_pairs.add((g.season, g.home_team))
+        if g.away_coach == coach_name:
+            season_team_pairs.add((g.season, g.away_team))
+
+    results = []
+    for s, team in sorted(season_team_pairs):
+        try:
+            offense = _compute_offense_tendencies(db, team, s)
+            defense = _compute_defense_tendencies(db, team, s)
+            fourth_down_sample = _sample_plays(db, team, s, "fourth_down")
+            third_down_sample = _sample_plays(db, team, s, "third_down")
+        except Exception as exc:
+            logger.warning("PBP query failed for %s %s: %s", team, s, exc)
+            return {"status": "no_data", "message": "PBP not yet loaded"}
+
+        results.append({
+            "coach": coach_name,
+            "season": s,
+            "team": team,
+            "offense": offense,
+            "defense": defense,
+            "fourth_down_sample": fourth_down_sample,
+            "third_down_sample": third_down_sample,
+        })
+
+    return {
+        "status": "success",
+        "coach": coach_name,
+        "season": season,
+        "data": clean_data_for_json(results),
+    }
+
+
+def _compute_offense_tendencies(db, team: str, season: int) -> dict:
+    """Run offensive aggregation SQL for a team+season."""
+    sql = text("""
+        SELECT
+            COUNT(*) FILTER (WHERE play_type IN ('pass', 'run')) AS total_plays,
+            AVG(CASE WHEN play_type = 'pass' THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE play_type IN ('pass', 'run')) AS pass_rate,
+            AVG(epa) FILTER (WHERE play_type IN ('pass', 'run')) AS avg_epa_per_play,
+            AVG(CASE WHEN play_type = 'pass' THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE yardline_100 <= 20 AND play_type IN ('pass', 'run')) AS red_zone_pass_rate,
+            COUNT(*) FILTER (WHERE fourth_down_converted = 1 OR fourth_down_failed = 1) AS fourth_down_attempts,
+            AVG(CASE WHEN fourth_down_converted = 1 THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE fourth_down_converted = 1 OR fourth_down_failed = 1) AS fourth_down_conv_rate,
+            COUNT(*) FILTER (WHERE two_point_attempt = 1) AS two_point_attempts,
+            AVG(CASE WHEN two_point_conv_result = 'success' THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE two_point_attempt = 1) AS two_point_success_rate,
+            AVG(CASE WHEN third_down_converted = 1 THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE third_down_converted = 1 OR third_down_failed = 1) AS third_down_conv_rate
+        FROM play_by_play
+        WHERE posteam = :team AND season = :season
+          AND play_type IN ('pass', 'run', 'no_play')
+    """)
+    row = db.execute(sql, {"team": team, "season": season}).mappings().first()
+
+    # Pass rate by down
+    down_sql = text("""
+        SELECT down,
+            AVG(CASE WHEN play_type = 'pass' THEN 1.0 ELSE 0.0 END) AS pass_rate
+        FROM play_by_play
+        WHERE posteam = :team AND season = :season
+          AND play_type IN ('pass', 'run')
+          AND down IS NOT NULL
+        GROUP BY down
+        ORDER BY down
+    """)
+    down_rows = db.execute(down_sql, {"team": team, "season": season}).mappings().all()
+    pass_rate_by_down = {
+        str(int(r["down"])): round(float(r["pass_rate"]), 3) if r["pass_rate"] is not None else None
+        for r in down_rows
+    }
+
+    def _pct(v):
+        return round(float(v), 3) if v is not None else None
+
+    def _int(v):
+        return int(v) if v is not None else 0
+
+    return {
+        "total_plays": _int(row["total_plays"]) if row else 0,
+        "pass_rate": _pct(row["pass_rate"]) if row else None,
+        "pass_rate_by_down": pass_rate_by_down,
+        "avg_epa_per_play": _pct(row["avg_epa_per_play"]) if row else None,
+        "red_zone_pass_rate": _pct(row["red_zone_pass_rate"]) if row else None,
+        "fourth_down_attempts": _int(row["fourth_down_attempts"]) if row else 0,
+        "fourth_down_conversion_rate": _pct(row["fourth_down_conv_rate"]) if row else None,
+        "two_point_attempts": _int(row["two_point_attempts"]) if row else 0,
+        "two_point_success_rate": _pct(row["two_point_success_rate"]) if row else None,
+        "third_down_conversion_rate": _pct(row["third_down_conv_rate"]) if row else None,
+    }
+
+
+def _compute_defense_tendencies(db, team: str, season: int) -> dict:
+    """Run defensive aggregation SQL for a team+season."""
+    sql = text("""
+        SELECT
+            COUNT(*) FILTER (WHERE play_type IN ('pass', 'run')) AS total_plays,
+            AVG(epa) FILTER (WHERE play_type IN ('pass', 'run')) AS avg_epa_allowed_per_play,
+            AVG(CASE WHEN third_down_failed = 1 THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE third_down_converted = 1 OR third_down_failed = 1) AS third_down_stop_rate,
+            AVG(CASE WHEN touchdown = 1 THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE yardline_100 <= 20 AND play_type IN ('pass', 'run')) AS red_zone_td_rate_allowed,
+            AVG(CASE WHEN sack = 1 THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE play_type IN ('pass', 'run')) AS sack_rate
+        FROM play_by_play
+        WHERE defteam = :team AND season = :season
+          AND play_type IN ('pass', 'run', 'no_play')
+    """)
+    row = db.execute(sql, {"team": team, "season": season}).mappings().first()
+
+    def _pct(v):
+        return round(float(v), 3) if v is not None else None
+
+    def _int(v):
+        return int(v) if v is not None else 0
+
+    return {
+        "total_plays": _int(row["total_plays"]) if row else 0,
+        "avg_epa_allowed_per_play": _pct(row["avg_epa_allowed_per_play"]) if row else None,
+        "third_down_stop_rate": _pct(row["third_down_stop_rate"]) if row else None,
+        "red_zone_td_rate_allowed": _pct(row["red_zone_td_rate_allowed"]) if row else None,
+        "sack_rate": _pct(row["sack_rate"]) if row else None,
+    }
+
+
+def _sample_plays(db, team: str, season: int, situation: str) -> list:
+    """Return up to 5 plays sorted by |epa| for a given situation."""
+    if situation == "fourth_down":
+        where_extra = "AND (fourth_down_converted = 1 OR fourth_down_failed = 1)"
+    else:  # third_down
+        where_extra = "AND (third_down_converted = 1 OR third_down_failed = 1)"
+
+    sql = text(f"""
+        SELECT desc, yards_gained, epa, week, game_id
+        FROM play_by_play
+        WHERE posteam = :team AND season = :season
+          AND play_type IN ('pass', 'run')
+          {where_extra}
+        ORDER BY ABS(epa) DESC
+        LIMIT 5
+    """)
+    rows = db.execute(sql, {"team": team, "season": season}).mappings().all()
+    return [
+        {
+            "desc": r["desc"],
+            "yards_gained": r["yards_gained"],
+            "epa": round(float(r["epa"]), 3) if r["epa"] is not None else None,
+            "week": r["week"],
+            "game_id": r["game_id"],
+        }
+        for r in rows
+    ]
+
+
+@router.get("/{coach_name}/breakdown")
+async def get_coach_breakdown(
+    coach_name: str,
+    season: Optional[int] = Query(None, description="Season year, e.g. 2024"),
+    db: Session = Depends(get_db),
+):
+    """
+    Full coaching breakdown from PBP data.
+
+    Returns formation tendencies (shotgun %, no-huddle, play-action),
+    personnel groupings (11/12/21 personnel frequency + EPA),
+    run scheme (inside vs outside, direction breakdown),
+    pass detail (air yards, depth zones, direction, scramble rate),
+    defensive scheme (personnel groupings, blitz rate, box density),
+    and derived strengths, weaknesses, and tendency labels.
+
+    Requires the play_by_play table to be populated (run the data loader first).
+    """
+    from .coaching_pbp import (
+        compute_formation_breakdown,
+        compute_personnel_breakdown,
+        compute_run_scheme,
+        compute_pass_detail,
+        compute_defense_scheme,
+        compute_strengths_weaknesses,
+    )
+
+    q = db.query(Schedule).filter(
+        or_(Schedule.home_coach == coach_name, Schedule.away_coach == coach_name)
+    )
+    if season is not None:
+        q = q.filter(Schedule.season == season)
+    games = q.all()
+
+    if not games:
+        raise HTTPException(status_code=404, detail=f"Coach '{coach_name}' not found")
+
+    season_team_pairs: set = set()
+    for g in games:
+        if g.home_coach == coach_name:
+            season_team_pairs.add((g.season, g.home_team))
+        if g.away_coach == coach_name:
+            season_team_pairs.add((g.season, g.away_team))
+
+    results = []
+    for s, team in sorted(season_team_pairs):
+        try:
+            offense_summary = _compute_offense_tendencies(db, team, s)
+            defense_summary = _compute_defense_tendencies(db, team, s)
+            formation = compute_formation_breakdown(db, team, s)
+            personnel = compute_personnel_breakdown(db, team, s)
+            run_scheme = compute_run_scheme(db, team, s)
+            pass_detail = compute_pass_detail(db, team, s)
+            def_scheme = compute_defense_scheme(db, team, s)
+            fourth_sample = _sample_plays(db, team, s, "fourth_down")
+            third_sample = _sample_plays(db, team, s, "third_down")
+            insights = compute_strengths_weaknesses(
+                offense_summary, defense_summary,
+                formation, run_scheme, pass_detail, def_scheme,
+            )
+        except Exception as exc:
+            logger.warning("Breakdown failed for %s %s: %s", team, s, exc)
+            return {"status": "no_data", "message": "PBP not yet loaded"}
+
+        results.append({
+            "season": s,
+            "team": team,
+            "offense": {
+                **offense_summary,
+                "formation": formation,
+                "personnel": personnel,
+                "run_scheme": run_scheme,
+                "passing": pass_detail,
+                "fourth_down_sample": fourth_sample,
+                "third_down_sample": third_sample,
+            },
+            "defense": {
+                **defense_summary,
+                "scheme": def_scheme,
+            },
+            "strengths": insights["strengths"],
+            "weaknesses": insights["weaknesses"],
+            "tendencies": insights["tendencies"],
+        })
+
+    return {
+        "status": "success",
+        "coach": coach_name,
+        "season": season,
+        "data": clean_data_for_json(results),
+    }
 
 
 @router.post("/compare")
