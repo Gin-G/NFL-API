@@ -37,8 +37,9 @@ function CoachDetailPanel({
     : undefined
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 overflow-y-auto">
-      <div className="bg-slate-800 rounded-2xl w-full max-w-3xl border border-slate-700 p-6 relative my-4">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60">
+      <div className="min-h-full flex items-start justify-center p-4">
+      <div className="bg-slate-800 rounded-2xl w-full max-w-3xl border border-slate-700 p-6 relative my-8">
         <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-white">
           <X size={20} />
         </button>
@@ -178,6 +179,7 @@ function CoachDetailPanel({
 
         {/* Scheme Breakdown tab */}
         {tab === 'breakdown' && <CoachBreakdown coachName={coachName} />}
+      </div>
       </div>
     </div>
   )
