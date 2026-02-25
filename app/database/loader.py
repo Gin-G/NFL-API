@@ -288,24 +288,21 @@ def _season_loaded(db: Session, season: int) -> bool:
 
 def _pbp_season_loaded(db: Session, season: int) -> bool:
     """Return True if PBP data for this season is already in the DB."""
+    from .session import engine
+    from sqlalchemy import text
     try:
-        from sqlalchemy import text
-        n = db.execute(
-            text("SELECT COUNT(*) FROM play_by_play WHERE season = :s"), {"s": season}
-        ).scalar()
+        with engine.connect() as conn:
+            n = conn.execute(
+                text("SELECT COUNT(*) FROM play_by_play WHERE season = :s"), {"s": season}
+            ).scalar()
         return bool(n and n > 0)
     except Exception:
-        # Missing table aborts the PostgreSQL transaction — must rollback before
-        # any subsequent DB operations (e.g. df.to_sql) will work.
-        try:
-            db.rollback()
-        except Exception:
-            pass
         return False  # table doesn't exist yet
 
 
 def load_pbp(db: Session, season: int) -> int:
     """Load play-by-play data for a season using fast pandas to_sql bulk insert."""
+    from .session import engine
     if season < 2002:
         return 0
     if _pbp_season_loaded(db, season):
@@ -324,15 +321,17 @@ def load_pbp(db: Session, season: int) -> int:
     df = df.replace([float("inf"), float("-inf")], None)
     df = df.drop_duplicates(subset=["game_id", "play_id"], keep="last")
     count = len(df)
+    # Use engine directly so pandas manages its own connection and auto-commits.
+    # Avoids the session transaction being left in an aborted state by the
+    # _pbp_season_loaded check above (missing table aborts a PostgreSQL txn).
     df.to_sql(
         "play_by_play",
-        con=db.connection(),
+        con=engine,
         if_exists="append",
         index=False,
         method="multi",
         chunksize=500,
     )
-    db.commit()
     logger.info("PBP loaded for %d: %d plays", season, count)
     return count
 
