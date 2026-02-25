@@ -20,6 +20,10 @@ spec:
         app: {{ .Values.webapp.name }}-db-loader
     spec:
       restartPolicy: OnFailure
+      # Pin to the control-plane node which has ample RAM.
+      # gingworker (7.8 GiB) is heavily overcommitted and crashes under load.
+      nodeSelector:
+        kubernetes.io/hostname: gingmachine
       containers:
         - name: loader
           image: {{ .Values.webapp.container.image }}
@@ -41,8 +45,8 @@ spec:
               value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.{{ .Release.Namespace }}.svc.cluster.local:5432/nfl-api-db"
           resources:
             requests:
-              memory: "1Gi"
-              cpu: "500m"
+              memory: "512Mi"
+              cpu: "250m"
             limits:
-              memory: "4Gi"
-              cpu: "2"
+              memory: "2Gi"
+              cpu: "1"
