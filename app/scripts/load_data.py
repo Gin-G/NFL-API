@@ -34,8 +34,9 @@ def _current_nfl_season() -> int:
 
 
 def _is_already_loaded(db, current_season: int) -> bool:
-    """Return True if teams and current-season stats are already in the DB."""
+    """Return True if teams, current-season stats, AND current-season PBP are in the DB."""
     from database.models import Team, PlayerStat
+    from sqlalchemy import text
     try:
         team_count = db.query(Team).limit(1).count()
         if team_count == 0:
@@ -43,7 +44,14 @@ def _is_already_loaded(db, current_season: int) -> bool:
         stat_count = db.query(PlayerStat).filter(
             PlayerStat.season == current_season
         ).limit(1).count()
-        return stat_count > 0
+        if stat_count == 0:
+            return False
+        # PBP table is created dynamically — missing table means not loaded
+        pbp_count = db.execute(
+            text("SELECT COUNT(*) FROM play_by_play WHERE season = :s"),
+            {"s": current_season},
+        ).scalar()
+        return bool(pbp_count and pbp_count > 0)
     except Exception:
         return False
 
