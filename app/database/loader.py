@@ -335,25 +335,27 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
     """Load all nflreadpy data into the DB. Resumable — skips seasons already present."""
     load_teams(db)
     for season in seasons:
-        if not force and _season_loaded(db, season):
-            logger.info("Season %d already in DB, skipping", season)
-            continue
-        logger.info("=== Processing season %d ===", season)
-        try:
-            load_schedules(db, season)
-        except Exception as exc:
-            logger.error("Failed to load schedules for %d: %s", season, exc)
-            db.rollback()
-        try:
-            load_rosters(db, season)
-        except Exception as exc:
-            logger.error("Failed to load rosters for %d: %s", season, exc)
-            db.rollback()
-        try:
-            load_player_stats(db, season)
-        except Exception as exc:
-            logger.error("Failed to load player stats for %d: %s", season, exc)
-            db.rollback()
+        season_present = not force and _season_loaded(db, season)
+        if season_present:
+            logger.info("Season %d schedules/rosters/stats already in DB, skipping to PBP", season)
+        else:
+            logger.info("=== Processing season %d ===", season)
+            try:
+                load_schedules(db, season)
+            except Exception as exc:
+                logger.error("Failed to load schedules for %d: %s", season, exc)
+                db.rollback()
+            try:
+                load_rosters(db, season)
+            except Exception as exc:
+                logger.error("Failed to load rosters for %d: %s", season, exc)
+                db.rollback()
+            try:
+                load_player_stats(db, season)
+            except Exception as exc:
+                logger.error("Failed to load player stats for %d: %s", season, exc)
+                db.rollback()
+        # PBP is always attempted — _pbp_season_loaded() skips if already present
         try:
             load_pbp(db, season)
         except Exception as exc:
