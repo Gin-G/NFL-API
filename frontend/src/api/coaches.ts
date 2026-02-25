@@ -7,6 +7,7 @@ import type {
   CoachGradesResponse,
   CoachCompareResponse,
   TeamStaffResponse,
+  CoachBreakdownResponse,
 } from './types'
 
 function yearsParams(years: number[]) {
@@ -69,6 +70,20 @@ export function useTeamStaff(teamAbbr?: string) {
     },
     // Staff rarely changes — cache for 24 hours
     staleTime: 1000 * 60 * 60 * 24,
+  })
+}
+
+export function useCoachBreakdown(coachName: string, season?: number) {
+  return useQuery({
+    queryKey: ['coachBreakdown', coachName, season],
+    queryFn: async () => {
+      const base = `/coaches/${encodeURIComponent(coachName)}/breakdown`
+      const url = season !== undefined ? `${base}?season=${season}` : base
+      const { data } = await apiClient.get<CoachBreakdownResponse>(url)
+      return data
+    },
+    enabled: !!coachName,
+    staleTime: 1000 * 60 * 10,
   })
 }
 

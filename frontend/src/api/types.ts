@@ -251,6 +251,135 @@ export interface TeamStaffResponse {
   data: StaffMember[]
 }
 
+// ─── Coach Breakdown (PBP analytics) ─────────────────────────────────────────
+
+export interface FormationEntry {
+  plays: number
+  pct_of_plays: number
+  pass_rate: number | null
+  avg_epa: number | null
+  success_rate: number | null
+}
+
+export interface PersonnelEntry {
+  plays: number
+  pct_of_plays: number
+  pass_rate: number | null
+  avg_epa: number | null
+  success_rate: number | null
+  avg_yards: number | null
+}
+
+export interface RunLocationEntry {
+  plays: number
+  avg_yards: number | null
+  avg_epa: number | null
+  success_rate: number | null
+}
+
+export interface PassDirectionEntry {
+  plays: number
+  avg_epa: number | null
+  success_rate: number | null
+  avg_air_yards: number | null
+}
+
+export interface DefPersonnelEntry {
+  plays: number
+  pct_of_plays: number
+  avg_epa_allowed: number | null
+  opponent_success_rate: number | null
+}
+
+export interface FormationBreakdown {
+  shotgun_rate: number | null
+  no_huddle_rate: number | null
+  play_action_rate: number | null
+  formation_breakdown: Record<string, FormationEntry>
+}
+
+export interface RunScheme {
+  total_runs: number
+  inside_rate: number | null
+  outside_rate: number | null
+  by_location: Record<string, RunLocationEntry>
+}
+
+export interface PassDetail {
+  avg_air_yards: number | null
+  deep_pass_rate: number | null
+  screen_rate: number | null
+  intermediate_rate: number | null
+  scramble_rate: number | null
+  dropback_epa: number | null
+  avg_yac: number | null
+  by_direction: Record<string, PassDirectionEntry>
+}
+
+export interface DefenseScheme {
+  blitz_rate: number | null
+  avg_defenders_in_box: number | null
+  blitz_epa_allowed: number | null
+  non_blitz_epa_allowed: number | null
+  qb_hit_rate: number | null
+  sack_rate: number | null
+  personnel_breakdown: Record<string, DefPersonnelEntry>
+}
+
+export interface SamplePlay {
+  desc: string | null
+  yards_gained: number | null
+  epa: number | null
+  week: number | null
+  game_id: string | null
+}
+
+export interface BreakdownOffense {
+  total_plays: number
+  pass_rate: number | null
+  pass_rate_by_down: Record<string, number | null>
+  avg_epa_per_play: number | null
+  red_zone_pass_rate: number | null
+  fourth_down_attempts: number
+  fourth_down_conversion_rate: number | null
+  two_point_attempts: number
+  two_point_success_rate: number | null
+  third_down_conversion_rate: number | null
+  formation: FormationBreakdown
+  personnel: Record<string, PersonnelEntry>
+  run_scheme: RunScheme
+  passing: PassDetail
+  fourth_down_sample: SamplePlay[]
+  third_down_sample: SamplePlay[]
+}
+
+export interface BreakdownDefense {
+  total_plays: number
+  avg_epa_allowed_per_play: number | null
+  third_down_stop_rate: number | null
+  red_zone_td_rate_allowed: number | null
+  sack_rate: number | null
+  scheme: DefenseScheme
+}
+
+export interface CoachBreakdownEntry {
+  season: number
+  team: string
+  offense: BreakdownOffense
+  defense: BreakdownDefense
+  strengths: string[]
+  weaknesses: string[]
+  tendencies: string[]
+}
+
+export interface CoachBreakdownResponse {
+  status: string
+  coach: string
+  season: number | null
+  data: CoachBreakdownEntry[]
+  message?: string
+}
+
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {
