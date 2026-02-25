@@ -295,6 +295,12 @@ def _pbp_season_loaded(db: Session, season: int) -> bool:
         ).scalar()
         return bool(n and n > 0)
     except Exception:
+        # Missing table aborts the PostgreSQL transaction — must rollback before
+        # any subsequent DB operations (e.g. df.to_sql) will work.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return False  # table doesn't exist yet
 
 
