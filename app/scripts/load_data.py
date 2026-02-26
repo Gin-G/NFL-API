@@ -34,8 +34,8 @@ def _current_nfl_season() -> int:
 
 
 def _is_already_loaded(db, current_season: int) -> bool:
-    """Return True if teams, current-season stats, AND PBP for current + prior season are in DB."""
-    from database.models import Team, PlayerStat
+    """Return True if teams, PBP for current + prior seasons, AND coach analytics cache are in DB."""
+    from database.models import Team, PlayerStat, CoachSeasonAnalytics
     from database.session import engine
     from sqlalchemy import text
     try:
@@ -49,8 +49,7 @@ def _is_already_loaded(db, current_season: int) -> bool:
             return False
         # PBP table is created dynamically — use a fresh engine connection so a
         # missing-table error doesn't abort the session's PostgreSQL transaction.
-        # Check both current and prior season so a partial load (e.g. only current-season
-        # PBP present) doesn't incorrectly skip loading prior seasons.
+        # Check both current and prior season so a partial load doesn't skip reloading.
         try:
             with engine.connect() as conn:
                 for season_to_check in [current_season, current_season - 1]:
@@ -60,9 +59,19 @@ def _is_already_loaded(db, current_season: int) -> bool:
                     ).scalar()
                     if not (pbp_count and pbp_count > 0):
                         return False
-            return True
         except Exception:
             return False
+        # Coach analytics cache must be populated for recent seasons, otherwise
+        # breakdown queries fall through to expensive real-time PBP computation.
+        try:
+            analytics_count = db.query(CoachSeasonAnalytics).filter(
+                CoachSeasonAnalytics.season >= current_season - 1
+            ).limit(1).count()
+            if analytics_count == 0:
+                return False
+        except Exception:
+            return False
+        return True
     except Exception:
         db.rollback()
         return False

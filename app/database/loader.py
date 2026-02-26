@@ -9,6 +9,7 @@ SELECT + INSERT or UPDATE based on the primary key.
 import logging
 import pandas as pd
 import nflreadpy as nfl
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .models import Team, Schedule, PlayerRoster, PlayerStat
@@ -332,6 +333,21 @@ def load_pbp(db: Session, season: int) -> int:
         method="multi",
         chunksize=500,
     )
+    # Create indexes after first insert so coaching analytics queries are fast.
+    # CONCURRENTLY not allowed inside a transaction, so use separate connection.
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_pbp_season_posteam "
+                "ON play_by_play (season, posteam)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_pbp_season_defteam "
+                "ON play_by_play (season, defteam)"
+            ))
+            conn.commit()
+    except Exception as idx_exc:
+        logger.warning("Could not create PBP indexes: %s", idx_exc)
     logger.info("PBP loaded for %d: %d plays", season, count)
     return count
 
