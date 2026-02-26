@@ -34,7 +34,7 @@ def _current_nfl_season() -> int:
 
 
 def _is_already_loaded(db, current_season: int) -> bool:
-    """Return True if teams, current-season stats, AND current-season PBP are in the DB."""
+    """Return True if teams, current-season stats, AND PBP for current + prior season are in DB."""
     from database.models import Team, PlayerStat
     from database.session import engine
     from sqlalchemy import text
@@ -49,13 +49,18 @@ def _is_already_loaded(db, current_season: int) -> bool:
             return False
         # PBP table is created dynamically — use a fresh engine connection so a
         # missing-table error doesn't abort the session's PostgreSQL transaction.
+        # Check both current and prior season so a partial load (e.g. only current-season
+        # PBP present) doesn't incorrectly skip loading prior seasons.
         try:
             with engine.connect() as conn:
-                pbp_count = conn.execute(
-                    text("SELECT COUNT(*) FROM play_by_play WHERE season = :s"),
-                    {"s": current_season},
-                ).scalar()
-            return bool(pbp_count and pbp_count > 0)
+                for season_to_check in [current_season, current_season - 1]:
+                    pbp_count = conn.execute(
+                        text("SELECT COUNT(*) FROM play_by_play WHERE season = :s"),
+                        {"s": season_to_check},
+                    ).scalar()
+                    if not (pbp_count and pbp_count > 0):
+                        return False
+            return True
         except Exception:
             return False
     except Exception:
