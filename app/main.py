@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.types import Scope
+from starlette.types import ASGIApp, Receive, Scope, Send
 from datetime import datetime
 import logging
 import os
@@ -36,12 +36,30 @@ try:
 except Exception as _db_startup_err:
     logger.warning("DB unavailable at startup (tables not created): %s", _db_startup_err)
 
+class ProxySchemeMiddleware:
+    """Trust X-Forwarded-Proto from nginx ingress so redirect URLs use https://."""
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            headers = dict(scope.get("headers", []))
+            proto = headers.get(b"x-forwarded-proto", b"").decode()
+            if proto in ("https", "http"):
+                scope = dict(scope)
+                scope["scheme"] = proto
+        await self.app(scope, receive, send)
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="NFL Analytics API",
     description="NFL data and analytics API with modular structure",
     version="1.0.0"
 )
+
+# Trust X-Forwarded-Proto from nginx ingress (fixes https:// redirects for /dashboard)
+app.add_middleware(ProxySchemeMiddleware)
 
 # Add CORS middleware
 app.add_middleware(
