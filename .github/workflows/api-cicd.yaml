@@ -102,6 +102,12 @@ jobs:
         run: |
           SERVER="$(echo -n "${ARGOCD_SERVER}" | tr -d '[:space:]')"
           SERVER="${SERVER%/}"
+          # Terminate any stuck/running operation from a previous sync before starting fresh
+          echo "Terminating any existing ArgoCD operation..."
+          curl -s -X DELETE \
+            "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/operation" \
+            -H "Authorization: Bearer ${ARGOCD_TOKEN}" || true
+          sleep 5
           HTTP=$(curl --silent --show-error -o /dev/null -w "%{http_code}" \
             -X POST \
             "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/sync" \
@@ -132,10 +138,11 @@ jobs:
           echo "Expected revision: ${EXPECTED_SHA}"
           echo "Giving ArgoCD 30 s to detect the new commit and start the rollout..."
           sleep 30
-          echo "Polling ArgoCD for Synced/Healthy at revision ${EXPECTED_SHA} (max 10 min)..."
+          echo "Polling ArgoCD for Synced/Healthy at revision ${EXPECTED_SHA} (max 20 min)..."
           STATUS="unknown/unknown"
           REVISION="none"
-          for i in $(seq 1 60); do
+          RETRIED=0
+          for i in $(seq 1 120); do
             RESPONSE=$(curl -sf \
               -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
               "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}" 2>/dev/null || echo "{}")
@@ -145,10 +152,29 @@ jobs:
             REVISION=$(echo "$RESPONSE" \
               | jq -r '.status.sync.revision // "none"' 2>/dev/null \
               || echo "none")
-            echo "  [$i/60] $STATUS (revision: ${REVISION:0:8})"
+            OP_PHASE=$(echo "$RESPONSE" \
+              | jq -r '.status.operationState.phase // "none"' 2>/dev/null \
+              || echo "none")
+            echo "  [$i/120] $STATUS op=$OP_PHASE (revision: ${REVISION:0:8})"
             [ "$STATUS" = "Synced/Healthy" ] && [ "$REVISION" = "$EXPECTED_SHA" ] \
               && { echo "App is live at correct revision!"; break; }
-            sleep 10
+            # If sync op has been Running for 5 min (30 polls) with no progress, terminate and retry once
+            if [ "$RETRIED" = "0" ] && [ "$i" -ge 30 ] && [ "$OP_PHASE" = "Running" ]; then
+              echo "Sync operation stuck Running at iteration $i — terminating and retrying..."
+              curl -s -X DELETE \
+                "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/operation" \
+                -H "Authorization: Bearer ${ARGOCD_TOKEN}" || true
+              sleep 5
+              curl -s -X POST \
+                "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/sync" \
+                -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d '{"prune": true}' || true
+              RETRIED=1
+              sleep 30
+            else
+              sleep 10
+            fi
           done
           if [ "$STATUS" != "Synced/Healthy" ] || [ "$REVISION" != "$EXPECTED_SHA" ]; then
             echo "ERROR: App did not reach Synced/Healthy at expected revision"
