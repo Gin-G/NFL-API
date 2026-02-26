@@ -53,6 +53,8 @@ jobs:
     name: Build, Push & Deploy
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      deployed_sha: ${{ steps.push_helm.outputs.sha }}
     steps:
       - name: Check out the code repository
         uses: actions/checkout@v4
@@ -83,12 +85,14 @@ jobs:
             helm/nfl-api/values.yaml
 
       - name: Push Helm chart changes to GitHub
+        id: push_helm
         run: |
           git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
           git config --global user.name "$GITHUB_ACTOR"
           git commit -a -m "ci: update image to ncging/nfl-api:${{ steps.date.outputs.date }}"
           git pull --rebase
           git push
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
       - name: Trigger ArgoCD sync
         env:
@@ -116,30 +120,40 @@ jobs:
     needs: build-and-deploy
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for ArgoCD — Synced + Healthy
+      - name: Wait for ArgoCD — Synced + Healthy at expected revision
         env:
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
           ARGOCD_APP_NAME: ${{ secrets.ARGOCD_APP_NAME }}
           ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+          EXPECTED_SHA: ${{ needs.build-and-deploy.outputs.deployed_sha }}
         run: |
           SERVER="$(echo -n "${ARGOCD_SERVER}" | tr -d '[:space:]')"
           SERVER="${SERVER%/}"
-          echo "Giving ArgoCD 15 s to start the rollout..."
-          sleep 15
-          echo "Polling ArgoCD for Synced/Healthy (max 10 min)..."
+          echo "Expected revision: ${EXPECTED_SHA}"
+          echo "Giving ArgoCD 30 s to detect the new commit and start the rollout..."
+          sleep 30
+          echo "Polling ArgoCD for Synced/Healthy at revision ${EXPECTED_SHA} (max 10 min)..."
           STATUS="unknown/unknown"
+          REVISION="none"
           for i in $(seq 1 60); do
-            STATUS=$(curl -sf \
+            RESPONSE=$(curl -sf \
               -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
-              "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}" \
+              "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}" 2>/dev/null || echo "{}")
+            STATUS=$(echo "$RESPONSE" \
               | jq -r '(.status.sync.status) + "/" + (.status.health.status)' 2>/dev/null \
               || echo "unknown/unknown")
-            echo "  [$i/60] $STATUS"
-            [ "$STATUS" = "Synced/Healthy" ] && { echo "App is live!"; break; }
+            REVISION=$(echo "$RESPONSE" \
+              | jq -r '.status.sync.revision // "none"' 2>/dev/null \
+              || echo "none")
+            echo "  [$i/60] $STATUS (revision: ${REVISION:0:8})"
+            [ "$STATUS" = "Synced/Healthy" ] && [ "$REVISION" = "$EXPECTED_SHA" ] \
+              && { echo "App is live at correct revision!"; break; }
             sleep 10
           done
-          if [ "$STATUS" != "Synced/Healthy" ]; then
-            echo "ERROR: App did not reach Synced/Healthy within 10 minutes"
+          if [ "$STATUS" != "Synced/Healthy" ] || [ "$REVISION" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: App did not reach Synced/Healthy at expected revision"
+            echo "  Expected: $EXPECTED_SHA"
+            echo "  Got:      $STATUS (revision: $REVISION)"
             echo "--- All resource statuses ---"
             curl -sf \
               -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
