@@ -112,7 +112,7 @@ def compute_formation_breakdown(db: Session, team: str, season: int) -> dict:
         pa_row = db.execute(pa_sql, {"team": team, "season": season}).mappings().first()
         pa_rate = _f(pa_row["play_action_rate"]) if pa_row else None
     except Exception:
-        pass
+        db.rollback()
 
     # offense_formation column may not exist
     formations: dict = {}
@@ -143,7 +143,7 @@ def compute_formation_breakdown(db: Session, team: str, season: int) -> dict:
                 "success_rate": _f(r["success_rate"]),
             }
     except Exception:
-        pass
+        db.rollback()
 
     return {
         "shotgun_rate": _f(misc["shotgun_rate"]) if misc else None,
@@ -165,6 +165,7 @@ def compute_personnel_breakdown(db: Session, team: str, season: int) -> dict:
         """)
         rows = db.execute(sql, {"team": team, "season": season}).mappings().all()
     except Exception:
+        db.rollback()
         return {}
 
     groups: dict = {}
@@ -354,7 +355,7 @@ def compute_defense_scheme(db: Session, team: str, season: int) -> dict:
             non_blitz_epa = _f(pr["non_blitz_epa"])
             avg_dib = _f(pr["avg_dib"])
     except Exception:
-        pass
+        db.rollback()
 
     # qb_hit and sack are standard columns
     press2_sql = text("""
@@ -407,7 +408,7 @@ def compute_defense_scheme(db: Session, team: str, season: int) -> dict:
             sorted(personnel_breakdown.items(), key=lambda x: -x[1]["plays"])
         )
     except Exception:
-        pass
+        db.rollback()
 
     return {
         "blitz_rate": blitz_rate,

@@ -36,6 +36,14 @@ try:
 except Exception as _db_startup_err:
     logger.warning("DB unavailable at startup (tables not created): %s", _db_startup_err)
 
+# Ensure PBP indexes exist for fast coaching analytics queries.
+# Idempotent no-op if already present; creates them on first startup.
+try:
+    from database.loader import ensure_pbp_indexes
+    ensure_pbp_indexes()
+except Exception as _idx_err:
+    logger.warning("PBP index creation skipped at startup: %s", _idx_err)
+
 class ProxySchemeMiddleware:
     """Trust X-Forwarded-Proto from nginx ingress so redirect URLs use https://."""
     def __init__(self, app: ASGIApp) -> None:
