@@ -194,3 +194,21 @@ class CoachSeasonAnalytics(Base):
     computed_at    = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("ix_coach_analytics_name", "coach_name"),)
+
+
+class AnalyticsJobStatus(Base):
+    """Tracks progress of long-running analytics pre-computation jobs."""
+    __tablename__ = "analytics_job_status"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    job_type          = Column(String, default="coach_analytics")
+    status            = Column(String)           # running | completed | failed | interrupted
+    started_at        = Column(DateTime)
+    updated_at        = Column(DateTime)
+    total_entries     = Column(Integer, default=0)
+    processed_entries = Column(Integer, default=0)  # newly computed this run
+    skipped_entries   = Column(Integer, default=0)  # already cached, skipped
+    failed_entries    = Column(Integer, default=0)
+    current_season    = Column(Integer, nullable=True)
+    current_coach     = Column(String, nullable=True)
+    error_message     = Column(Text, nullable=True)

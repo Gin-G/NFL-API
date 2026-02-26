@@ -34,8 +34,8 @@ def _current_nfl_season() -> int:
 
 
 def _is_already_loaded(db, current_season: int) -> bool:
-    """Return True if teams, PBP for current + prior seasons, AND coach analytics cache are in DB."""
-    from database.models import Team, PlayerStat, CoachSeasonAnalytics
+    """Return True if teams, PBP for current + prior seasons are in DB."""
+    from database.models import Team, PlayerStat
     from database.session import engine
     from sqlalchemy import text
     try:
@@ -59,16 +59,6 @@ def _is_already_loaded(db, current_season: int) -> bool:
                     ).scalar()
                     if not (pbp_count and pbp_count > 0):
                         return False
-        except Exception:
-            return False
-        # Coach analytics cache must be populated for recent seasons, otherwise
-        # breakdown queries fall through to expensive real-time PBP computation.
-        try:
-            analytics_count = db.query(CoachSeasonAnalytics).filter(
-                CoachSeasonAnalytics.season >= current_season - 1
-            ).limit(1).count()
-            if analytics_count == 0:
-                return False
         except Exception:
             return False
         return True

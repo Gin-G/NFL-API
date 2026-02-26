@@ -21,7 +21,7 @@ from .utils import (
     get_current_nfl_season,
 )
 from database.session import get_db
-from database.models import CoachSeasonAnalytics, Schedule
+from database.models import AnalyticsJobStatus, CoachSeasonAnalytics, Schedule
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -595,6 +595,45 @@ def _sample_plays(db, team: str, season: int, situation: str) -> list:
     ]
 
 
+@router.get("/analytics/status")
+async def get_analytics_status(db: Session = Depends(get_db)):
+    """
+    Returns the status and progress of the most recent analytics computation job.
+
+    During a running job, pct_complete reflects how far through the full
+    coach+team+season backlog the job is (skipped/cached entries count as done).
+    """
+    job = (
+        db.query(AnalyticsJobStatus)
+        .filter(AnalyticsJobStatus.job_type == "coach_analytics")
+        .order_by(AnalyticsJobStatus.id.desc())
+        .first()
+    )
+    if job is None:
+        return {
+            "status": "no_job",
+            "message": "No analytics job has been run yet. "
+                       "Apply k8s/analytics-job.yaml to start pre-computation.",
+        }
+
+    done = (job.processed_entries or 0) + (job.skipped_entries or 0)
+    total = job.total_entries or 0
+    pct = round(done / total * 100, 1) if total > 0 else 0.0
+
+    return {
+        "status": job.status,
+        "pct_complete": pct,
+        "processed": job.processed_entries,
+        "skipped": job.skipped_entries,
+        "failed": job.failed_entries,
+        "total": total,
+        "current_season": job.current_season,
+        "current_coach": job.current_coach,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+    }
+
+
 @router.get("/{coach_name}/breakdown")
 async def get_coach_breakdown(
     coach_name: str,
@@ -641,13 +680,43 @@ async def get_coach_breakdown(
 
     import json
 
+    # Check whether the analytics job is currently running (used for cache-miss responses)
+    running_job = (
+        db.query(AnalyticsJobStatus)
+        .filter(
+            AnalyticsJobStatus.job_type == "coach_analytics",
+            AnalyticsJobStatus.status == "running",
+        )
+        .order_by(AnalyticsJobStatus.id.desc())
+        .first()
+    )
+
     results = []
     for s, team in sorted(season_team_pairs):
-        # Cache lookup
+        # Cache lookup — instant if pre-computed
         cached = db.get(CoachSeasonAnalytics, (coach_name, s, team))
         if cached is not None:
             results.append(json.loads(cached.breakdown_json))
             continue
+
+        # Cache miss: if the analytics job is running, return progress info
+        # rather than attempting a slow real-time computation.
+        if running_job is not None:
+            done = (running_job.processed_entries or 0) + (running_job.skipped_entries or 0)
+            total = running_job.total_entries or 0
+            pct = round(done / total * 100, 1) if total > 0 else 0.0
+            return {
+                "status": "computing",
+                "message": (
+                    f"Analytics pre-computation is {pct}% complete "
+                    f"(currently processing season {running_job.current_season}). "
+                    f"Results will be cached once this entry is reached. "
+                    f"Check /coaches/analytics/status for live progress."
+                ),
+                "pct_complete": pct,
+                "current_season": running_job.current_season,
+                "analytics_status_url": "/coaches/analytics/status",
+            }
 
         try:
             offense_summary = _compute_offense_tendencies(db, team, s)

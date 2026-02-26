@@ -470,8 +470,3 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
         except Exception as exc:
             logger.error("Failed to load PBP for %d: %s", season, exc)
             db.rollback()
-        try:
-            load_coach_analytics(db, season)
-        except Exception as exc:
-            logger.error("Failed to load coach analytics for %d: %s", season, exc)
-            db.rollback()
