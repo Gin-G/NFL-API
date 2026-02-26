@@ -102,12 +102,30 @@ def _coaches_from_db(db: Session, seasons: Optional[List[int]] = None,
 
     max_season = db.query(func.max(Schedule.season)).scalar() or 0
 
+    # Each coach's global latest season — unaffected by any request filter.
+    # Two cheap GROUP BY queries (one per side) give the correct max even when
+    # the caller has filtered schedules to a specific year window.
+    coach_global_max: dict = {}
+    for coach, ms in (
+        db.query(Schedule.home_coach, func.max(Schedule.season))
+        .filter(Schedule.home_coach.isnot(None))
+        .group_by(Schedule.home_coach)
+        .all()
+    ):
+        coach_global_max[coach] = max(coach_global_max.get(coach, 0), ms or 0)
+    for coach, ms in (
+        db.query(Schedule.away_coach, func.max(Schedule.season))
+        .filter(Schedule.away_coach.isnot(None))
+        .group_by(Schedule.away_coach)
+        .all()
+    ):
+        coach_global_max[coach] = max(coach_global_max.get(coach, 0), ms or 0)
+
     result = []
     for coach, season_map in records.items():
-        coach_max = max(season_map.keys())
         result.append({
             "name": coach,
-            "is_active": coach_max == max_season,
+            "is_active": coach_global_max.get(coach, 0) == max_season,
             "seasons": _format_seasons(season_map),
         })
     result.sort(key=lambda c: c["name"])
