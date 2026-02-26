@@ -103,10 +103,15 @@ def main() -> None:
 
     from database.session import engine, SessionLocal
     from database.models import Base
-    from database.loader import load_all_data
+    from database.loader import load_all_data, ensure_pbp_indexes
 
     logger.info("Creating tables (no-op if they already exist)…")
     Base.metadata.create_all(engine)
+
+    # Always ensure PBP indexes exist — fast no-op if already present, critical for
+    # coaching analytics queries. Must run before the early-exit check so indexes
+    # are created even when the data load is skipped.
+    ensure_pbp_indexes()
 
     db = SessionLocal()
     try:
