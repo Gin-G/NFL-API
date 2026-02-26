@@ -3,7 +3,9 @@
 SQLAlchemy ORM models for NFL data.
 """
 
-from sqlalchemy import Column, String, Integer, Float, UniqueConstraint, Index
+from datetime import datetime
+
+from sqlalchemy import Column, String, Integer, Float, Text, DateTime, UniqueConstraint, Index
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -180,3 +182,15 @@ class PlayerStat(Base):
         Index("ix_stats_player_season", "player_id", "season"),
         Index("ix_stats_team_season_pos", "recent_team", "season", "position"),
     )
+
+
+class CoachSeasonAnalytics(Base):
+    __tablename__ = "coach_season_analytics"
+
+    coach_name     = Column(String, primary_key=True)
+    season         = Column(Integer, primary_key=True)
+    team           = Column(String, primary_key=True)
+    breakdown_json = Column(Text)
+    computed_at    = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_coach_analytics_name", "coach_name"),)

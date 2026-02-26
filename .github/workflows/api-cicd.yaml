@@ -237,13 +237,16 @@ jobs:
             "${{ vars.API_URL }}/players/00-0033873?season=2024" \
             | jq -e '.status == "success"'
 
-      - name: GET /coaches/?years=2024
+      - name: GET /coaches/?years=2024 — list + is_active split
         run: |
-          TOTAL=$(curl -sf --max-time 180 \
-            "${{ vars.API_URL }}/coaches/?years=2024" \
-            | jq '.total_coaches // 0')
+          BODY=$(curl -sf --max-time 180 "${{ vars.API_URL }}/coaches/?years=2024")
+          TOTAL=$(echo "$BODY" | jq '.total_coaches // 0')
           echo "Coaches 2024: $TOTAL"
           [ "${TOTAL:-0}" -gt 0 ]
+          echo "$BODY" | jq -e '[.data[] | has("is_active")] | all'
+          ACTIVE=$(echo "$BODY" | jq '[.data[] | select(.is_active == true)] | length')
+          echo "Active coaches: $ACTIVE"
+          [ "${ACTIVE:-0}" -gt 0 ]
 
       - name: GET /coaches/Andy Reid/analysis?years=2024
         run: |
@@ -256,6 +259,14 @@ jobs:
           curl -sf --max-time 180 \
             "${{ vars.API_URL }}/coaches/Andy%20Reid/grades?years=2024" \
             | jq -e '.status == "success"'
+
+      - name: GET /coaches/Andy Reid/breakdown?season=2024
+        run: |
+          BODY=$(curl -sf --max-time 300 \
+            "${{ vars.API_URL }}/coaches/Andy%20Reid/breakdown?season=2024")
+          STATUS=$(echo "$BODY" | jq -r '.status')
+          echo "Breakdown status: $STATUS"
+          [ "$STATUS" = "success" ] || [ "$STATUS" = "no_data" ]
 
       - name: GET /dashboard/ — frontend loads
         run: |

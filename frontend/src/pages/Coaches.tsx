@@ -238,9 +238,11 @@ export default function Coaches() {
 
   const { data, isLoading, error, refetch } = useCoaches(years)
 
-  const coaches = (data?.data ?? []).filter((c) =>
+  const allCoaches = (data?.data ?? []).filter((c) =>
     c.name.toLowerCase().includes(search.toLowerCase())
   )
+  const activeCoaches = allCoaches.filter((c) => c.is_active)
+  const legacyCoaches = allCoaches.filter((c) => !c.is_active)
 
   return (
     <div className="p-6">
@@ -255,7 +257,7 @@ export default function Coaches() {
         />
         {data && (
           <span className="text-slate-400 text-sm self-center">
-            {coaches.length} coaches
+            {allCoaches.length} coaches
           </span>
         )}
       </div>
@@ -269,11 +271,29 @@ export default function Coaches() {
       {error && <ErrorCard message="Failed to load coaches" onRetry={() => refetch()} />}
 
       {!isLoading && !error && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {coaches.map((c) => (
-            <CoachCard key={c.name} coach={c} onClick={() => setSelected(c.name)} />
-          ))}
-        </div>
+        <>
+          <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wide mb-3">
+            Active Head Coaches ({activeCoaches.length})
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+            {activeCoaches.map((c) => (
+              <CoachCard key={c.name} coach={c} onClick={() => setSelected(c.name)} />
+            ))}
+          </div>
+
+          {legacyCoaches.length > 0 && (
+            <>
+              <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wide mb-3">
+                Former Head Coaches ({legacyCoaches.length})
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {legacyCoaches.map((c) => (
+                  <CoachCard key={c.name} coach={c} onClick={() => setSelected(c.name)} />
+                ))}
+              </div>
+            </>
+          )}
+        </>
       )}
 
       {selected && (

@@ -336,6 +336,89 @@ def load_pbp(db: Session, season: int) -> int:
     return count
 
 
+def load_coach_analytics(db: Session, season: int) -> int:
+    """Pre-compute and cache coaching breakdown JSON for all coaches in a season."""
+    import json
+    from .models import CoachSeasonAnalytics
+    from api.coaches import (
+        _compute_offense_tendencies,
+        _compute_defense_tendencies,
+        _sample_plays,
+    )
+    from api.coaching_pbp import (
+        compute_formation_breakdown,
+        compute_personnel_breakdown,
+        compute_run_scheme,
+        compute_pass_detail,
+        compute_defense_scheme,
+        compute_strengths_weaknesses,
+    )
+
+    if not _pbp_season_loaded(db, season):
+        logger.info("Skipping coach analytics for %d — PBP not loaded", season)
+        return 0
+
+    games = db.query(Schedule).filter(Schedule.season == season).all()
+    pairs: set = set()
+    for g in games:
+        if g.home_coach:
+            pairs.add((g.home_coach, g.home_team))
+        if g.away_coach:
+            pairs.add((g.away_coach, g.away_team))
+
+    count = 0
+    for coach_name, team in sorted(pairs):
+        existing = db.get(CoachSeasonAnalytics, (coach_name, season, team))
+        if existing is not None:
+            continue
+        try:
+            off = _compute_offense_tendencies(db, team, season)
+            defe = _compute_defense_tendencies(db, team, season)
+            formation = compute_formation_breakdown(db, team, season)
+            personnel = compute_personnel_breakdown(db, team, season)
+            run_scheme = compute_run_scheme(db, team, season)
+            pass_detail = compute_pass_detail(db, team, season)
+            def_scheme = compute_defense_scheme(db, team, season)
+            fourth_sample = _sample_plays(db, team, season, "fourth_down")
+            third_sample = _sample_plays(db, team, season, "third_down")
+            insights = compute_strengths_weaknesses(
+                off, defe, formation, run_scheme, pass_detail, def_scheme
+            )
+            blob = {
+                "season": season,
+                "team": team,
+                "offense": {
+                    **off,
+                    "formation": formation,
+                    "personnel": personnel,
+                    "run_scheme": run_scheme,
+                    "passing": pass_detail,
+                    "fourth_down_sample": fourth_sample,
+                    "third_down_sample": third_sample,
+                },
+                "defense": {**defe, "scheme": def_scheme},
+                "strengths": insights["strengths"],
+                "weaknesses": insights["weaknesses"],
+                "tendencies": insights["tendencies"],
+            }
+            db.merge(CoachSeasonAnalytics(
+                coach_name=coach_name,
+                season=season,
+                team=team,
+                breakdown_json=json.dumps(blob, default=str),
+            ))
+            db.commit()
+            count += 1
+        except Exception as exc:
+            logger.warning(
+                "Coach analytics failed for %s %s %s: %s", coach_name, team, season, exc
+            )
+            db.rollback()
+
+    logger.info("Coach analytics cached for season %d: %d entries", season, count)
+    return count
+
+
 def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
     """Load all nflreadpy data into the DB. Resumable — skips seasons already present."""
     load_teams(db)
@@ -365,4 +448,9 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
             load_pbp(db, season)
         except Exception as exc:
             logger.error("Failed to load PBP for %d: %s", season, exc)
+            db.rollback()
+        try:
+            load_coach_analytics(db, season)
+        except Exception as exc:
+            logger.error("Failed to load coach analytics for %d: %s", season, exc)
             db.rollback()

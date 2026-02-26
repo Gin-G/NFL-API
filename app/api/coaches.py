@@ -10,7 +10,7 @@ Falls back to nflreadpy-based analytics when the DB is empty.
 from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List, Optional
 import logging
-from sqlalchemy import or_, text
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from .utils import (
@@ -21,7 +21,7 @@ from .utils import (
     get_current_nfl_season,
 )
 from database.session import get_db
-from database.models import Schedule
+from database.models import CoachSeasonAnalytics, Schedule
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -100,9 +100,16 @@ def _coaches_from_db(db: Session, seasons: Optional[List[int]] = None,
     if not records:
         return None
 
+    max_season = db.query(func.max(Schedule.season)).scalar() or 0
+
     result = []
     for coach, season_map in records.items():
-        result.append({"name": coach, "seasons": _format_seasons(season_map)})
+        coach_max = max(season_map.keys())
+        result.append({
+            "name": coach,
+            "is_active": coach_max == max_season,
+            "seasons": _format_seasons(season_map),
+        })
     result.sort(key=lambda c: c["name"])
     return result
 
@@ -614,8 +621,16 @@ async def get_coach_breakdown(
         if g.away_coach == coach_name:
             season_team_pairs.add((g.season, g.away_team))
 
+    import json
+
     results = []
     for s, team in sorted(season_team_pairs):
+        # Cache lookup
+        cached = db.get(CoachSeasonAnalytics, (coach_name, s, team))
+        if cached is not None:
+            results.append(json.loads(cached.breakdown_json))
+            continue
+
         try:
             offense_summary = _compute_offense_tendencies(db, team, s)
             defense_summary = _compute_defense_tendencies(db, team, s)
@@ -634,7 +649,7 @@ async def get_coach_breakdown(
             logger.warning("Breakdown failed for %s %s: %s", team, s, exc)
             return {"status": "no_data", "message": "PBP not yet loaded"}
 
-        results.append({
+        result_entry = {
             "season": s,
             "team": team,
             "offense": {
@@ -653,7 +668,21 @@ async def get_coach_breakdown(
             "strengths": insights["strengths"],
             "weaknesses": insights["weaknesses"],
             "tendencies": insights["tendencies"],
-        })
+        }
+
+        # Write-through to cache
+        try:
+            db.merge(CoachSeasonAnalytics(
+                coach_name=coach_name,
+                season=s,
+                team=team,
+                breakdown_json=json.dumps(result_entry, default=str),
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        results.append(result_entry)
 
     return {
         "status": "success",

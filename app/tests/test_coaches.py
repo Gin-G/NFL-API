@@ -306,3 +306,118 @@ class TestMultiYearCoaches:
              patch("api.coaches.get_coaching_analytics", return_value=analytics):
             body = client.get("/coaches/Andy Reid/grades").json()
         assert len(body["grades"]) == 4
+
+
+class TestCoachesIsActive:
+    """DB-path: coaches list includes is_active field, active/legacy split is correct."""
+
+    def _populate(self, db_session):
+        from database.models import Schedule
+        # 2024 coach — will be active (max season in DB)
+        db_session.add(Schedule(
+            game_id="2024_01_KC_BAL_ia", season=2024, week=1,
+            home_team="KC", away_team="BAL",
+            home_score=27, away_score=20,
+            home_coach="Andy Reid", away_coach="John Harbaugh",
+        ))
+        # 2020-only coach — will be legacy
+        db_session.add(Schedule(
+            game_id="2020_01_HOU_KC_ia", season=2020, week=1,
+            home_team="HOU", away_team="KC",
+            home_score=20, away_score=34,
+            home_coach="Bill O'Brien", away_coach=None,
+        ))
+        db_session.flush()
+
+    def test_coaches_list_has_is_active_field(self, client, db_session):
+        self._populate(db_session)
+        body = client.get("/coaches/").json()
+        assert body["status"] == "success"
+        for coach in body["data"]:
+            assert "is_active" in coach
+
+    def test_active_coach_has_is_active_true(self, client, db_session):
+        self._populate(db_session)
+        body = client.get("/coaches/").json()
+        andy = next(c for c in body["data"] if c["name"] == "Andy Reid")
+        assert andy["is_active"] is True
+
+    def test_legacy_coach_has_is_active_false(self, client, db_session):
+        self._populate(db_session)
+        body = client.get("/coaches/").json()
+        obrien = next(c for c in body["data"] if c["name"] == "Bill O'Brien")
+        assert obrien["is_active"] is False
+
+
+class TestBreakdownCache:
+    """Breakdown endpoint returns from DB cache when CoachSeasonAnalytics is populated."""
+
+    def _setup(self, db_session):
+        import json
+        from database.models import CoachSeasonAnalytics, Schedule
+        db_session.add(Schedule(
+            game_id="2024_01_KC_BAL_bc", season=2024, week=1,
+            home_team="KC", away_team="BAL",
+            home_score=27, away_score=20,
+            home_coach="Andy Reid", away_coach="John Harbaugh",
+        ))
+        blob = {
+            "season": 2024, "team": "KC",
+            "offense": {
+                "total_plays": 60, "pass_rate": 0.6,
+                "pass_rate_by_down": {}, "avg_epa_per_play": 0.12,
+                "red_zone_pass_rate": None, "fourth_down_attempts": 3,
+                "fourth_down_conversion_rate": None, "two_point_attempts": 0,
+                "two_point_success_rate": None, "third_down_conversion_rate": 0.45,
+                "formation": {"shotgun_rate": 0.6, "no_huddle_rate": 0.05,
+                              "play_action_rate": 0.2, "formation_breakdown": {}},
+                "personnel": {},
+                "run_scheme": {"total_runs": 24, "inside_rate": 0.5,
+                               "outside_rate": 0.5, "by_location": {}},
+                "passing": {"avg_air_yards": 8.0, "deep_pass_rate": 0.15,
+                            "screen_rate": 0.1, "intermediate_rate": 0.4,
+                            "scramble_rate": 0.03, "dropback_epa": 0.2,
+                            "avg_yac": 5.0, "by_direction": {}},
+                "fourth_down_sample": [],
+                "third_down_sample": [],
+            },
+            "defense": {
+                "total_plays": 58, "avg_epa_allowed_per_play": -0.05,
+                "third_down_stop_rate": 0.6, "red_zone_td_rate_allowed": 0.3,
+                "sack_rate": 0.08,
+                "scheme": {"blitz_rate": 0.25, "avg_defenders_in_box": 6.5,
+                           "blitz_epa_allowed": 0.1, "non_blitz_epa_allowed": -0.1,
+                           "qb_hit_rate": 0.12, "sack_rate": 0.08,
+                           "personnel_breakdown": {}},
+            },
+            "strengths": ["Pass-heavy offense"],
+            "weaknesses": [],
+            "tendencies": ["Shotgun-heavy"],
+        }
+        db_session.add(CoachSeasonAnalytics(
+            coach_name="Andy Reid", season=2024, team="KC",
+            breakdown_json=json.dumps(blob),
+        ))
+        db_session.flush()
+
+    def test_breakdown_returns_200_from_cache(self, client, db_session):
+        self._setup(db_session)
+        response = client.get("/coaches/Andy%20Reid/breakdown?season=2024")
+        assert response.status_code == 200
+
+    def test_breakdown_status_success_from_cache(self, client, db_session):
+        self._setup(db_session)
+        body = client.get("/coaches/Andy%20Reid/breakdown?season=2024").json()
+        assert body["status"] == "success"
+
+    def test_breakdown_data_has_correct_team_and_season(self, client, db_session):
+        self._setup(db_session)
+        body = client.get("/coaches/Andy%20Reid/breakdown?season=2024").json()
+        assert len(body["data"]) == 1
+        assert body["data"][0]["team"] == "KC"
+        assert body["data"][0]["season"] == 2024
+
+    def test_breakdown_cached_strengths_returned(self, client, db_session):
+        self._setup(db_session)
+        body = client.get("/coaches/Andy%20Reid/breakdown?season=2024").json()
+        assert body["data"][0]["strengths"] == ["Pass-heavy offense"]

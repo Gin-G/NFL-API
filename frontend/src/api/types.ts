@@ -161,6 +161,7 @@ export interface CoachSeason {
 
 export interface Coach {
   name: string
+  is_active: boolean
   seasons: CoachSeason[]
 }
 
