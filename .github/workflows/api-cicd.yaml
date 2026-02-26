@@ -300,11 +300,21 @@ jobs:
 
       - name: GET /coaches/Andy Reid/breakdown?season=2024
         run: |
-          BODY=$(curl -sf --max-time 300 \
-            "${{ vars.API_URL }}/coaches/Andy%20Reid/breakdown?season=2024")
-          STATUS=$(echo "$BODY" | jq -r '.status')
-          echo "Breakdown status: $STATUS"
-          [ "$STATUS" = "success" ] || [ "$STATUS" = "no_data" ]
+          # Breakdown is cached by the db-loader PostSync job. Retry up to 5×60 s
+          # in case the loader is still running when wait-for-argo exited early.
+          for attempt in 1 2 3 4 5; do
+            BODY=$(curl -sf --max-time 300 \
+              "${{ vars.API_URL }}/coaches/Andy%20Reid/breakdown?season=2024" || echo "{}")
+            STATUS=$(echo "$BODY" | jq -r '.status // "error"')
+            ENTRIES=$(echo "$BODY" | jq '.data | length // 0' 2>/dev/null || echo 0)
+            echo "Attempt $attempt: status=$STATUS entries=$ENTRIES"
+            if [ "$STATUS" = "success" ] && [ "${ENTRIES:-0}" -gt 0 ]; then
+              echo "Breakdown OK"; exit 0
+            fi
+            [ "$attempt" -lt 5 ] && echo "Waiting 60 s before retry..." && sleep 60
+          done
+          echo "ERROR: breakdown never returned success with data"
+          exit 1
 
       - name: GET /dashboard/ — frontend loads
         run: |
