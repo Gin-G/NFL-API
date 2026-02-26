@@ -664,8 +664,10 @@ async def get_coach_breakdown(
                 formation, run_scheme, pass_detail, def_scheme,
             )
         except Exception as exc:
-            logger.warning("Breakdown failed for %s %s: %s", team, s, exc)
-            return {"status": "no_data", "message": "PBP not yet loaded"}
+            import traceback
+            logger.warning("Breakdown failed for %s %s %s: %s\n%s",
+                           coach_name, team, s, exc, traceback.format_exc())
+            return {"status": "no_data", "message": f"Computation failed: {type(exc).__name__}: {exc}"}
 
         result_entry = {
             "season": s,
