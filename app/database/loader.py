@@ -287,6 +287,25 @@ def _season_loaded(db: Session, season: int) -> bool:
         return False
 
 
+def ensure_pbp_indexes() -> None:
+    """Create indexes on play_by_play if they don't exist (idempotent, fast no-op if present)."""
+    from .session import engine
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_pbp_season_posteam "
+                "ON play_by_play (season, posteam)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_pbp_season_defteam "
+                "ON play_by_play (season, defteam)"
+            ))
+            conn.commit()
+        logger.info("PBP indexes ensured")
+    except Exception as exc:
+        logger.warning("Could not ensure PBP indexes (table may not exist yet): %s", exc)
+
+
 def _pbp_season_loaded(db: Session, season: int) -> bool:
     """Return True if PBP data for this season is already in the DB."""
     from .session import engine
@@ -333,21 +352,6 @@ def load_pbp(db: Session, season: int) -> int:
         method="multi",
         chunksize=500,
     )
-    # Create indexes after first insert so coaching analytics queries are fast.
-    # CONCURRENTLY not allowed inside a transaction, so use separate connection.
-    try:
-        with engine.connect() as conn:
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_pbp_season_posteam "
-                "ON play_by_play (season, posteam)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_pbp_season_defteam "
-                "ON play_by_play (season, defteam)"
-            ))
-            conn.commit()
-    except Exception as idx_exc:
-        logger.warning("Could not create PBP indexes: %s", idx_exc)
     logger.info("PBP loaded for %d: %d plays", season, count)
     return count
 
@@ -437,6 +441,7 @@ def load_coach_analytics(db: Session, season: int) -> int:
 
 def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
     """Load all nflreadpy data into the DB. Resumable — skips seasons already present."""
+    ensure_pbp_indexes()  # idempotent — fast no-op if indexes already exist
     load_teams(db)
     for season in seasons:
         season_present = not force and _season_loaded(db, season)
