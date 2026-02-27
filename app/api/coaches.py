@@ -574,7 +574,7 @@ def _sample_plays(db, team: str, season: int, situation: str) -> list:
         where_extra = "AND (third_down_converted = 1 OR third_down_failed = 1)"
 
     sql = text(f"""
-        SELECT desc, yards_gained, epa, week, game_id
+        SELECT "desc", yards_gained, epa, week, game_id
         FROM play_by_play
         WHERE posteam = :team AND season = :season
           AND play_type IN ('pass', 'run')
