@@ -6,6 +6,7 @@ import type {
   PlayerStatsResponse,
   PlayerDetailResponse,
   PlayerGradesResponse,
+  PlayerBreakdownResponse,
 } from './types'
 
 export function useRosters(season: number, team?: string, position?: string, week?: number) {
@@ -55,6 +56,21 @@ export function usePlayerDetail(playerId: string, season: number) {
       return data
     },
     enabled: !!playerId,
+  })
+}
+
+export function usePlayerBreakdown(playerId: string | null, season: number) {
+  return useQuery({
+    queryKey: ['playerBreakdown', playerId, season],
+    queryFn: async () => {
+      const { data } = await apiClient.get<PlayerBreakdownResponse>(
+        `/players/${playerId}/breakdown`,
+        { params: { season } },
+      )
+      return data
+    },
+    enabled: !!playerId,
+    staleTime: 1000 * 60 * 30,
   })
 }
 

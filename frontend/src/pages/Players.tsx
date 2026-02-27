@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { X } from 'lucide-react'
 import { useRosters, usePlayerStats } from '../api/players'
 import { getAvailableSeasons, getCurrentNFLSeason } from '../utils/nflDate'
 import type { RosterPlayer, PlayerStat } from '../api/types'
@@ -6,13 +7,27 @@ import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
 import ErrorCard from '../components/ui/ErrorCard'
 import StatBarChart from '../components/charts/StatBarChart'
+import PlayerBreakdown from '../components/PlayerBreakdown'
 
 const SEASONS = getAvailableSeasons()
 const POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DT', 'DE', 'LB', 'CB', 'S']
 
 type Tab = 'roster' | 'stats'
 
-function RosterTable({ players }: { players: RosterPlayer[] }) {
+interface SelectedPlayer {
+  player_id: string
+  player_name: string
+  position: string
+  team: string
+}
+
+function RosterTable({
+  players,
+  onSelect,
+}: {
+  players: RosterPlayer[]
+  onSelect: (p: SelectedPlayer) => void
+}) {
   if (!players.length) return <p className="text-slate-400 text-sm">No players found.</p>
 
   return (
@@ -31,9 +46,22 @@ function RosterTable({ players }: { players: RosterPlayer[] }) {
         </thead>
         <tbody>
           {players.slice(0, 100).map((p, i) => (
-            <tr key={`${p.player_id}-${i}`} className="border-b border-slate-800 hover:bg-slate-800/50">
+            <tr
+              key={`${p.player_id}-${i}`}
+              className="border-b border-slate-800 hover:bg-slate-800/70 cursor-pointer transition-colors"
+              onClick={() =>
+                onSelect({
+                  player_id: p.player_id,
+                  player_name: p.player_name,
+                  position: p.position,
+                  team: p.team,
+                })
+              }
+            >
               <td className="py-2 pr-4 text-slate-400">{p.jersey_number ?? '—'}</td>
-              <td className="py-2 pr-4 text-white font-medium">{p.player_name}</td>
+              <td className="py-2 pr-4 text-white font-medium hover:text-brand-green transition-colors">
+                {p.player_name}
+              </td>
               <td className="py-2 pr-4 text-slate-300">{p.position}</td>
               <td className="py-2 pr-4 text-slate-300">{p.team}</td>
               <td className="py-2 pr-4 text-slate-400">{p.height ?? '—'}</td>
@@ -81,7 +109,17 @@ function statLeaders(stats: PlayerStat[], field: keyof PlayerStat, n = 10) {
     .map((s) => ({ name: s.player_name, value: s[field] as number }))
 }
 
-function StatsPanel({ season, team, position, week }: { season: number; team?: string; position?: string; week?: number }) {
+function StatsPanel({
+  season,
+  team,
+  position,
+  week,
+}: {
+  season: number
+  team?: string
+  position?: string
+  week?: number
+}) {
   const { data, isLoading, error, refetch } = usePlayerStats(season, position, team, week)
 
   if (isLoading) return <div className="space-y-3">{Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} rows={3} />)}</div>
@@ -143,12 +181,61 @@ function StatsPanel({ season, team, position, week }: { season: number; team?: s
   )
 }
 
+// ─── Player detail panel ──────────────────────────────────────────────────────
+
+function PlayerPanel({
+  player,
+  season,
+  onClose,
+}: {
+  player: SelectedPlayer
+  season: number
+  onClose: () => void
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/50" />
+
+      {/* Panel */}
+      <div
+        className="relative w-full max-w-xl bg-slate-900 border-l border-slate-700 overflow-y-auto h-full"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="sticky top-0 bg-slate-900 border-b border-slate-700 px-5 py-4 flex items-start justify-between z-10">
+          <div>
+            <h2 className="text-white font-semibold text-base">{player.player_name}</h2>
+            <p className="text-slate-400 text-xs mt-0.5">
+              {player.position} · {player.team} · {season}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-white transition-colors ml-4 mt-0.5"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Breakdown */}
+        <div className="px-5 py-4">
+          <PlayerBreakdown playerId={player.player_id} season={season} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Main page ────────────────────────────────────────────────────────────────
+
 export default function Players() {
   const [tab, setTab] = useState<Tab>('roster')
   const [season, setSeason] = useState(getCurrentNFLSeason())
   const [team, setTeam] = useState('')
   const [position, setPosition] = useState('')
   const [week, setWeek] = useState<number | undefined>(undefined)
+  const [selectedPlayer, setSelectedPlayer] = useState<SelectedPlayer | null>(null)
 
   const {
     data: rosterData,
@@ -159,7 +246,7 @@ export default function Players() {
 
   return (
     <div className="p-6">
-      <PageHeader title="Players" subtitle="Rosters and statistics" />
+      <PageHeader title="Players" subtitle="Rosters and statistics — click any player to see their PBP breakdown" />
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3 mb-6">
@@ -212,12 +299,21 @@ export default function Players() {
 
       {tab === 'roster' && (
         <>
-          {rosterLoading && <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <SkeletonCard key={i} />)}</div>}
+          {rosterLoading && (
+            <div className="space-y-2">
+              {Array.from({ length: 5 }).map((_, i) => <SkeletonCard key={i} />)}
+            </div>
+          )}
           {rosterError && <ErrorCard message="Failed to load roster" onRetry={() => rosterRefetch()} />}
           {rosterData && (
             <>
-              <p className="text-slate-400 text-sm mb-3">{rosterData.total_players} players (showing up to 100)</p>
-              <RosterTable players={rosterData.data} />
+              <p className="text-slate-400 text-sm mb-3">
+                {rosterData.total_players} players (showing up to 100) — click a player to see their breakdown
+              </p>
+              <RosterTable
+                players={rosterData.data}
+                onSelect={setSelectedPlayer}
+              />
             </>
           )}
         </>
@@ -229,6 +325,15 @@ export default function Players() {
           team={team || undefined}
           position={position || undefined}
           week={week}
+        />
+      )}
+
+      {/* Player detail panel */}
+      {selectedPlayer && (
+        <PlayerPanel
+          player={selectedPlayer}
+          season={season}
+          onClose={() => setSelectedPlayer(null)}
         />
       )}
     </div>

@@ -381,6 +381,127 @@ export interface CoachBreakdownResponse {
   message?: string
 }
 
+// ─── Player Breakdown (PBP analytics) ────────────────────────────────────────
+
+export interface DirectionEntry {
+  attempts?: number
+  carries?: number
+  targets?: number
+  epa: number | null
+  pct: number | null
+}
+
+export interface QBPassingMetrics {
+  player_name: string
+  team: string
+  dropbacks: number
+  completions: number
+  comp_pct: number | null
+  epa_per_dropback: number | null
+  pass_yards: number
+  pass_tds: number
+  interceptions: number
+  sacks_taken: number
+  sack_rate: number | null
+  scramble_rate: number | null
+  avg_air_yards: number | null
+  deep_rate: number | null
+  screen_rate: number | null
+  avg_yac: number | null
+  third_down_conv_rate: number | null
+  rz_epa: number | null
+  rz_dropbacks: number
+  play_action_rate?: number | null
+  pass_direction: {
+    left: DirectionEntry
+    middle: DirectionEntry
+    right: DirectionEntry
+  }
+}
+
+export interface RushingMetrics {
+  player_name: string
+  team: string
+  carries: number
+  rush_yards: number
+  yards_per_carry: number | null
+  epa_per_carry: number | null
+  success_rate: number | null
+  rush_tds: number
+  explosive_rate: number | null
+  negative_rate: number | null
+  rz_carries: number
+  rz_epa: number | null
+  inside_rate: number | null
+  outside_rate: number | null
+  by_direction: {
+    left: DirectionEntry
+    middle: DirectionEntry
+    right: DirectionEntry
+  }
+}
+
+export interface ReceivingMetrics {
+  player_name: string
+  team: string
+  targets: number
+  receptions: number
+  catch_rate: number | null
+  rec_yards: number
+  yards_per_target: number | null
+  yards_per_reception: number | null
+  epa_per_target: number | null
+  avg_air_yards: number | null
+  avg_yac: number | null
+  rec_tds: number
+  deep_target_rate: number | null
+  short_target_rate: number | null
+  rz_targets: number
+  rz_tds: number
+  by_direction: {
+    left: DirectionEntry
+    middle: DirectionEntry
+    right: DirectionEntry
+  }
+}
+
+export interface DefensiveMetrics {
+  team: string
+  sacks: number
+  qb_hits: number
+  pressures: number
+  solo_tackles: number
+  assist_tackles: number
+  total_tackles: number
+  interceptions: number
+  passes_defended: number
+  forced_fumbles: number
+  fumble_recoveries: number
+  tackles_for_loss: number
+}
+
+export interface PlayerBreakdownEntry {
+  season: number
+  team: string
+  position: string
+  player_name: string
+  computed_at: string | null
+  passing?: QBPassingMetrics
+  rushing?: RushingMetrics
+  receiving?: ReceivingMetrics
+  defense?: DefensiveMetrics
+}
+
+export interface PlayerBreakdownResponse {
+  status: string
+  player_id: string
+  season: number
+  data: PlayerBreakdownEntry[]
+  message?: string
+  pct_complete?: number
+  current_season?: number
+}
+
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {

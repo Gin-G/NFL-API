@@ -1,0 +1,69 @@
+# Standalone player PBP analytics pre-computation job.
+#
+# Computes breakdown analytics for all player+team+season combinations and
+# caches results in player_season_analytics. Processes newest seasons first.
+# Progress is tracked in analytics_job_status and exposed via:
+#   GET /players/analytics/status
+#
+# This Job is NOT managed by ArgoCD / Helm. Apply and delete manually:
+#   kubectl apply  -f k8s/player-analytics-job.yaml -n nfl-api
+#   kubectl delete -f k8s/player-analytics-job.yaml -n nfl-api   # after completion
+#
+# Monitor progress:
+#   kubectl logs -n nfl-api -l app=nfl-api-player-analytics -f
+#   curl https://nfl-api.nickknows.net/players/analytics/status | jq .
+#
+# Run only recent seasons (faster):
+#   Patch the command: ["python", "-m", "scripts.compute_player_analytics", "--end-season", "2020"]
+#
+# Force recompute everything:
+#   Patch the command: ["python", "-m", "scripts.compute_player_analytics", "--force"]
+#
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nfl-api-compute-player-analytics
+  namespace: nfl-api
+  labels:
+    app: nfl-api-player-analytics
+spec:
+  # Do not retry automatically — run manually when needed
+  backoffLimit: 0
+  # Keep job visible after completion for log inspection; delete manually
+  ttlSecondsAfterFinished: 86400   # auto-clean after 24 h
+  template:
+    metadata:
+      labels:
+        app: nfl-api-player-analytics
+    spec:
+      restartPolicy: Never
+      # Pin to the control-plane node which has ample RAM for PBP queries
+      nodeSelector:
+        kubernetes.io/hostname: gingmachine
+      containers:
+        - name: player-analytics
+          # Always pull the current production image
+          image: docker.io/ncging/nfl-api:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "scripts.compute_player_analytics"]
+          workingDir: /app
+          env:
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: nfl-api-db-app-user
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nfl-api-db-app-user
+                  key: password
+            - name: DATABASE_URL
+              value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api-db"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "6Gi"
+              cpu: "2"

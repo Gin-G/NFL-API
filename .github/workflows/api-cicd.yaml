@@ -332,6 +332,23 @@ jobs:
           curl -sf --max-time 30 "${{ vars.API_URL }}/dashboard/" \
             | grep -q '<div id="root">'
 
+      - name: GET /players/analytics/status — endpoint reachable
+        run: |
+          STATUS=$(curl -sf --max-time 30 "${{ vars.API_URL }}/players/analytics/status" \
+            | jq -r '.status // "error"')
+          echo "Player analytics status: $STATUS"
+          # Any status except a 500 error is acceptable (no_job if job hasn't run yet)
+          [ "$STATUS" != "error" ]
+
+      - name: GET /players/00-0033873/breakdown?season=2024 — Mahomes breakdown
+        run: |
+          BODY=$(curl -sf --max-time 30 \
+            "${{ vars.API_URL }}/players/00-0033873/breakdown?season=2024" || echo "{}")
+          STATUS=$(echo "$BODY" | jq -r '.status // "error"')
+          echo "Mahomes breakdown: $STATUS"
+          # success if cached, computing if job running, no_data if job hasn't run yet
+          [ "$STATUS" = "success" ] || [ "$STATUS" = "computing" ] || [ "$STATUS" = "no_data" ]
+
       - name: POST /chat/ — endpoint reachable (200 or 503 accepted)
         run: |
           HTTP=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 \

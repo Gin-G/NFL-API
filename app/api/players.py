@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 import nflreadpy as nfl
 import pandas as pd
 import logging
+import json as _json
 from .utils import (
     clean_data_for_json,
     get_player_grader,
@@ -22,7 +23,7 @@ from .utils import (
     _orm_to_dict,
 )
 from database.session import get_db
-from database.models import PlayerRoster, PlayerStat
+from database.models import PlayerRoster, PlayerStat, PlayerSeasonAnalytics, AnalyticsJobStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -301,6 +302,116 @@ async def get_player_grade_details(
     except Exception as e:
         logger.error("Error getting player grade details: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/analytics/status")
+async def get_player_analytics_status(db: Session = Depends(get_db)):
+    """Get current status of the player analytics pre-computation job."""
+    job = (
+        db.query(AnalyticsJobStatus)
+        .filter(AnalyticsJobStatus.job_type == "player_analytics")
+        .order_by(AnalyticsJobStatus.id.desc())
+        .first()
+    )
+    if job is None:
+        return {
+            "status": "no_job",
+            "message": "No player analytics job has been run yet.",
+        }
+    done = (job.processed_entries or 0) + (job.skipped_entries or 0)
+    total = job.total_entries or 0
+    pct = round(done / total * 100, 1) if total > 0 else 0.0
+    return {
+        "status": job.status,
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "total_entries": total,
+        "processed_entries": job.processed_entries or 0,
+        "skipped_entries": job.skipped_entries or 0,
+        "failed_entries": job.failed_entries or 0,
+        "pct_complete": pct,
+        "current_season": job.current_season,
+        "error_message": job.error_message,
+    }
+
+
+@router.get("/{player_id}/breakdown")
+async def get_player_breakdown(
+    player_id: str,
+    season: Optional[int] = Query(None, description="Season year (defaults to current NFL season)"),
+    db: Session = Depends(get_db),
+):
+    """Get PBP-derived analytics for a specific player."""
+    if season is None:
+        season = get_current_nfl_season()
+
+    # Query from cache
+    rows = (
+        db.query(PlayerSeasonAnalytics)
+        .filter(
+            PlayerSeasonAnalytics.player_id == player_id,
+            PlayerSeasonAnalytics.season == season,
+        )
+        .all()
+    )
+
+    if rows:
+        data = []
+        for row in rows:
+            try:
+                blob = _json.loads(row.analytics_json)
+            except Exception:
+                blob = {}
+            blob["season"] = row.season
+            blob["team"] = row.team
+            blob["position"] = row.position
+            blob["player_name"] = row.player_name
+            blob["computed_at"] = row.computed_at.isoformat() if row.computed_at else None
+            data.append(blob)
+        return {
+            "status": "success",
+            "player_id": player_id,
+            "season": season,
+            "data": data,
+        }
+
+    # Cache miss — check if a player analytics job is currently running
+    running_job = (
+        db.query(AnalyticsJobStatus)
+        .filter(
+            AnalyticsJobStatus.status == "running",
+            AnalyticsJobStatus.job_type == "player_analytics",
+        )
+        .order_by(AnalyticsJobStatus.id.desc())
+        .first()
+    )
+    if running_job is not None:
+        done = (running_job.processed_entries or 0) + (running_job.skipped_entries or 0)
+        total = running_job.total_entries or 0
+        pct = round(done / total * 100, 1) if total > 0 else 0.0
+        return {
+            "status": "computing",
+            "message": (
+                f"Player analytics pre-computation is {pct}% complete. "
+                "Check back shortly."
+            ),
+            "pct_complete": pct,
+            "current_season": running_job.current_season,
+            "analytics_status_url": "/players/analytics/status",
+        }
+
+    return {
+        "status": "no_data",
+        "player_id": player_id,
+        "season": season,
+        "message": (
+            "No analytics cached for this player. "
+            "Run the player analytics job first: k8s/player-analytics-job.yaml"
+        ),
+        "data": [],
+    }
 
 
 @router.get("/{player_id}")

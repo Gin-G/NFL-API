@@ -196,6 +196,24 @@ class CoachSeasonAnalytics(Base):
     __table_args__ = (Index("ix_coach_analytics_name", "coach_name"),)
 
 
+class PlayerSeasonAnalytics(Base):
+    """Cached PBP-derived analytics for an individual player in a season."""
+    __tablename__ = "player_season_analytics"
+
+    player_id      = Column(String, primary_key=True)
+    season         = Column(Integer, primary_key=True)
+    team           = Column(String, primary_key=True)
+    player_name    = Column(String)
+    position       = Column(String)
+    analytics_json = Column(Text)
+    computed_at    = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_player_analytics_name", "player_name"),
+        Index("ix_player_analytics_pos_season", "position", "season"),
+    )
+
+
 class AnalyticsJobStatus(Base):
     """Tracks progress of long-running analytics pre-computation jobs."""
     __tablename__ = "analytics_job_status"
