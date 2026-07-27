@@ -27,12 +27,14 @@ export default function GamePBP({ gameId, onClose }: { gameId: string; onClose: 
 
   // Derive header info from first play
   const firstPlay = data?.data?.[0]
-  const awayTeam = firstPlay?.away_team ?? firstPlay?.posteam ?? '?'
-  const homeTeam = firstPlay?.home_team ?? firstPlay?.defteam ?? '?'
+  // away_team/home_team arrive via the untyped index signature (unknown), so
+  // coerce to string — otherwise `unknown ?? …` widens to {} (not a ReactNode).
+  const awayTeam = String(firstPlay?.away_team ?? firstPlay?.posteam ?? '?')
+  const homeTeam = String(firstPlay?.home_team ?? firstPlay?.defteam ?? '?')
 
   // Try to get team names from the game_id format: YYYY_WW_AWAY_HOME
-  let awayDisplay = awayTeam
-  let homeDisplay = homeTeam
+  let awayDisplay: string = awayTeam
+  let homeDisplay: string = homeTeam
   if (gameId) {
     const parts = gameId.split('_')
     if (parts.length === 4) {
