@@ -5,7 +5,19 @@ Tests for /projections endpoints (DB-first, read-only).
 
 from datetime import datetime
 
+import pytest
+
 from database.models import AnalyticsJobStatus, PlayerProjection
+
+
+@pytest.fixture(autouse=True)
+def _clean_projection_tables(db_session):
+    """The test engine is session-scoped and committed rows persist across
+    tests, so clear these tables before each test to avoid PK collisions."""
+    db_session.query(PlayerProjection).delete()
+    db_session.query(AnalyticsJobStatus).delete()
+    db_session.commit()
+    yield
 
 
 def _add(db, **kw):
