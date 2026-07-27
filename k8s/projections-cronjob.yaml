@@ -34,9 +34,9 @@ spec:
             app: nfl-api-projections
         spec:
           restartPolicy: Never
-          # Control-plane node has ample RAM for dataset build + model training
-          nodeSelector:
-            kubernetes.io/hostname: gingmachine
+          # No nodeSelector: with ceph storage the job is node-independent, so let
+          # the scheduler pick a node with memory + pod headroom (gingmachine is at
+          # its pod cap; gingworker is memory-constrained).
           containers:
             - name: projections
               image: docker.io/ncging/nfl-api:latest
