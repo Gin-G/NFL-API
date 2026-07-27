@@ -62,12 +62,15 @@ def run(db, season: int, week: int, epochs: int, job) -> None:
     from database.models import PlayerProjection
     import nfl_projections
     from nfl_projections import ProjectionService
+    from nfl_projections import dataset as nflp_dataset
 
     _update_job(db, job, status="running", current_season=season,
                 current_coach=f"season {season} week {week}")
 
-    logger.info("Building dataset from nflreadpy and training model (epochs=%d)...", epochs)
-    svc = ProjectionService(quantiles=True, epochs=epochs)  # builds data + trains
+    logger.info("Building dataset from nflreadpy...")
+    df = nflp_dataset.build_dataset(output_path=None)  # build in-memory, don't write a CSV
+    logger.info("Training model (mean + quantile, epochs=%d)...", epochs)
+    svc = ProjectionService(dataset=df, quantiles=True, epochs=epochs)
 
     logger.info("Projecting season %d week %d...", season, week)
     frame = svc.project(season, week, as_frame=True)
