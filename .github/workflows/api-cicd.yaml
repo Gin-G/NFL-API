@@ -104,6 +104,11 @@ jobs:
     name: Smoke-Test Live API
     needs: build-and-deploy
     runs-on: ubuntu-latest
+    # Non-blocking: Cloudflare bot-challenges the GitHub runner's requests to the
+    # public API, so these curls fail from CI even when the API is healthy. Kept
+    # for visibility; does not gate the deploy. Re-enable gating once a Cloudflare
+    # WAF skip (secret header / IP allowlist) is in place for the API subdomain.
+    continue-on-error: true
     steps:
       - name: Wait for API to be fully ready
         run: |
