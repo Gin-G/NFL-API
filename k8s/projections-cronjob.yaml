@@ -45,9 +45,12 @@ spec:
               command:
                 - /bin/sh
                 - -c
+                # Install from a tarball URL (the API image has no `git`, so a
+                # git+https:// URL would fail). pip builds the package from the
+                # repo's pyproject.toml.
                 - >-
                   pip install --no-cache-dir
-                  "nfl-projections @ git+https://github.com/Gin-G/nfl-data-py.git"
+                  "nfl-projections @ https://github.com/Gin-G/nfl-data-py/archive/refs/heads/main.tar.gz"
                   && python -m scripts.compute_projections
               env:
                 - name: PGUSER
