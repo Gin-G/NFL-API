@@ -6,6 +6,7 @@ import type { Game } from '../api/types'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
 import ErrorCard from '../components/ui/ErrorCard'
+import GamePBP from '../components/GamePBP'
 
 const SEASONS = getAvailableSeasons()
 const MAX_WEEKS = 22
@@ -21,14 +22,17 @@ function weekLabel(week: number): string {
   return PLAYOFF_ROUND[week] ?? `Week ${week}`
 }
 
-function GameCard({ game }: { game: Game }) {
+function GameCard({ game, onClick }: { game: Game; onClick?: () => void }) {
   const finished = game.home_score !== null && game.away_score !== null
   const awayWon = finished && (game.away_score ?? 0) > (game.home_score ?? 0)
   const homeWon = finished && (game.home_score ?? 0) > (game.away_score ?? 0)
   const isOT = finished && game.overtime === 1
 
   return (
-    <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+    <div
+      className={`bg-slate-800 rounded-xl p-4 border border-slate-700 ${onClick ? 'cursor-pointer hover:ring-1 ring-slate-500 transition-shadow' : ''}`}
+      onClick={onClick}
+    >
       <div className="flex justify-between text-xs text-slate-400 mb-3">
         <span>{game.gameday ?? ''}{game.gametime ? ` · ${game.gametime}` : ''}</span>
         <span className="flex items-center gap-1">
@@ -85,6 +89,7 @@ export default function Schedule() {
   const defaultSeason = getCurrentNFLSeason()
   const [season, setSeason] = useState(defaultSeason)
   const [week, setWeek] = useState(getCurrentNFLWeek(defaultSeason))
+  const [selectedGameId, setSelectedGameId] = useState<string | null>(null)
 
   const { data, isLoading, error, refetch } = useSchedules(season, week)
 
@@ -139,11 +144,22 @@ export default function Schedule() {
         <>
           <p className="text-sm text-slate-400 mb-4">{data.total_games} games</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {data.data.map((g) => (
-              <GameCard key={g.game_id ?? `${g.away_team}-${g.home_team}-${g.week}`} game={g} />
-            ))}
+            {data.data.map((g) => {
+              const finished = g.home_score !== null && g.away_score !== null
+              return (
+                <GameCard
+                  key={g.game_id ?? `${g.away_team}-${g.home_team}-${g.week}`}
+                  game={g}
+                  onClick={finished && g.game_id ? () => setSelectedGameId(g.game_id!) : undefined}
+                />
+              )
+            })}
           </div>
         </>
+      )}
+
+      {selectedGameId && (
+        <GamePBP gameId={selectedGameId} onClose={() => setSelectedGameId(null)} />
       )}
     </div>
   )

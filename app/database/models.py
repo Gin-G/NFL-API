@@ -214,6 +214,41 @@ class PlayerSeasonAnalytics(Base):
     )
 
 
+class DepthChart(Base):
+    __tablename__ = "depth_charts"
+
+    player_id            = Column(String,  primary_key=True)
+    season               = Column(Integer, primary_key=True)
+    week                 = Column(Integer, primary_key=True)
+    team                 = Column(String,  primary_key=True)
+    position             = Column(String,  primary_key=True)
+    depth_chart_position = Column(String)
+    depth_team           = Column(Integer)
+    full_name            = Column(String)
+    game_type            = Column(String)
+
+    __table_args__ = (Index("ix_depth_charts_team_season", "team", "season"),)
+
+
+class SnapCount(Base):
+    __tablename__ = "snap_counts"
+
+    player_id     = Column(String,  primary_key=True)
+    season        = Column(Integer, primary_key=True)
+    week          = Column(Integer, primary_key=True)
+    team          = Column(String,  primary_key=True)
+    player_name   = Column(String)
+    position      = Column(String)
+    offense_snaps = Column(Integer)
+    offense_pct   = Column(Float)
+    defense_snaps = Column(Integer)
+    defense_pct   = Column(Float)
+    st_snaps      = Column(Integer)
+    st_pct        = Column(Float)
+
+    __table_args__ = (Index("ix_snap_counts_team_season", "team", "season"),)
+
+
 class AnalyticsJobStatus(Base):
     """Tracks progress of long-running analytics pre-computation jobs."""
     __tablename__ = "analytics_job_status"

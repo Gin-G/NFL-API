@@ -12,7 +12,7 @@ import nflreadpy as nfl
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .models import Team, Schedule, PlayerRoster, PlayerStat
+from .models import Team, Schedule, PlayerRoster, PlayerStat, DepthChart, SnapCount
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +279,81 @@ def load_player_stats(db: Session, season: int) -> int:
     return count
 
 
+def load_depth_charts(db: Session, season: int) -> int:
+    """Load depth chart data for a season."""
+    if db.query(DepthChart).filter(DepthChart.season == season).first():
+        logger.info("Depth charts for %d already loaded", season)
+        return 0
+    logger.info("Loading depth charts for season %d…", season)
+    try:
+        import nfl_data_py as nfl_dp
+        df = _to_pandas(nfl_dp.import_depth_charts([season]))
+    except Exception as exc:
+        logger.warning("Skipping depth charts for %d: %s", season, exc)
+        return 0
+    if df is None or df.empty:
+        return 0
+    count = 0
+    for r in df.itertuples(index=False):
+        pid = _safe(_col(r, 'player_id') or _col(r, 'gsis_id'))
+        if not pid:
+            continue
+        db.merge(DepthChart(
+            player_id=pid,
+            season=season,
+            week=int(_col(r, 'week') or 0),
+            team=_safe(_col(r, 'club_code') or _col(r, 'team')),
+            position=_safe(_col(r, 'position')),
+            depth_chart_position=_safe(_col(r, 'depth_chart_position')),
+            depth_team=int(_col(r, 'depth_team') or 99),
+            full_name=_safe(_col(r, 'full_name')),
+            game_type=_safe(_col(r, 'game_type')),
+        ))
+        count += 1
+    db.commit()
+    logger.info("Depth charts loaded for %d: %d rows", season, count)
+    return count
+
+
+def load_snap_counts(db: Session, season: int) -> int:
+    """Load snap count data for a season."""
+    if db.query(SnapCount).filter(SnapCount.season == season).first():
+        logger.info("Snap counts for %d already loaded", season)
+        return 0
+    logger.info("Loading snap counts for season %d…", season)
+    try:
+        import nfl_data_py as nfl_dp
+        df = _to_pandas(nfl_dp.import_snap_counts([season]))
+    except Exception as exc:
+        logger.warning("Skipping snap counts for %d: %s", season, exc)
+        return 0
+    if df is None or df.empty:
+        return 0
+    count = 0
+    for r in df.itertuples(index=False):
+        pid = _safe(_col(r, 'player_id'))
+        if not pid:
+            continue
+        db.merge(SnapCount(
+            player_id=pid,
+            season=season,
+            week=int(_col(r, 'week') or 0),
+            team=_safe(_col(r, 'team')),
+            player_name=_safe(_col(r, 'player_name')),
+            position=_safe(_col(r, 'position')),
+            offense_snaps=int(_col(r, 'offense_snaps') or 0),
+            offense_pct=float(_col(r, 'offense_pct') or 0),
+            defense_snaps=int(_col(r, 'defense_snaps') or 0),
+            defense_pct=float(_col(r, 'defense_pct') or 0),
+            st_snaps=int(_col(r, 'st_snaps') or 0),
+            st_pct=float(_col(r, 'st_pct') or 0),
+        ))
+        count += 1
+    db.commit()
+    logger.info("Snap counts loaded for %d: %d rows", season, count)
+    return count
+
+
 def _season_loaded(db: Session, season: int) -> bool:
     """Return True if schedule data for this season is already in the DB."""
     try:
@@ -463,6 +538,16 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
                 load_player_stats(db, season)
             except Exception as exc:
                 logger.error("Failed to load player stats for %d: %s", season, exc)
+                db.rollback()
+            try:
+                load_depth_charts(db, season)
+            except Exception as exc:
+                logger.error("Failed to load depth charts for %d: %s", season, exc)
+                db.rollback()
+            try:
+                load_snap_counts(db, season)
+            except Exception as exc:
+                logger.error("Failed to load snap counts for %d: %s", season, exc)
                 db.rollback()
         # PBP is always attempted — _pbp_season_loaded() skips if already present
         try:
