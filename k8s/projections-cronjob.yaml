@@ -1,0 +1,71 @@
+# Weekly fantasy-projections pre-computation.
+#
+# Builds the dataset from nflreadpy, trains the model (mean + quantile
+# floor/ceiling) via the nfl_projections package, and caches results in the
+# player_projections table. Progress is tracked in analytics_job_status and
+# exposed via GET /projections/status; results via GET /projections?week=N.
+#
+# The API image does NOT bundle nfl_projections (it drags in TensorFlow), so
+# this job pip-installs it at runtime. Runs weekly; trigger a one-off run with:
+#   kubectl create job -n nfl-api --from=cronjob/nfl-api-projections proj-manual
+#
+# Manual run for a specific week — patch the command args:
+#   ["...", "python", "-m", "scripts.compute_projections", "--week", "3"]
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nfl-api-projections
+  namespace: nfl-api
+  labels:
+    app: nfl-api-projections
+spec:
+  # Wednesday 09:00 UTC — after Tuesday injury reports, before the weekend slate
+  schedule: "0 9 * * 3"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 172800   # clean up after 48 h
+      template:
+        metadata:
+          labels:
+            app: nfl-api-projections
+        spec:
+          restartPolicy: Never
+          # Control-plane node has ample RAM for dataset build + model training
+          nodeSelector:
+            kubernetes.io/hostname: gingmachine
+          containers:
+            - name: projections
+              image: docker.io/ncging/nfl-api:latest
+              imagePullPolicy: Always
+              workingDir: /app
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  pip install --no-cache-dir
+                  "nfl-projections @ git+https://github.com/Gin-G/nfl-data-py.git"
+                  && python -m scripts.compute_projections
+              env:
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: password
+                - name: DATABASE_URL
+                  value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api-db"
+              resources:
+                requests:
+                  memory: "2Gi"
+                  cpu: "1"
+                limits:
+                  memory: "8Gi"
+                  cpu: "3"

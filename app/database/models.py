@@ -249,6 +249,32 @@ class SnapCount(Base):
     __table_args__ = (Index("ix_snap_counts_team_season", "team", "season"),)
 
 
+class PlayerProjection(Base):
+    """Weekly fantasy projection for a player: a mean point projection plus a
+    floor / median / ceiling range from the quantile model. Populated by the
+    scripts.compute_projections job (which uses the nfl_projections package)."""
+    __tablename__ = "player_projections"
+
+    season           = Column(Integer, primary_key=True)
+    week             = Column(Integer, primary_key=True)
+    player_id        = Column(String,  primary_key=True)
+    player_name      = Column(String)
+    position         = Column(String)
+    team             = Column(String)
+    projected_points = Column(Float)   # mean projection (fanduel points)
+    floor            = Column(Float)   # 10th percentile
+    median           = Column(Float)   # 50th percentile
+    ceiling          = Column(Float)   # 90th percentile
+    prediction_type  = Column(String)  # veteran_ml / rookie_ml / injured_out
+    model_version    = Column(String)
+    computed_at      = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_player_projections_week", "season", "week"),
+        Index("ix_player_projections_pos", "position", "season", "week"),
+    )
+
+
 class AnalyticsJobStatus(Base):
     """Tracks progress of long-running analytics pre-computation jobs."""
     __tablename__ = "analytics_job_status"
