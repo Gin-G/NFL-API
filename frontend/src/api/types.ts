@@ -502,6 +502,77 @@ export interface PlayerBreakdownResponse {
   current_season?: number
 }
 
+// ─── Depth Charts & Snap Counts ───────────────────────────────────────────────
+
+export interface DepthChartEntry {
+  player_id: string
+  full_name: string | null
+  position: string
+  depth_chart_position: string | null
+  depth_team: number
+  team: string
+  season: number
+  week: number
+  game_type: string | null
+}
+
+export interface SnapCountEntry {
+  player_id: string
+  player_name: string | null
+  position: string | null
+  team: string
+  season: number
+  week: number
+  offense_snaps: number
+  offense_pct: number
+  defense_snaps: number
+  defense_pct: number
+  st_snaps: number
+  st_pct: number
+}
+
+export interface DepthChartResponse {
+  status: string
+  team: string
+  season: number
+  data: DepthChartEntry[]
+  message?: string
+}
+
+export interface SnapCountsResponse {
+  status: string
+  team: string
+  season: number
+  data: SnapCountEntry[]
+  message?: string
+}
+
+// ─── Play-by-Play ─────────────────────────────────────────────────────────────
+
+export interface PBPPlay {
+  play_id?: number | null
+  game_id?: string | null
+  qtr?: number | null
+  time?: string | null
+  posteam?: string | null
+  defteam?: string | null
+  down?: number | null
+  ydstogo?: number | null
+  desc?: string | null
+  yards_gained?: number | null
+  epa?: number | null
+  play_type?: string | null
+  [key: string]: unknown
+}
+
+export interface PBPResponse {
+  status: string
+  game_id: string
+  total_plays: number
+  data: PBPPlay[]
+  message?: string
+}
+
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {

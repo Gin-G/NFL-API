@@ -3,6 +3,23 @@ db:
   group: nfl-api
   instances: 1
   size: 10Gi
+  # Resource requests/limits for each postgres instance. Without these the
+  # DB is unbounded and a heavy load (e.g. the nickknows NFL stats update)
+  # can starve the node it runs on. Tune limits.memory to your working set.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  # Postgres memory tuning, kept comfortably under limits.memory above so the
+  # backend can't exceed the cgroup limit and get OOM-killed mid-query.
+  parameters:
+    shared_buffers: 512MB
+    work_mem: 32MB
+    maintenance_work_mem: 256MB
+    effective_cache_size: 1536MB
   secretPath: nfl-api
   app:
     name: nfl-api-db
