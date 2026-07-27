@@ -3,6 +3,9 @@ db:
   group: nfl-api
   instances: 1
   size: 10Gi
+  # Network-attached ceph storage so the DB isn't pinned to one node (local-path
+  # pinned it to gingworker, which ran out of reservable memory).
+  storageClass: rook-ceph-block
   # Resource requests/limits for each postgres instance. Without these the
   # DB is unbounded and a heavy load (e.g. the nickknows NFL stats update)
   # can starve the node it runs on. Tune limits.memory to your working set.

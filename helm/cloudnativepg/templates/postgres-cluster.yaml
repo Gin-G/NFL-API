@@ -10,6 +10,9 @@ spec:
   instances: {{ .Values.db.instances }}
   storage:
     size: {{ .Values.db.size }}
+    {{- with .Values.db.storageClass }}
+    storageClass: {{ . }}
+    {{- end }}
   {{- with .Values.db.resources }}
   resources:
 {{ toYaml . | indent 4 }}
