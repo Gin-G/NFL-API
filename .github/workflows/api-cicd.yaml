@@ -19,6 +19,8 @@ concurrency:
 
 on:
   push:
+    branches:
+      - main
     paths:
       - app/**
       - frontend/**

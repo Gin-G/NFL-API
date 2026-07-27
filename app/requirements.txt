@@ -9,6 +9,7 @@ python-multipart==0.0.6
 
 # NFL Data and Analysis
 nflreadpy
+nfl_data_py  # used by loader.load_depth_charts / load_snap_counts (TODO: port to nflreadpy)
 polars[rtcompat]  # CPU-compatible build (gingmachine lacks AVX2/AVX)
 pyarrow>=7.0.0  # required by nflreadpy (Polars .to_pandas() conversion)
 pandas==2.1.4
