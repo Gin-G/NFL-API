@@ -1,15 +1,13 @@
-# Runs tests, builds and pushes a container image for FastAPI, updates the Helm
-# chart, triggers an ArgoCD sync so changes go live, then smoke-tests all
-# endpoints against the running deployment.
+# Runs tests, builds and pushes a container image for FastAPI, and updates the
+# Helm chart. ArgoCD auto-sync (always enabled) picks up the Helm change and
+# rolls out the new image; this workflow no longer calls the ArgoCD API
+# directly. Finally it smoke-tests the live endpoints.
 #
 # Required GitHub secrets:
 #   DOCKERHUB_USERNAME   - DockerHub login
 #   DOCKERHUB_TOKEN      - DockerHub access token
-#   ARGOCD_SERVER        - ArgoCD base URL, e.g. https://argocd.nickknows.net
-#   ARGOCD_APP_NAME      - ArgoCD application name, e.g. nfl-api
-#   ARGOCD_TOKEN         - ArgoCD API token (Settings → Accounts → Generate Token)
 #
-# The live API URL is derived automatically from helm/nfl-api/values.yaml (fqdn field).
+# The live API URL comes from the API_URL repo variable (https://nfl-api.nickknows.net).
 
 name: NFL API CI/CD
 
@@ -96,106 +94,6 @@ jobs:
           git push
           echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Trigger ArgoCD sync
-        env:
-          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
-          ARGOCD_APP_NAME: ${{ secrets.ARGOCD_APP_NAME }}
-          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
-        run: |
-          SERVER="$(echo -n "${ARGOCD_SERVER}" | tr -d '[:space:]')"
-          SERVER="${SERVER%/}"
-          # Terminate any stuck/running operation from a previous sync before starting fresh
-          echo "Terminating any existing ArgoCD operation..."
-          curl -s -X DELETE \
-            "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/operation" \
-            -H "Authorization: Bearer ${ARGOCD_TOKEN}" || true
-          sleep 5
-          HTTP=$(curl --silent --show-error -o /dev/null -w "%{http_code}" \
-            -X POST \
-            "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}/sync" \
-            -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d '{"prune": true}')
-          echo "ArgoCD sync response: $HTTP"
-          # 200 = sync started; 400 = already syncing / no diff — both acceptable
-          [ "$HTTP" = "200" ] || [ "$HTTP" = "400" ] || { echo "Unexpected ArgoCD response: $HTTP"; exit 1; }
-
-  # ── 3. Wait for ArgoCD rollout ─────────────────────────────────────────────
-  # Isolated in its own job so that the ARGOCD_APP_NAME secret value ("nfl-api")
-  # is only registered for masking on THIS runner, not on the smoke-test runner.
-  wait-for-argo:
-    name: Wait for ArgoCD Rollout
-    needs: build-and-deploy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Wait for ArgoCD — Synced + Healthy at expected revision
-        env:
-          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
-          ARGOCD_APP_NAME: ${{ secrets.ARGOCD_APP_NAME }}
-          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
-          EXPECTED_SHA: ${{ needs.build-and-deploy.outputs.deployed_sha }}
-        run: |
-          SERVER="$(echo -n "${ARGOCD_SERVER}" | tr -d '[:space:]')"
-          SERVER="${SERVER%/}"
-          echo "Expected revision: ${EXPECTED_SHA}"
-          echo "Giving ArgoCD 30 s to detect the new commit and start the rollout..."
-          sleep 30
-          echo "Polling ArgoCD for Synced/Healthy at revision ${EXPECTED_SHA} (max 20 min)..."
-          STATUS="unknown/unknown"
-          REVISION="none"
-          DEPLOY_HEALTH="unknown"
-          for i in $(seq 1 120); do
-            RESPONSE=$(curl -sf \
-              -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
-              "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}" 2>/dev/null || echo "{}")
-            STATUS=$(echo "$RESPONSE" \
-              | jq -r '(.status.sync.status) + "/" + (.status.health.status)' 2>/dev/null \
-              || echo "unknown/unknown")
-            REVISION=$(echo "$RESPONSE" \
-              | jq -r '.status.sync.revision // "none"' 2>/dev/null \
-              || echo "none")
-            OP_PHASE=$(echo "$RESPONSE" \
-              | jq -r '.status.operationState.phase // "none"' 2>/dev/null \
-              || echo "none")
-            DEPLOY_HEALTH=$(echo "$RESPONSE" \
-              | jq -r '[.status.resources[] | select(.kind=="Deployment") | .health.status][0] // "unknown"' \
-              2>/dev/null || echo "unknown")
-            echo "  [$i/120] $STATUS op=$OP_PHASE deploy=$DEPLOY_HEALTH (revision: ${REVISION:0:8})"
-            # Full success: Synced + Healthy + correct revision
-            if [ "$STATUS" = "Synced/Healthy" ] && [ "$REVISION" = "$EXPECTED_SHA" ]; then
-              echo "App fully synced at correct revision!"; break
-            fi
-            # Partial success: Deployment is Healthy at correct revision even if db-loader hook still running.
-            # Smoke tests verify existing data — they don't require the PostSync data-load job to finish.
-            if [ "$REVISION" = "$EXPECTED_SHA" ] && [ "$DEPLOY_HEALTH" = "Healthy" ]; then
-              echo "Deployment is live and healthy at correct revision (db-loader PostSync hook may still be running)!"
-              break
-            fi
-            sleep 10
-          done
-          LIVE=0
-          [ "$STATUS" = "Synced/Healthy" ] && [ "$REVISION" = "$EXPECTED_SHA" ] && LIVE=1
-          [ "$REVISION" = "$EXPECTED_SHA" ] && [ "$DEPLOY_HEALTH" = "Healthy" ] && LIVE=1
-          if [ "$LIVE" = "0" ]; then
-            echo "ERROR: App did not reach expected revision with healthy deployment"
-            echo "  Expected: $EXPECTED_SHA"
-            echo "  Got:      $STATUS deploy=$DEPLOY_HEALTH (revision: $REVISION)"
-            echo "--- All resource statuses ---"
-            curl -sf \
-              -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
-              "${SERVER}/api/v1/applications/${ARGOCD_APP_NAME}" \
-              | jq '{
-                  syncStatus: .status.sync.status,
-                  syncRevision: .status.sync.revision,
-                  operationState: .status.operationState.phase,
-                  operationMessage: .status.operationState.message,
-                  resources: [.status.resources[] | {kind, name, status, health: .health.status}]
-                }' \
-              || echo "(could not fetch app status)"
-            exit 1
-          fi
-          echo "Giving the ingress/load-balancer 20 s to finish routing to the new pod..."
-          sleep 20
 
   # ── 4. Smoke-test every live endpoint ──────────────────────────────────────
   # This job intentionally references NO secrets. Because each GitHub-hosted job
@@ -204,7 +102,7 @@ jobs:
   # ${{ vars.API_URL }} (https://nfl-api.nickknows.net) is never redacted.
   smoke-test:
     name: Smoke-Test Live API
-    needs: wait-for-argo
+    needs: build-and-deploy
     runs-on: ubuntu-latest
     steps:
       - name: Wait for API to be fully ready
