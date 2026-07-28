@@ -14,9 +14,17 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 import nflreadpy as nfl
 import logging
-from .utils import clean_data_for_json, _to_pandas, _orm_to_dict
+from .utils import (
+    clean_data_for_json,
+    _to_pandas,
+    _orm_to_dict,
+    get_current_nfl_season,
+    load_schedules_df,
+    load_weekly_stats_df,
+)
+from .fpa import build_opponent_map, compute_fpa_detail
 from database.session import get_db
-from database.models import Team as TeamModel, DepthChart, SnapCount
+from database.models import Team as TeamModel, DepthChart, SnapCount, Schedule
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -99,6 +107,102 @@ def get_team_snap_counts(
         "team": abbr,
         "season": season,
         "data": [_orm_to_dict(r) for r in rows],
+    }
+
+
+@router.get("/{team_abbr}/results")
+async def get_team_results(
+    team_abbr: str,
+    season: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """Completed games for a team in a season, sorted by week.
+
+    Same row shape as /schedules/ plus an `is_home` flag; ports NickKnows'
+    per-team `{year}_{team}_schedule.csv`.
+    """
+    if season is None:
+        season = get_current_nfl_season()
+    abbr = team_abbr.upper()
+    try:
+        rows = []
+        try:
+            rows = (
+                db.query(Schedule)
+                .filter(
+                    Schedule.season == season,
+                    (Schedule.home_team == abbr) | (Schedule.away_team == abbr),
+                )
+                .order_by(Schedule.week)
+                .all()
+            )
+        except Exception as db_err:
+            logger.warning("DB unavailable, falling back to nflreadpy: %s", db_err)
+
+        if rows:
+            games = []
+            for r in rows:
+                if r.home_score is None or r.away_score is None:
+                    continue  # completed games only
+                d = _orm_to_dict(r)
+                d["is_home"] = (r.home_team == abbr)
+                games.append(d)
+        else:
+            sched = _to_pandas(nfl.load_schedules(seasons=[season]))
+            sched = sched[
+                (sched["home_team"] == abbr) | (sched["away_team"] == abbr)
+            ]
+            sched = sched.dropna(subset=["away_score", "home_score"]).sort_values("week")
+            games = clean_data_for_json(sched)
+            for g in games:
+                g["is_home"] = (g.get("home_team") == abbr)
+
+        return {
+            "status": "success" if games else "no_data",
+            "season": season,
+            "team": abbr,
+            "total_games": len(games),
+            "data": games,
+        }
+    except Exception as e:
+        logger.error("Error fetching results for %s: %s", team_abbr, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{team_abbr}/fpa")
+async def get_team_fpa_detail(
+    team_abbr: str,
+    season: Optional[int] = None,
+    position: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Per opposing player-week fantasy detail against this defense.
+
+    The rows behind /fpa/ averages; optionally filtered to one of QB/RB/WR/TE.
+    """
+    if season is None:
+        season = get_current_nfl_season()
+    abbr = team_abbr.upper()
+    try:
+        sched_df = load_schedules_df(db, season)
+        stats_df = load_weekly_stats_df(db, season)
+    except Exception as e:
+        logger.error("Error loading data for team FPA detail: %s", e)
+        return {"status": "no_data", "season": season, "team": abbr,
+                "total_records": 0, "data": []}
+
+    opp_map = build_opponent_map(sched_df)
+    rows = compute_fpa_detail(stats_df, opp_map, abbr, position=position)
+    if not rows:
+        return {"status": "no_data", "season": season, "team": abbr,
+                "total_records": 0, "data": []}
+    return {
+        "status": "success",
+        "season": season,
+        "team": abbr,
+        "position": position.upper() if position else None,
+        "total_records": len(rows),
+        "data": rows,
     }
 
 

@@ -22,6 +22,9 @@ from api.coaches import router as coaches_router
 from api.chat import router as chat_router
 from api.pbp import router as pbp_router
 from api.projections import router as projections_router
+from api.stats import router as stats_router
+from api.fpa import router as fpa_router
+from api.opportunities import router as opportunities_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -87,6 +90,9 @@ app.include_router(coaches_router, prefix="/coaches", tags=["coaches"])
 app.include_router(chat_router, prefix="/chat", tags=["chat"])
 app.include_router(pbp_router, prefix="/pbp", tags=["pbp"])
 app.include_router(projections_router, prefix="/projections", tags=["projections"])
+app.include_router(stats_router, prefix="/stats", tags=["stats"])
+app.include_router(fpa_router, prefix="/fpa", tags=["fpa"])
+app.include_router(opportunities_router, prefix="/opportunities", tags=["opportunities"])
 
 @app.get("/")
 async def root():

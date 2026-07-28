@@ -57,10 +57,31 @@ export function getCurrentNFLWeek(season: number, date: Date = new Date()): numb
 }
 
 /**
- * Return a descending list of available seasons from the current season
- * back to firstSeason (default 2020).
+ * Return the upcoming season (current + 1) once its schedule has been
+ * released, otherwise null.
+ *
+ * The NFL releases the next season's schedule in mid-May, well before the
+ * season starts in September. During that window the upcoming season can be
+ * browsed (schedules, rosters) even though no game stats exist yet — those
+ * endpoints simply report no_data. We gate on ~May 1 of the upcoming year so
+ * we never surface a season whose schedule hasn't dropped.
+ *
+ * Example at 2026-07-27: getCurrentNFLSeason() → 2025, upcoming → 2026.
+ * Example at 2026-10-01: getCurrentNFLSeason() → 2026, upcoming → null
+ *   (2027's schedule isn't out until May 2027).
+ */
+export function getUpcomingSeason(date: Date = new Date()): number | null {
+  const upcoming = getCurrentNFLSeason(date) + 1
+  const scheduleRelease = new Date(upcoming, 4, 1) // May 1 of the upcoming year
+  return date >= scheduleRelease ? upcoming : null
+}
+
+/**
+ * Return a descending list of available seasons from the newest browsable
+ * season back to firstSeason (default 2020). The newest is the upcoming
+ * season once its schedule is out, otherwise the current season.
  */
 export function getAvailableSeasons(firstSeason = 2020): number[] {
-  const current = getCurrentNFLSeason()
-  return Array.from({ length: current - firstSeason + 1 }, (_, i) => current - i)
+  const newest = getUpcomingSeason() ?? getCurrentNFLSeason()
+  return Array.from({ length: newest - firstSeason + 1 }, (_, i) => newest - i)
 }

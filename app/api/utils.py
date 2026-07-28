@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,101 @@ def _orm_to_dict(obj) -> dict:
     Strips SA internal state keys (those starting with '_').
     """
     return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+
+
+def _normalize_stats_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Map nflreadpy load_player_stats column names to the API schema."""
+    return df.rename(columns={
+        "team": "recent_team",
+        "passing_interceptions": "interceptions",
+    })
+
+
+# ---------------------------------------------------------------------------
+# DB-first DataFrame loaders
+#
+# These return pandas DataFrames from the database when a season has been
+# loaded, and fall back to nflreadpy otherwise. They back the NickKnows-parity
+# endpoints (stat leaders, FPA, opportunities, team results) which port Celery
+# pipelines that operated on DataFrames, so a DataFrame is the natural currency.
+# ---------------------------------------------------------------------------
+
+def load_weekly_stats_df(db, season: int) -> pd.DataFrame:
+    """Weekly player stats for a season as a DataFrame (DB-first)."""
+    try:
+        from database.models import PlayerStat
+        rows = db.query(PlayerStat).filter(PlayerStat.season == season).all()
+        if rows:
+            return pd.DataFrame([_orm_to_dict(r) for r in rows])
+    except Exception as e:
+        logger.warning("DB weekly stats unavailable, falling back to nflreadpy: %s", e)
+    import nflreadpy as nfl
+    return _normalize_stats_columns(_to_pandas(nfl.load_player_stats(seasons=[season])))
+
+
+def load_schedules_df(db, season: int) -> pd.DataFrame:
+    """Schedules for a season as a DataFrame (DB-first)."""
+    try:
+        from database.models import Schedule
+        rows = db.query(Schedule).filter(Schedule.season == season).all()
+        if rows:
+            return pd.DataFrame([_orm_to_dict(r) for r in rows])
+    except Exception as e:
+        logger.warning("DB schedules unavailable, falling back to nflreadpy: %s", e)
+    import nflreadpy as nfl
+    return _to_pandas(nfl.load_schedules(seasons=[season]))
+
+
+def load_weekly_rosters_df(db, season: int) -> pd.DataFrame:
+    """Weekly rosters for a season as a DataFrame (DB-first)."""
+    try:
+        from database.models import PlayerRoster
+        rows = db.query(PlayerRoster).filter(PlayerRoster.season == season).all()
+        if rows:
+            return pd.DataFrame([_orm_to_dict(r) for r in rows])
+    except Exception as e:
+        logger.warning("DB rosters unavailable, falling back to nflreadpy: %s", e)
+    import nflreadpy as nfl
+    df = _to_pandas(nfl.load_rosters_weekly(seasons=[season]))
+    return df.rename(columns={"gsis_id": "player_id", "full_name": "player_name"})
+
+
+# Columns needed to compute opportunities from play-by-play.
+_PBP_OPP_COLUMNS = [
+    "play_type", "down", "yardline_100", "air_yards",
+    "receiver_player_id", "rusher_player_id", "posteam", "week",
+]
+
+
+def load_pbp_df(db, season: int, week: Optional[int] = None) -> pd.DataFrame:
+    """Regular-season play-by-play columns needed for opportunity metrics.
+
+    DB-first via raw SQL against the play_by_play table; falls back to
+    nflreadpy. Always restricted to season_type == 'REG'.
+    """
+    from sqlalchemy import text
+    try:
+        conditions = ["season = :season", "season_type = 'REG'"]
+        params: dict = {"season": season}
+        if week is not None:
+            conditions.append("week = :week")
+            params["week"] = week
+        where = " AND ".join(conditions)
+        cols = ", ".join(_PBP_OPP_COLUMNS)
+        sql = f"SELECT {cols} FROM play_by_play WHERE {where}"
+        rows = db.execute(text(sql), params).mappings().all()
+        if rows:
+            return pd.DataFrame([dict(r) for r in rows])
+    except Exception as e:
+        logger.warning("DB PBP unavailable, falling back to nflreadpy: %s", e)
+    import nflreadpy as nfl
+    df = _to_pandas(nfl.load_pbp(seasons=[season]))
+    if "season_type" in df.columns:
+        df = df[df["season_type"] == "REG"]
+    if week is not None:
+        df = df[df["week"] == week]
+    keep = [c for c in _PBP_OPP_COLUMNS if c in df.columns]
+    return df[keep].copy()
 
 
 def check_grading_systems():
