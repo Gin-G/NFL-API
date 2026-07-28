@@ -187,10 +187,10 @@ def load_rosters(db: Session, season: int, force: bool = False) -> int:
             position=_col(row, "position"),
             team=_col(row, "team"),
             height=_col(row, "height"),
-            weight=_col(row, "weight"),
+            weight=_num(_col(row, "weight")),
             college=_col(row, "college"),
-            rookie_year=_col(row, "rookie_year"),
-            jersey_number=_col(row, "jersey_number"),
+            rookie_year=_num(_col(row, "rookie_year")),
+            jersey_number=_num(_col(row, "jersey_number")),
             birth_date=_col(row, "birth_date"),
             status=_col(row, "status"),
             status_description_abbr=_col(row, "status_description_abbr"),
@@ -198,10 +198,10 @@ def load_rosters(db: Session, season: int, force: bool = False) -> int:
             esb_id=_col(row, "esb_id"),
             gsis_it_id=_col(row, "gsis_it_id"),
             smart_id=_col(row, "smart_id"),
-            entry_year=_col(row, "entry_year"),
+            entry_year=_num(_col(row, "entry_year")),
             draft_club=_col(row, "draft_club"),
-            draft_number=_col(row, "draft_number"),
-            years_exp=_col(row, "years_exp"),
+            draft_number=_num(_col(row, "draft_number")),
+            years_exp=_num(_col(row, "years_exp")),
             headshot_url=_col(row, "headshot_url"),
         ))
         count += 1
@@ -295,6 +295,17 @@ def _int(v, default=0):
         return default
 
 
+def _num(v):
+    """Coerce to float for numeric columns; None if not parseable (e.g. '79D')."""
+    v = _safe(v)
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _pct(v):
     """Snap percentages arrive as 0-1 decimals in nflverse; store as 0-100."""
     try:
@@ -320,16 +331,23 @@ def load_depth_charts(db: Session, season: int, force: bool = False) -> int:
     if df is None or df.empty:
         return 0
     count = 0
+    seen = set()  # dedupe on the full PK (player_id, season, week, team, position)
     for r in df.itertuples(index=False):
         pid = _col(r, "gsis_id") or _col(r, "player_id")
-        if not pid:
-            continue
         pos = _col(r, "position") or _col(r, "depth_position")
+        team = _col(r, "club_code") or _col(r, "team")
+        week = _int(_col(r, "week"))
+        if not pid or not pos or not team:  # all are PK columns (NOT NULL)
+            continue
+        key = (pid, season, week, team, pos)
+        if key in seen:
+            continue
+        seen.add(key)
         db.merge(DepthChart(
             player_id=pid,
             season=season,
-            week=_int(_col(r, "week")),
-            team=_col(r, "club_code") or _col(r, "team"),
+            week=week,
+            team=team,
             position=pos,
             depth_chart_position=_col(r, "depth_position") or pos,
             depth_team=_int(_col(r, "depth_team"), 99),
@@ -358,16 +376,23 @@ def load_snap_counts(db: Session, season: int, force: bool = False) -> int:
     if df is None or df.empty:
         return 0
     count = 0
+    seen = set()  # dedupe on the full PK (player_id, season, week, team)
     for r in df.itertuples(index=False):
         pid = _col(r, "pfr_player_id") or _col(r, "player_id")
         wk = _col(r, "week")
-        if not pid or wk is None:
+        team = _col(r, "team")
+        if not pid or wk is None or not team:  # all are PK columns (NOT NULL)
             continue
+        week = _int(wk)
+        key = (pid, season, week, team)
+        if key in seen:
+            continue
+        seen.add(key)
         db.merge(SnapCount(
             player_id=pid,
             season=season,
-            week=_int(wk),
-            team=_col(r, "team"),
+            week=week,
+            team=team,
             player_name=_col(r, "player") or _col(r, "player_name"),
             position=_col(r, "position"),
             offense_snaps=_int(_col(r, "offense_snaps")),
