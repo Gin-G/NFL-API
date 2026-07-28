@@ -37,9 +37,10 @@ spec:
         app: nfl-api-analytics
     spec:
       restartPolicy: Never
-      # Pin to the control-plane node which has ample RAM for PBP queries
-      nodeSelector:
-        kubernetes.io/hostname: gingmachine
+      # No nodeSelector: gingmachine sits at its pod cap, so pin-scheduling
+      # leaves the pod Pending. Postgres does the heavy PBP aggregation, so the
+      # job pod itself is light and can run on any node (matches the projections
+      # cronjob fix in 48574f7).
       containers:
         - name: analytics
           # Always pull the current production image

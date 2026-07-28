@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useSchedules } from '../api/schedules'
-import { getAvailableSeasons, getCurrentNFLSeason, getCurrentNFLWeek } from '../utils/nflDate'
+import { getAvailableSeasons, getDefaultSeason, getCurrentNFLWeek } from '../utils/nflDate'
 import type { Game } from '../api/types'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
@@ -86,7 +86,7 @@ function GameCard({ game, onClick }: { game: Game; onClick?: () => void }) {
 }
 
 export default function Schedule() {
-  const defaultSeason = getCurrentNFLSeason()
+  const defaultSeason = getDefaultSeason()
   const [season, setSeason] = useState(defaultSeason)
   const [week, setWeek] = useState(getCurrentNFLWeek(defaultSeason))
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null)

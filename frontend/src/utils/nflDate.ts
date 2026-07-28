@@ -77,6 +77,19 @@ export function getUpcomingSeason(date: Date = new Date()): number | null {
 }
 
 /**
+ * The season a page should default to: the upcoming season once its schedule
+ * is out (so the app is forward-looking in the off-season), otherwise the
+ * current/most-recently-completed season.
+ *
+ * Note: stat-based views (players, team stats) will show no_data for an
+ * upcoming season until its games are played — that's expected and self-heals
+ * at kickoff.
+ */
+export function getDefaultSeason(date: Date = new Date()): number {
+  return getUpcomingSeason(date) ?? getCurrentNFLSeason(date)
+}
+
+/**
  * Return a descending list of available seasons from the newest browsable
  * season back to firstSeason (default 2020). The newest is the upcoming
  * season once its schedule is out, otherwise the current season.

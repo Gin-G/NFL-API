@@ -4,7 +4,7 @@ import { ChevronLeft } from 'lucide-react'
 import { useTeam, useTeamDepthChart, useTeamSnapCounts } from '../api/teams'
 import { useTeamStaff } from '../api/coaches'
 import { useSchedules } from '../api/schedules'
-import { getAvailableSeasons, getCurrentNFLSeason } from '../utils/nflDate'
+import { getAvailableSeasons, getDefaultSeason } from '../utils/nflDate'
 import type { DepthChartEntry, SnapCountEntry, Game } from '../api/types'
 import SkeletonCard from '../components/ui/SkeletonCard'
 import ErrorCard from '../components/ui/ErrorCard'
@@ -329,7 +329,7 @@ const TABS: { id: Tab; label: string }[] = [
 export default function TeamDetail() {
   const { abbr } = useParams<{ abbr: string }>()
   const [activeTab, setActiveTab] = useState<Tab>('overview')
-  const [season, setSeason] = useState(getCurrentNFLSeason())
+  const [season, setSeason] = useState(getDefaultSeason())
 
   if (!abbr) return null
 

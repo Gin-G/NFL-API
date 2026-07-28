@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
 import { useRosters, usePlayerStats } from '../api/players'
-import { getAvailableSeasons, getCurrentNFLSeason } from '../utils/nflDate'
+import { getAvailableSeasons, getDefaultSeason } from '../utils/nflDate'
 import type { RosterPlayer, PlayerStat } from '../api/types'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
@@ -231,7 +231,7 @@ function PlayerPanel({
 
 export default function Players() {
   const [tab, setTab] = useState<Tab>('roster')
-  const [season, setSeason] = useState(getCurrentNFLSeason())
+  const [season, setSeason] = useState(getDefaultSeason())
   const [team, setTeam] = useState('')
   const [position, setPosition] = useState('')
   const [week, setWeek] = useState<number | undefined>(undefined)
