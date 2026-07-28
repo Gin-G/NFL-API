@@ -57,23 +57,23 @@ export function getCurrentNFLWeek(season: number, date: Date = new Date()): numb
 }
 
 /**
- * Return the upcoming season (current + 1) once its schedule has been
- * released, otherwise null.
+ * Return the upcoming season (current + 1) once the NFL league new year has
+ * begun (~April 1), otherwise null.
  *
- * The NFL releases the next season's schedule in mid-May, well before the
- * season starts in September. During that window the upcoming season can be
- * browsed (schedules, rosters) even though no game stats exist yet — those
- * endpoints simply report no_data. We gate on ~May 1 of the upcoming year so
- * we never surface a season whose schedule hasn't dropped.
+ * The NFL's new league year starts in the spring, well before the season
+ * kicks off in September, so from April onward the upcoming season is the one
+ * to lead with. Its schedule isn't released until ~May and no games are played
+ * until September, so schedule/stat views fill in over the off-season — until
+ * then those endpoints simply report no_data.
  *
  * Example at 2026-07-27: getCurrentNFLSeason() → 2025, upcoming → 2026.
  * Example at 2026-10-01: getCurrentNFLSeason() → 2026, upcoming → null
- *   (2027's schedule isn't out until May 2027).
+ *   (the 2027 league year doesn't begin until April 2027).
  */
 export function getUpcomingSeason(date: Date = new Date()): number | null {
   const upcoming = getCurrentNFLSeason(date) + 1
-  const scheduleRelease = new Date(upcoming, 4, 1) // May 1 of the upcoming year
-  return date >= scheduleRelease ? upcoming : null
+  const leagueYearStart = new Date(upcoming, 3, 1) // Apr 1 of the upcoming year
+  return date >= leagueYearStart ? upcoming : null
 }
 
 /**
