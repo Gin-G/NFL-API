@@ -89,7 +89,9 @@ def main() -> None:
     args = parser.parse_args()
 
     end = args.end_season or _current_nfl_season()
-    seasons = list(range(args.start_season, end + 1))
+    # Newest season first so the most-used recent data is available quickly on a
+    # fresh rebuild (older seasons backfill after).
+    seasons = list(range(end, args.start_season - 1, -1))
 
     from database.session import engine, SessionLocal
     from database.models import Base
@@ -105,14 +107,9 @@ def main() -> None:
 
     db = SessionLocal()
     try:
-        if not args.force and _is_already_loaded(db, end):
-            logger.info(
-                "DB already contains teams and season %d stats — nothing to do. "
-                "Run with --force to reload.",
-                end,
-            )
-            return
-
+        # No early exit: each loader is self-idempotent (fast per-table skip), so
+        # always iterate — this backfills any gaps (missing seasons/tables) that a
+        # prior partial run left, instead of stopping at the first loaded season.
         logger.info("Loading seasons %d–%d (%d total)", seasons[0], seasons[-1], len(seasons))
         load_all_data(db, seasons, force=args.force)
     finally:

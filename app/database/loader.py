@@ -98,8 +98,11 @@ def load_teams(db: Session) -> int:
     return count
 
 
-def load_schedules(db: Session, season: int) -> int:
+def load_schedules(db: Session, season: int, force: bool = False) -> int:
     """Load/update schedule data for a season."""
+    if not force and db.query(Schedule).filter(Schedule.season == season).first():
+        logger.info("Schedules for %d already loaded", season)
+        return 0
     logger.info("Loading schedules for season %d…", season)
     df = _to_pandas(nfl.load_schedules(seasons=[season]))
     count = 0
@@ -157,10 +160,13 @@ def load_schedules(db: Session, season: int) -> int:
     return count
 
 
-def load_rosters(db: Session, season: int) -> int:
+def load_rosters(db: Session, season: int, force: bool = False) -> int:
     """Load/update weekly roster data for a season. Available from 2002 onwards."""
     if season < 2002:
         logger.info("Skipping rosters for %d — data only available from 2002", season)
+        return 0
+    if not force and db.query(PlayerRoster).filter(PlayerRoster.season == season).first():
+        logger.info("Rosters for %d already loaded", season)
         return 0
     logger.info("Loading rosters for season %d…", season)
     df = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
@@ -204,8 +210,11 @@ def load_rosters(db: Session, season: int) -> int:
     return count
 
 
-def load_player_stats(db: Session, season: int) -> int:
+def load_player_stats(db: Session, season: int, force: bool = False) -> int:
     """Load/update weekly player stats for a season."""
+    if not force and db.query(PlayerStat).filter(PlayerStat.season == season).first():
+        logger.info("Player stats for %d already loaded", season)
+        return 0
     logger.info("Loading player stats for season %d…", season)
     try:
         df = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
@@ -279,15 +288,32 @@ def load_player_stats(db: Session, season: int) -> int:
     return count
 
 
-def load_depth_charts(db: Session, season: int) -> int:
-    """Load depth chart data for a season."""
-    if db.query(DepthChart).filter(DepthChart.season == season).first():
+def _int(v, default=0):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _pct(v):
+    """Snap percentages arrive as 0-1 decimals in nflverse; store as 0-100."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return f * 100 if f <= 1.0 else f
+
+
+def load_depth_charts(db: Session, season: int, force: bool = False) -> int:
+    """Load depth chart data for a season (nflreadpy). From 2001 onwards."""
+    if season < 2001:
+        return 0
+    if not force and db.query(DepthChart).filter(DepthChart.season == season).first():
         logger.info("Depth charts for %d already loaded", season)
         return 0
     logger.info("Loading depth charts for season %d…", season)
     try:
-        import nfl_data_py as nfl_dp
-        df = _to_pandas(nfl_dp.import_depth_charts([season]))
+        df = _to_pandas(nfl.load_depth_charts(seasons=[season]))
     except Exception as exc:
         logger.warning("Skipping depth charts for %d: %s", season, exc)
         return 0
@@ -295,19 +321,20 @@ def load_depth_charts(db: Session, season: int) -> int:
         return 0
     count = 0
     for r in df.itertuples(index=False):
-        pid = _safe(_col(r, 'player_id') or _col(r, 'gsis_id'))
+        pid = _col(r, "gsis_id") or _col(r, "player_id")
         if not pid:
             continue
+        pos = _col(r, "position") or _col(r, "depth_position")
         db.merge(DepthChart(
             player_id=pid,
             season=season,
-            week=int(_col(r, 'week') or 0),
-            team=_safe(_col(r, 'club_code') or _col(r, 'team')),
-            position=_safe(_col(r, 'position')),
-            depth_chart_position=_safe(_col(r, 'depth_chart_position')),
-            depth_team=int(_col(r, 'depth_team') or 99),
-            full_name=_safe(_col(r, 'full_name')),
-            game_type=_safe(_col(r, 'game_type')),
+            week=_int(_col(r, "week")),
+            team=_col(r, "club_code") or _col(r, "team"),
+            position=pos,
+            depth_chart_position=_col(r, "depth_position") or pos,
+            depth_team=_int(_col(r, "depth_team"), 99),
+            full_name=_col(r, "football_name") or _col(r, "full_name"),
+            game_type=_col(r, "game_type"),
         ))
         count += 1
     db.commit()
@@ -315,15 +342,16 @@ def load_depth_charts(db: Session, season: int) -> int:
     return count
 
 
-def load_snap_counts(db: Session, season: int) -> int:
-    """Load snap count data for a season."""
-    if db.query(SnapCount).filter(SnapCount.season == season).first():
+def load_snap_counts(db: Session, season: int, force: bool = False) -> int:
+    """Load snap count data for a season (nflreadpy). From 2012 onwards."""
+    if season < 2012:
+        return 0
+    if not force and db.query(SnapCount).filter(SnapCount.season == season).first():
         logger.info("Snap counts for %d already loaded", season)
         return 0
     logger.info("Loading snap counts for season %d…", season)
     try:
-        import nfl_data_py as nfl_dp
-        df = _to_pandas(nfl_dp.import_snap_counts([season]))
+        df = _to_pandas(nfl.load_snap_counts(seasons=[season]))
     except Exception as exc:
         logger.warning("Skipping snap counts for %d: %s", season, exc)
         return 0
@@ -331,22 +359,23 @@ def load_snap_counts(db: Session, season: int) -> int:
         return 0
     count = 0
     for r in df.itertuples(index=False):
-        pid = _safe(_col(r, 'player_id'))
-        if not pid:
+        pid = _col(r, "pfr_player_id") or _col(r, "player_id")
+        wk = _col(r, "week")
+        if not pid or wk is None:
             continue
         db.merge(SnapCount(
             player_id=pid,
             season=season,
-            week=int(_col(r, 'week') or 0),
-            team=_safe(_col(r, 'team')),
-            player_name=_safe(_col(r, 'player_name')),
-            position=_safe(_col(r, 'position')),
-            offense_snaps=int(_col(r, 'offense_snaps') or 0),
-            offense_pct=float(_col(r, 'offense_pct') or 0),
-            defense_snaps=int(_col(r, 'defense_snaps') or 0),
-            defense_pct=float(_col(r, 'defense_pct') or 0),
-            st_snaps=int(_col(r, 'st_snaps') or 0),
-            st_pct=float(_col(r, 'st_pct') or 0),
+            week=_int(wk),
+            team=_col(r, "team"),
+            player_name=_col(r, "player") or _col(r, "player_name"),
+            position=_col(r, "position"),
+            offense_snaps=_int(_col(r, "offense_snaps")),
+            offense_pct=_pct(_col(r, "offense_pct")),
+            defense_snaps=_int(_col(r, "defense_snaps")),
+            defense_pct=_pct(_col(r, "defense_pct")),
+            st_snaps=_int(_col(r, "st_snaps")),
+            st_pct=_pct(_col(r, "st_pct")),
         ))
         count += 1
     db.commit()
@@ -395,12 +424,12 @@ def _pbp_season_loaded(db: Session, season: int) -> bool:
         return False  # table doesn't exist yet
 
 
-def load_pbp(db: Session, season: int) -> int:
+def load_pbp(db: Session, season: int, force: bool = False) -> int:
     """Load play-by-play data for a season using fast pandas to_sql bulk insert."""
     from .session import engine
     if season < 2002:
         return 0
-    if _pbp_season_loaded(db, season):
+    if not force and _pbp_season_loaded(db, season):
         logger.info("PBP season %d already in DB, skipping", season)
         return 0
     logger.info("Loading PBP for season %d...", season)
@@ -518,40 +547,17 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
     """Load all nflreadpy data into the DB. Resumable — skips seasons already present."""
     ensure_pbp_indexes()  # idempotent — fast no-op if indexes already exist
     load_teams(db)
+    # Each loader is self-idempotent (fast per-table skip if the season is
+    # already present, unless force), so we always call them all. This fixes the
+    # prior bug where a schedule-only presence check gated out stats / rosters /
+    # depth charts / snap counts for a season.
+    loaders = [load_schedules, load_rosters, load_player_stats,
+               load_depth_charts, load_snap_counts, load_pbp]
     for season in seasons:
-        season_present = not force and _season_loaded(db, season)
-        if season_present:
-            logger.info("Season %d schedules/rosters/stats already in DB, skipping to PBP", season)
-        else:
-            logger.info("=== Processing season %d ===", season)
+        logger.info("=== Processing season %d ===", season)
+        for fn in loaders:
             try:
-                load_schedules(db, season)
+                fn(db, season, force=force)
             except Exception as exc:
-                logger.error("Failed to load schedules for %d: %s", season, exc)
+                logger.error("Failed %s for %d: %s", fn.__name__, season, exc)
                 db.rollback()
-            try:
-                load_rosters(db, season)
-            except Exception as exc:
-                logger.error("Failed to load rosters for %d: %s", season, exc)
-                db.rollback()
-            try:
-                load_player_stats(db, season)
-            except Exception as exc:
-                logger.error("Failed to load player stats for %d: %s", season, exc)
-                db.rollback()
-            try:
-                load_depth_charts(db, season)
-            except Exception as exc:
-                logger.error("Failed to load depth charts for %d: %s", season, exc)
-                db.rollback()
-            try:
-                load_snap_counts(db, season)
-            except Exception as exc:
-                logger.error("Failed to load snap counts for %d: %s", season, exc)
-                db.rollback()
-        # PBP is always attempted — _pbp_season_loaded() skips if already present
-        try:
-            load_pbp(db, season)
-        except Exception as exc:
-            logger.error("Failed to load PBP for %d: %s", season, exc)
-            db.rollback()
