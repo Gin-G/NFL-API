@@ -315,6 +315,46 @@ def _pct(v):
     return f * 100 if f <= 1.0 else f
 
 
+def _weekify_depth_charts(df: pd.DataFrame, season: int) -> pd.DataFrame:
+    """Convert the 2025+ ESPN-snapshot depth-chart format to the weekly schema.
+
+    The new feed has no `week` column — just daily `dt` snapshots (cols
+    dt/team/gsis_id/pos_abb/pos_name/pos_rank). Bucket each snapshot into the NFL
+    week it precedes (using the schedule's gamedays) and keep, for each week, the
+    freshest depth chart as of that week's first game (no leakage). Output columns
+    are renamed to match the weekly loader loop (position/depth_position/depth_team/
+    full_name/week/game_type)."""
+    df = df.copy()
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce", utc=True)
+    df = df.dropna(subset=["dt"])
+    if df.empty:
+        return df
+    try:
+        sched = _to_pandas(nfl.load_schedules(seasons=[season]))
+    except Exception:
+        return pd.DataFrame()
+    sched = sched.dropna(subset=["gameday"]).copy()
+    sched["gd"] = pd.to_datetime(sched["gameday"], errors="coerce", utc=True)
+    sched = sched.dropna(subset=["gd"])
+    wk = (sched.groupby("week")
+          .agg(gd=("gd", "min"), game_type=("game_type", "first"))
+          .reset_index())
+    snap_times = df["dt"].drop_duplicates().sort_values()
+    out = []
+    for _, w in wk.iterrows():
+        eligible = snap_times[snap_times <= w["gd"]]
+        chosen = eligible.max() if len(eligible) else snap_times.min()  # preseason -> earliest
+        rows = df[df["dt"] == chosen].copy()
+        rows["week"] = int(w["week"])
+        rows["game_type"] = w["game_type"]
+        out.append(rows)
+    if not out:
+        return pd.DataFrame()
+    res = pd.concat(out, ignore_index=True)
+    return res.rename(columns={"pos_abb": "position", "pos_name": "depth_position",
+                               "pos_rank": "depth_team", "player_name": "full_name"})
+
+
 def load_depth_charts(db: Session, season: int, force: bool = False) -> int:
     """Load depth chart data for a season (nflreadpy). From 2001 onwards."""
     if season < 2001:
@@ -330,6 +370,11 @@ def load_depth_charts(db: Session, season: int, force: bool = False) -> int:
         return 0
     if df is None or df.empty:
         return 0
+    if "week" not in df.columns:  # 2025+ ESPN-snapshot format
+        df = _weekify_depth_charts(df, season)
+        if df is None or df.empty:
+            logger.warning("Depth charts for %d: new format yielded no weekly rows", season)
+            return 0
     count = 0
     seen = set()  # dedupe on the full PK (player_id, season, week, team, position)
     for r in df.itertuples(index=False):
