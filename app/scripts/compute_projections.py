@@ -58,6 +58,29 @@ def _update_job(db, job, **kwargs):
     db.commit()
 
 
+def _espn_frames(db, week: int):
+    """Build (rosters, depth_charts) frames for the Projector from the ESPN roster sync,
+    for seasons nflreadpy hasn't published rosters for yet. Rosters carry gsis player_id
+    (for history lookup); depth is a minimal frame (all starters) — enough for the
+    preseason path where injuries/depth aren't used."""
+    import pandas as pd
+    from database.models import EspnRoster
+    rows = db.query(EspnRoster).filter(
+        EspnRoster.status == "active",
+        EspnRoster.position.in_(["QB", "RB", "WR", "TE"]),
+        EspnRoster.gsis_id.isnot(None),
+    ).all()
+    rosters = pd.DataFrame([{
+        "player_id": r.gsis_id, "player_name": r.full_name, "full_name": r.full_name,
+        "position": r.position, "team": r.team, "week": week,
+    } for r in rows])
+    depth = pd.DataFrame([{
+        "team": r.team, "pos_abb": r.position, "pos_rank": 1,
+        "player_name": r.full_name, "player_id": r.gsis_id,
+    } for r in rows])
+    return rosters, depth
+
+
 def run(db, season: int, week: int, epochs: int, job) -> None:
     from database.models import PlayerProjection
     import nfl_projections
@@ -72,8 +95,28 @@ def run(db, season: int, week: int, epochs: int, job) -> None:
     logger.info("Training model (mean + quantile, epochs=%d)...", epochs)
     svc = ProjectionService(dataset=df, quantiles=True, epochs=epochs)
 
+    # nflreadpy publishes rosters only through the prior season; for a future season
+    # (e.g. 2026 preseason) use the nightly ESPN roster sync + rookie draft-capital prior,
+    # and derive floor/ceiling from the Monte-Carlo simulator (no current-season form yet).
+    max_nflreadpy_season = int(df["season"].max())
+    use_espn = season > max_nflreadpy_season
+    proj_kwargs = {}
+    if use_espn:
+        rosters, depth = _espn_frames(db, week)
+        if rosters.empty:
+            _update_job(db, job, status="failed",
+                        error_message="no ESPN roster rows; run the roster sync first")
+            logger.error("No ESPN rosters for season %d; run nfl-api-roster-sync first", season)
+            return
+        logger.info("Using ESPN rosters (%d players) + rookie prior for season %d",
+                    len(rosters), season)
+        proj_kwargs = dict(rosters=rosters, depth_charts=depth,
+                           rookie_fallback=True, use_injuries=False)
+
     logger.info("Projecting season %d week %d...", season, week)
-    frame = svc.project(season, week, as_frame=True)
+    frame = svc.project(season, week, as_frame=True, **proj_kwargs)
+    if frame is not None and not frame.empty and use_espn:
+        _apply_simulator(frame, df, week)
     if frame is None or frame.empty:
         _update_job(db, job, status="completed", total_entries=0, processed_entries=0)
         logger.warning("No projections produced for %d week %d", season, week)
@@ -114,6 +157,30 @@ def run(db, season: int, week: int, epochs: int, job) -> None:
     _update_job(db, job, status="completed", processed_entries=written)
     logger.info("Wrote %d projections for %d week %d (model %s)",
                 written, season, week, model_version)
+
+
+def _apply_simulator(frame, history, week: int) -> None:
+    """Replace floor/median/ceiling with Monte-Carlo simulator distributions (anchored to
+    the model mean) for players with enough history — better early-season ranges than the
+    quantile model when there's no current-season form. Modifies `frame` in place."""
+    try:
+        from nfl_projections import simulate as nflp_sim
+    except Exception as exc:
+        logger.warning("simulator unavailable (%s); keeping model quantiles", exc)
+        return
+    summ, _ = nflp_sim.project_distributions(frame, history, n_sims=1000, seed=week)
+    if summ.empty:
+        return
+    sm = summ.set_index("player_id")
+    n = 0
+    for i, r in frame.iterrows():
+        pid = r.get("player_id")
+        if pid in sm.index:
+            frame.at[i, "floor"] = float(sm.loc[pid, "floor"])
+            frame.at[i, "projection_median"] = float(sm.loc[pid, "median"])
+            frame.at[i, "ceiling"] = float(sm.loc[pid, "ceiling"])
+            n += 1
+    logger.info("Applied simulator distributions to %d players", n)
 
 
 def _f(v):
