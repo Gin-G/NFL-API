@@ -42,9 +42,17 @@ def _get(url):
 def _crosswalk():
     """espn_id -> gsis_id from nflreadpy's player table."""
     import nflreadpy as nfl
+    import pandas as pd
     pl = nfl.load_players().to_pandas()
-    return {str(int(e)): g for e, g in zip(pl["espn_id"], pl["gsis_id"])
-            if e == e and g == g}
+    xwalk = {}
+    for e, g in zip(pl["espn_id"], pl["gsis_id"]):
+        if pd.isna(e) or pd.isna(g):
+            continue
+        try:
+            xwalk[str(int(float(e)))] = str(g)
+        except (TypeError, ValueError):
+            continue
+    return xwalk
 
 
 def _iter_players(roster_json):
@@ -106,6 +114,7 @@ def main():
     job = AnalyticsJobStatus(job_type="roster_sync", status="running",
                              started_at=datetime.utcnow(), updated_at=datetime.utcnow())
     db.add(job); db.commit()
+    ok = True
     try:
         n = sync(db)
         job.status = "completed"; job.processed_entries = n
@@ -113,11 +122,14 @@ def main():
         logger.error("roster sync failed: %s", exc)
         job.status = "failed"; job.error_message = str(exc)[:500]
         db.rollback()
+        ok = False
     finally:
         job.updated_at = datetime.utcnow()
         db.merge(job); db.commit()
         db.close()
     logger.info("Done.")
+    if not ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
