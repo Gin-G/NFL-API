@@ -25,6 +25,7 @@ from api.projections import router as projections_router
 from api.stats import router as stats_router
 from api.fpa import router as fpa_router
 from api.opportunities import router as opportunities_router
+from api.ratings import router as ratings_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -93,6 +94,7 @@ app.include_router(projections_router, prefix="/projections", tags=["projections
 app.include_router(stats_router, prefix="/stats", tags=["stats"])
 app.include_router(fpa_router, prefix="/fpa", tags=["fpa"])
 app.include_router(opportunities_router, prefix="/opportunities", tags=["opportunities"])
+app.include_router(ratings_router, prefix="/ratings", tags=["ratings"])
 
 @app.get("/")
 async def root():
