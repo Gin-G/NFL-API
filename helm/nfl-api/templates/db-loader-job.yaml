@@ -1,56 +1,57 @@
+# Weekly data-loader CronJob (nflreadpy -> Postgres).
+#
+# Was an ArgoCD PostSync hook, but the hook wedged every deploy: after the Job
+# completed, ArgoCD's hook-finalizer left it stuck Terminating and the sync hung
+# "waiting for completion of hook ... forever". Decoupled from sync as a CronJob so
+# deploys never block on it. Each run is self-idempotent (fast per-table skips), and
+# a one-off run is:
+#   kubectl create job -n {{ .Release.Namespace }} --from=cronjob/{{ .Values.webapp.name }}-db-loader db-loader-manual
 apiVersion: batch/v1
-kind: Job
+kind: CronJob
 metadata:
   name: {{ .Values.webapp.name }}-db-loader
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Values.webapp.name }}
     group: {{ .Values.webapp.group }}
-  annotations:
-    # ArgoCD PostSync hook — runs after every successful sync.
-    # Exits immediately if data is already loaded (fast no-op on redeploys).
-    # Old Job is deleted before a new one starts; deleted on success.
-    "argocd.argoproj.io/hook": PostSync
-    # BeforeHookCreation only: Job stays visible after completion so ArgoCD can
-    # confirm success before marking the sync done. HookSucceeded/HookFailed caused
-    # a race where the Job was deleted before ArgoCD recorded completion, leaving
-    # the sync stuck "waiting for hook batch/Job/nfl-api-db-loader" forever.
-    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
 spec:
-  backoffLimit: 6
-  template:
-    metadata:
-      labels:
-        app: {{ .Values.webapp.name }}-db-loader
+  schedule: "0 10 * * 2"          # Tuesday 10:00 UTC (before the Wednesday projections run)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
     spec:
-      restartPolicy: OnFailure
-      # Pin to the control-plane node which has ample RAM.
-      # gingworker (7.8 GiB) is heavily overcommitted and crashes under load.
-      nodeSelector:
-        kubernetes.io/hostname: gingmachine
-      containers:
-        - name: loader
-          image: {{ .Values.webapp.container.image }}
-          imagePullPolicy: {{ .Values.webapp.container.imagePullPolicy }}
-          command: ["python", "-m", "scripts.load_data"]
-          workingDir: /app
-          env:
-            - name: PGUSER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.db.appUserSecret }}
-                  key: username
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.db.appUserSecret }}
-                  key: password
-            - name: DATABASE_URL
-              value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.{{ .Release.Namespace }}.svc.cluster.local:5432/nfl-api-db"
-          resources:
-            requests:
-              memory: "512Mi"
-              cpu: "250m"
-            limits:
-              memory: "2Gi"
-              cpu: "1"
+      backoffLimit: 3
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: {{ .Values.webapp.name }}-db-loader
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: loader
+              image: {{ .Values.webapp.container.image }}
+              imagePullPolicy: {{ .Values.webapp.container.imagePullPolicy }}
+              command: ["python", "-m", "scripts.load_data"]
+              workingDir: /app
+              env:
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.db.appUserSecret }}
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.db.appUserSecret }}
+                      key: password
+                - name: DATABASE_URL
+                  value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.{{ .Release.Namespace }}.svc.cluster.local:5432/nfl-api-db"
+              resources:
+                requests:
+                  memory: "512Mi"
+                  cpu: "250m"
+                limits:
+                  memory: "2Gi"
+                  cpu: "1"
