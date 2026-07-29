@@ -1,0 +1,57 @@
+# Nightly ESPN roster sync.
+#
+# nflreadpy doesn't publish weekly rosters until in-season, so ESPN's live API is our
+# source of truth for current team assignments and transactions. Populates the
+# `espn_roster` table (espn_id mapped to gsis_id), served via GET /rosters/{team}.
+# Uses only nflreadpy (already in the API image) + stdlib — no nfl_projections/TF, so
+# no runtime pip install.
+#
+# One-off run:  kubectl create job -n nfl-api --from=cronjob/nfl-api-roster-sync roster-sync-manual
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nfl-api-roster-sync
+  namespace: nfl-api
+  labels:
+    app: nfl-api-roster-sync
+spec:
+  schedule: "0 8 * * *"          # daily 08:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: nfl-api-roster-sync
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: roster-sync
+              image: docker.io/ncging/nfl-api:latest
+              imagePullPolicy: Always
+              workingDir: /app
+              command: ["python", "-m", "scripts.sync_espn_rosters"]
+              env:
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: password
+                - name: DATABASE_URL
+                  value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api-db"
+              resources:
+                requests:
+                  memory: "512Mi"
+                  cpu: "250m"
+                limits:
+                  memory: "1536Mi"
+                  cpu: "1"

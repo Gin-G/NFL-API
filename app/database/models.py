@@ -291,3 +291,23 @@ class AnalyticsJobStatus(Base):
     current_season    = Column(Integer, nullable=True)
     current_coach     = Column(String, nullable=True)
     error_message     = Column(Text, nullable=True)
+
+
+class EspnRoster(Base):
+    """Current NFL rosters synced nightly from ESPN (the live source for team
+    assignments / transactions that nflreadpy doesn't publish until in-season).
+    espn_id maps to gsis_id so these join to historical stats and projections."""
+    __tablename__ = "espn_roster"
+
+    espn_id     = Column(String, primary_key=True)
+    gsis_id     = Column(String, index=True)   # nflverse id (for joins); may be null
+    full_name   = Column(String)
+    position    = Column(String, index=True)
+    team        = Column(String, index=True)   # standard nflverse abbreviation
+    status      = Column(String)               # active | injured_reserve | practice_squad | suspended
+    jersey      = Column(String)
+    age         = Column(Integer, nullable=True)
+    experience  = Column(Integer, nullable=True)
+    updated_at  = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_espn_roster_team_pos", "team", "position"),)
