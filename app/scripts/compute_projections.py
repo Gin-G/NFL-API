@@ -73,6 +73,7 @@ def _espn_frames(db, week: int):
     rosters = pd.DataFrame([{
         "player_id": r.gsis_id, "player_name": r.full_name, "full_name": r.full_name,
         "position": r.position, "team": r.team, "week": week,
+        "status": "ACT",  # Projector skips non-"ACT"; we already filtered to active
     } for r in rows])
     depth = pd.DataFrame([{
         "team": r.team, "pos_abb": r.position, "pos_rank": 1,
