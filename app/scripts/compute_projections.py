@@ -82,7 +82,7 @@ def _espn_frames(db, week: int):
     return rosters, depth
 
 
-def run(db, season: int, week: int, epochs: int, job) -> None:
+def run(db, season: int, week: int, epochs: int, job, end_week: int = None) -> None:
     from database.models import PlayerProjection
     import nfl_projections
     from nfl_projections import ProjectionService
@@ -115,73 +115,90 @@ def run(db, season: int, week: int, epochs: int, job) -> None:
                            rookie_fallback=True, use_injuries=False)
 
     logger.info("Projecting season %d week %d...", season, week)
-    frame = svc.project(season, week, as_frame=True, **proj_kwargs)
-    if frame is not None and not frame.empty and use_espn:
-        _apply_environment(frame, season, week)   # shootout boost (before the sim anchors)
-        _apply_simulator(frame, df, week)
-    if frame is None or frame.empty:
+    base = svc.project(season, week, as_frame=True, **proj_kwargs)
+    if base is None or base.empty:
         _update_job(db, job, status="completed", total_entries=0, processed_entries=0)
         logger.warning("No projections produced for %d week %d", season, week)
         return
-
     model_version = getattr(nfl_projections, "__version__", "unknown")
-    _update_job(db, job, total_entries=len(frame))
 
-    # Replace any existing rows for this season/week
+    if not use_espn:
+        # in-season path (nflreadpy rosters): single matchup-neutral week, as before
+        written = _write_week(db, base, season, week, model_version)
+        _update_job(db, job, status="completed", total_entries=written, processed_entries=written)
+        logger.info("Wrote %d projections for %d week %d (model %s)", written, season, week, model_version)
+        return
+
+    # Future-season path: the base projection is matchup-neutral (same every week for a
+    # preseason projection), so train/project once and apply EACH week's game environment
+    # + simulator to produce a matchup-varying full-season outlook.
+    env_all = _game_environments(season)
+    total = 0
+    for w in range(week, (end_week or week) + 1):
+        f = _apply_environment(base, w, env_all)     # per-week env; drops bye teams
+        if f is None or f.empty:
+            continue
+        _apply_simulator(f, df, w)
+        total += _write_week(db, f, season, w, model_version)
+        _update_job(db, job, current_coach=f"season {season} week {w}", processed_entries=total)
+        logger.info("week %d: wrote %d projections", w, len(f))
+    _update_job(db, job, status="completed", total_entries=total, processed_entries=total)
+    logger.info("Wrote %d total projections for %d weeks %d-%d (model %s)",
+                total, season, week, end_week or week, model_version)
+
+
+def _write_week(db, frame, season: int, week: int, model_version: str) -> int:
+    """Replace the season/week rows in player_projections with `frame`."""
+    from database.models import PlayerProjection
     db.query(PlayerProjection).filter(
         PlayerProjection.season == season, PlayerProjection.week == week
     ).delete()
     db.commit()
-
     written = 0
     for _, r in frame.iterrows():
         pid = str(r.get("player_id") or "").strip()
         if not pid:
             continue
         db.merge(PlayerProjection(
-            season=season,
-            week=week,
-            player_id=pid,
+            season=season, week=week, player_id=pid,
             player_name=str(r.get("player_name") or ""),
             position=str(r.get("position") or ""),
             team=str(r.get("team") or ""),
             projected_points=_f(r.get("fanduel_fantasy_points")),
-            floor=_f(r.get("floor")),
-            median=_f(r.get("projection_median")),
+            floor=_f(r.get("floor")), median=_f(r.get("projection_median")),
             ceiling=_f(r.get("ceiling")),
             prediction_type=str(r.get("prediction_type") or ""),
-            model_version=model_version,
-            computed_at=datetime.utcnow(),
+            model_version=model_version, computed_at=datetime.utcnow(),
         ))
         written += 1
     db.commit()
-
-    _update_job(db, job, status="completed", processed_entries=written)
-    logger.info("Wrote %d projections for %d week %d (model %s)",
-                written, season, week, model_version)
+    return written
 
 
-def _apply_environment(frame, season: int, week: int) -> None:
-    """Scale each player's mean by their game's scoring-environment multiplier (expected
-    game total vs the league-average game) so shootouts boost both teams and defensive
-    games trim them. Modifies `frame` in place; the simulator then builds the distribution
-    around the adjusted mean, lifting ceilings in high-total games."""
+def _game_environments(season: int):
+    """All-week game-environment table (or None if unavailable)."""
     try:
         from nfl_projections import ratings as nflp_ratings
-        env = nflp_ratings.game_environments(season)
+        return nflp_ratings.game_environments(season)
     except Exception as exc:
         logger.warning("game environment unavailable (%s); skipping", exc)
-        return
-    env = env[env["week"] == week].set_index("team")["env_mult"].to_dict()
+        return None
+
+
+def _apply_environment(frame, week: int, env_all):
+    """Return a copy of `frame` with each player's mean scaled by their game's
+    scoring-environment multiplier for `week`, and players whose team is on BYE that week
+    dropped (no game). Shootouts boost both teams; the simulator then builds the
+    distribution around the adjusted mean, lifting ceilings in high-total games."""
+    if env_all is None:
+        return frame
+    env = env_all[env_all["week"] == week].set_index("team")["env_mult"].to_dict()
     if not env:
-        return
-    n = 0
-    for i, r in frame.iterrows():
-        m = env.get(r.get("team"))
-        if m:
-            frame.at[i, "fanduel_fantasy_points"] = float(r["fanduel_fantasy_points"]) * m
-            n += 1
-    logger.info("Applied game-environment multiplier to %d players", n)
+        return frame
+    f = frame[frame["team"].isin(env)].copy()   # drop bye-week teams
+    f["fanduel_fantasy_points"] = f.apply(
+        lambda r: float(r["fanduel_fantasy_points"]) * env.get(r["team"], 1.0), axis=1)
+    return f
 
 
 def _apply_simulator(frame, history, week: int) -> None:
@@ -221,6 +238,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Compute weekly fantasy projections")
     parser.add_argument("--season", type=int, default=None)
     parser.add_argument("--week", type=int, default=None)
+    parser.add_argument("--end-week", type=int, default=None,
+                        help="Project --week through --end-week (future-season full-season run)")
     parser.add_argument("--epochs", type=int, default=60)
     args = parser.parse_args()
 
@@ -254,7 +273,7 @@ def main() -> None:
         db.commit()
         db.refresh(job)
 
-        run(db, season, week, args.epochs, job)
+        run(db, season, week, args.epochs, job, end_week=args.end_week)
 
     except Exception as exc:
         logger.error("Projections job failed: %s", exc, exc_info=True)
