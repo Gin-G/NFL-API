@@ -117,6 +117,7 @@ def run(db, season: int, week: int, epochs: int, job) -> None:
     logger.info("Projecting season %d week %d...", season, week)
     frame = svc.project(season, week, as_frame=True, **proj_kwargs)
     if frame is not None and not frame.empty and use_espn:
+        _apply_environment(frame, season, week)   # shootout boost (before the sim anchors)
         _apply_simulator(frame, df, week)
     if frame is None or frame.empty:
         _update_job(db, job, status="completed", total_entries=0, processed_entries=0)
@@ -158,6 +159,29 @@ def run(db, season: int, week: int, epochs: int, job) -> None:
     _update_job(db, job, status="completed", processed_entries=written)
     logger.info("Wrote %d projections for %d week %d (model %s)",
                 written, season, week, model_version)
+
+
+def _apply_environment(frame, season: int, week: int) -> None:
+    """Scale each player's mean by their game's scoring-environment multiplier (expected
+    game total vs the league-average game) so shootouts boost both teams and defensive
+    games trim them. Modifies `frame` in place; the simulator then builds the distribution
+    around the adjusted mean, lifting ceilings in high-total games."""
+    try:
+        from nfl_projections import ratings as nflp_ratings
+        env = nflp_ratings.game_environments(season)
+    except Exception as exc:
+        logger.warning("game environment unavailable (%s); skipping", exc)
+        return
+    env = env[env["week"] == week].set_index("team")["env_mult"].to_dict()
+    if not env:
+        return
+    n = 0
+    for i, r in frame.iterrows():
+        m = env.get(r.get("team"))
+        if m:
+            frame.at[i, "fanduel_fantasy_points"] = float(r["fanduel_fantasy_points"]) * m
+            n += 1
+    logger.info("Applied game-environment multiplier to %d players", n)
 
 
 def _apply_simulator(frame, history, week: int) -> None:
