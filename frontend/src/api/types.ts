@@ -573,6 +573,144 @@ export interface PBPResponse {
   message?: string
 }
 
+// ─── Team Ratings (offense / defense grades) ─────────────────────────────────
+
+export interface TeamRating {
+  team: string
+  /** Games actually graded — 0 means the grade is the preseason prior only. */
+  games: number
+  /** 0-100, 50 = league average. Higher = better offense. */
+  offense_grade: number
+  /** 0-100, 50 = league average. Higher = stingier defense (fewer points allowed). */
+  defense_grade: number
+  /** Opponent-adjusted points vs league average. */
+  offense_rating: number
+  defense_rating: number
+}
+
+export interface TeamRatingsResponse {
+  status: string
+  season: number
+  through_week: number | null
+  total_teams: number
+  data: TeamRating[]
+  message?: string
+}
+
+export interface TeamRatingResponse {
+  status: string
+  season: number
+  data: TeamRating | null
+  message?: string
+}
+
+// ─── Player Grades (opportunity-weighted, position-relative) ─────────────────
+
+export interface PlayerGradeEntry {
+  player_id: string
+  player_name: string
+  position: string
+  games: number
+  /** 0-100, 50 = average *for that position*. */
+  grade: number
+  /** Volume / role component — the stable, predictive part. */
+  opportunity_grade: number
+  /** Per-play component — noisier. */
+  efficiency_grade: number
+  /** Fantasy points per game. */
+  fppg: number
+}
+
+export interface PlayerGradesListResponse {
+  status: string
+  season: number
+  through_week: number | null
+  total: number
+  data: PlayerGradeEntry[]
+  message?: string
+}
+
+export interface PlayerGradeDetailResponse {
+  status: string
+  season: number
+  data: PlayerGradeEntry | null
+  message?: string
+}
+
+// ─── Projections (pre-computed fantasy projections) ──────────────────────────
+
+/**
+ * Season-long projected totals for one player: fantasy points and every
+ * component stat summed across the projected weeks.
+ *
+ * Note: the multi-output model emits every stat for every player, so a RB will
+ * carry a tiny non-zero `passing_yards`. Only show the stats that matter for a
+ * player's position — see POSITION_STATS in SeasonProjectionsTable.
+ */
+export interface SeasonProjectionEntry {
+  player_id: string
+  player_name: string
+  position: string
+  team: string | null
+  /** Weeks projected (not games actually played). */
+  games: number
+  total_points: number | null
+  /** Projected points per projected week. */
+  ppg: number | null
+  /** Summed 10th-percentile projection. */
+  floor_total: number | null
+  /** Summed 90th-percentile projection. */
+  ceiling_total: number | null
+  passing_yards: number | null
+  passing_tds: number | null
+  interceptions: number | null
+  rushing_yards: number | null
+  rushing_tds: number | null
+  receiving_yards: number | null
+  receptions: number | null
+  receiving_tds: number | null
+}
+
+export interface SeasonProjectionsResponse {
+  status: string
+  season: number
+  total?: number
+  data: SeasonProjectionEntry[]
+  message?: string
+}
+
+/** One week of a player's projection, as stored by the projections job. */
+export interface WeeklyProjection {
+  season: number
+  week: number
+  player_id: string
+  player_name: string
+  position: string
+  team: string | null
+  projected_points: number | null
+  floor: number | null
+  median: number | null
+  ceiling: number | null
+  passing_yards: number | null
+  passing_tds: number | null
+  passing_interceptions: number | null
+  rushing_yards: number | null
+  rushing_tds: number | null
+  receiving_yards: number | null
+  receptions: number | null
+  receiving_tds: number | null
+  /** veteran_ml / rookie_ml / injured_out */
+  prediction_type: string | null
+  model_version: string | null
+  computed_at: string | null
+}
+
+export interface PlayerProjectionsResponse {
+  status: string
+  player_id: string
+  data: WeeklyProjection[]
+}
+
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {

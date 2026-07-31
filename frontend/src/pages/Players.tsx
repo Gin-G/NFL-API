@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { X } from 'lucide-react'
 import { useRosters, usePlayerStats } from '../api/players'
 import { getAvailableSeasons, getDefaultSeason } from '../utils/nflDate'
 import type { RosterPlayer, PlayerStat } from '../api/types'
@@ -7,7 +6,7 @@ import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
 import ErrorCard from '../components/ui/ErrorCard'
 import StatBarChart from '../components/charts/StatBarChart'
-import PlayerBreakdown from '../components/PlayerBreakdown'
+import PlayerPanel from '../components/PlayerPanel'
 
 const SEASONS = getAvailableSeasons()
 const POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DT', 'DE', 'LB', 'CB', 'S']
@@ -181,52 +180,6 @@ function StatsPanel({
   )
 }
 
-// ─── Player detail panel ──────────────────────────────────────────────────────
-
-function PlayerPanel({
-  player,
-  season,
-  onClose,
-}: {
-  player: SelectedPlayer
-  season: number
-  onClose: () => void
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50" />
-
-      {/* Panel */}
-      <div
-        className="relative w-full max-w-xl bg-slate-900 border-l border-slate-700 overflow-y-auto h-full"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="sticky top-0 bg-slate-900 border-b border-slate-700 px-5 py-4 flex items-start justify-between z-10">
-          <div>
-            <h2 className="text-white font-semibold text-base">{player.player_name}</h2>
-            <p className="text-slate-400 text-xs mt-0.5">
-              {player.position} · {player.team} · {season}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-white transition-colors ml-4 mt-0.5"
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        {/* Breakdown */}
-        <div className="px-5 py-4">
-          <PlayerBreakdown playerId={player.player_id} season={season} />
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Players() {
@@ -331,7 +284,9 @@ export default function Players() {
       {/* Player detail panel */}
       {selectedPlayer && (
         <PlayerPanel
-          player={selectedPlayer}
+          playerId={selectedPlayer.player_id}
+          playerName={selectedPlayer.player_name}
+          subtitle={`${selectedPlayer.position} · ${selectedPlayer.team} · ${season}`}
           season={season}
           onClose={() => setSelectedPlayer(null)}
         />

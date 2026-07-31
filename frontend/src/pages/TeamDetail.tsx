@@ -2,12 +2,14 @@ import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ChevronLeft } from 'lucide-react'
 import { useTeam, useTeamDepthChart, useTeamSnapCounts } from '../api/teams'
+import { useTeamRating } from '../api/grades'
 import { useTeamStaff } from '../api/coaches'
 import { useSchedules } from '../api/schedules'
 import { getAvailableSeasons, getDefaultSeason } from '../utils/nflDate'
 import type { DepthChartEntry, SnapCountEntry, Game } from '../api/types'
 import SkeletonCard from '../components/ui/SkeletonCard'
 import ErrorCard from '../components/ui/ErrorCard'
+import GradeScore from '../components/ui/GradeScore'
 
 const SEASONS = getAvailableSeasons()
 
@@ -24,7 +26,41 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-function OverviewTab({ abbr }: { abbr: string }) {
+/** Compact offense/defense grade card, linking through to the full ratings page. */
+function TeamGradesCard({ abbr, season }: { abbr: string; season: number }) {
+  const { data } = useTeamRating(season, abbr)
+  const rating = data?.data
+  if (!rating) return null
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">
+          {season} Grades
+        </p>
+        <Link to="/ratings" className="text-xs text-brand-green hover:underline">
+          All teams
+        </Link>
+      </div>
+      <div className="flex items-center gap-6">
+        <GradeScore value={rating.offense_grade} caption="Offense" />
+        <GradeScore
+          value={rating.defense_grade}
+          caption="Defense"
+          title="Higher = stingier defense. Noisier than the offense grade."
+        />
+        <p className="text-[11px] text-slate-500">
+          0–100, 50 = league average ·{' '}
+          {rating.games === 0
+            ? 'preseason prior — no games graded yet'
+            : `${rating.games} game${rating.games === 1 ? '' : 's'} graded`}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function OverviewTab({ abbr, season }: { abbr: string; season: number }) {
   const { data, isLoading, error, refetch } = useTeam(abbr)
   const { data: staffData } = useTeamStaff(abbr)
 
@@ -70,6 +106,8 @@ function OverviewTab({ abbr }: { abbr: string }) {
           )}
         </div>
       </div>
+
+      <TeamGradesCard abbr={abbr} season={season} />
 
       <div className="bg-slate-800 rounded-xl p-4 space-y-2 border border-slate-700">
         <Row label="Abbreviation" value={t.team_abbr} />
@@ -381,7 +419,7 @@ export default function TeamDetail() {
       </div>
 
       {/* Tab content */}
-      {activeTab === 'overview' && <OverviewTab abbr={upperAbbr} />}
+      {activeTab === 'overview' && <OverviewTab abbr={upperAbbr} season={season} />}
       {activeTab === 'depth-chart' && <DepthChartTab abbr={upperAbbr} season={season} />}
       {activeTab === 'snap-counts' && <SnapCountsTab abbr={upperAbbr} season={season} />}
       {activeTab === 'schedule' && <ScheduleTab abbr={upperAbbr} season={season} />}

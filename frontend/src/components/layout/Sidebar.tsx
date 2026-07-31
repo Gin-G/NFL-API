@@ -1,14 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, Calendar, UserRound, Briefcase, MessageCircle } from 'lucide-react'
-
-const navItems = [
-  { to: '/', label: 'Overview', icon: LayoutDashboard },
-  { to: '/teams', label: 'Teams', icon: Users },
-  { to: '/schedule', label: 'Schedule', icon: Calendar },
-  { to: '/players', label: 'Players', icon: UserRound },
-  { to: '/coaches', label: 'Coaches', icon: Briefcase },
-  { to: '/chat', label: 'Chat', icon: MessageCircle },
-]
+import { navItems } from './navItems'
 
 export default function Sidebar() {
   return (
