@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from .utils import clean_data_for_json, get_current_nfl_season, _to_pandas, _orm_to_dict
 from database.session import get_db
 from database.models import PlayerStat, PlayerRoster, Schedule, Team as TeamModel
+from nflverse_compat import load_rosters_weekly
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -347,7 +348,7 @@ def _execute_tool(name: str, inputs: dict, db: Session = None):
                     logger.warning("DB unavailable for get_player_roster: %s", db_err)
 
             # Fallback: nflreadpy
-            rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
+            rosters = _normalize_roster_df(_to_pandas(load_rosters_weekly(season)))
             if inputs.get("week") is not None:
                 rosters = rosters[rosters["week"] == inputs["week"]]
             else:

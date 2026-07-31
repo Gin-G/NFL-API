@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .models import Team, Schedule, PlayerRoster, PlayerStat, DepthChart, SnapCount
+from nflverse_compat import load_rosters_weekly
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +170,7 @@ def load_rosters(db: Session, season: int, force: bool = False) -> int:
         logger.info("Rosters for %d already loaded", season)
         return 0
     logger.info("Loading rosters for season %d…", season)
-    df = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
+    df = _normalize_roster_df(_to_pandas(load_rosters_weekly(season)))
     df = df.drop_duplicates(subset=["player_id", "season", "week"], keep="last")
     count = 0
     for row in df.itertuples(index=False):

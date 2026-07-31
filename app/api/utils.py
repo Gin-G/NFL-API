@@ -182,8 +182,8 @@ def load_weekly_rosters_df(db, season: int) -> pd.DataFrame:
             return pd.DataFrame([_orm_to_dict(r) for r in rows])
     except Exception as e:
         logger.warning("DB rosters unavailable, falling back to nflreadpy: %s", e)
-    import nflreadpy as nfl
-    df = _to_pandas(nfl.load_rosters_weekly(seasons=[season]))
+    from nflverse_compat import load_rosters_weekly
+    df = _to_pandas(load_rosters_weekly(season))
     return df.rename(columns={"gsis_id": "player_id", "full_name": "player_name"})
 
 

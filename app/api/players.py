@@ -24,6 +24,7 @@ from .utils import (
 )
 from database.session import get_db
 from database.models import PlayerRoster, PlayerStat, PlayerSeasonAnalytics, AnalyticsJobStatus
+from nflverse_compat import load_rosters_weekly
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -95,7 +96,7 @@ async def get_rosters(
             }
 
         # Fallback: nflreadpy
-        rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
+        rosters = _normalize_roster_df(_to_pandas(load_rosters_weekly(season)))
 
         if week is not None:
             rosters = rosters[rosters["week"] == week]
@@ -463,7 +464,7 @@ async def get_player_details(
         stats = _normalize_stats_df(_to_pandas(nfl.load_player_stats(seasons=[season])))
         player_stats = stats[stats["player_id"] == player_id]
 
-        rosters = _normalize_roster_df(_to_pandas(nfl.load_rosters_weekly(seasons=[season])))
+        rosters = _normalize_roster_df(_to_pandas(load_rosters_weekly(season)))
         player_roster = rosters[rosters["player_id"] == player_id]
 
         if player_stats.empty and player_roster.empty:

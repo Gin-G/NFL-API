@@ -9,6 +9,9 @@ import pandas as pd
 import numpy as np
 from typing import List
 import warnings
+
+from nflverse_compat import load_rosters_weekly
+
 warnings.filterwarnings('ignore')
 
 class EnhancedNFLPlayerGrader:
@@ -43,7 +46,7 @@ class EnhancedNFLPlayerGrader:
             # Convert Polars to Pandas
             self.weekly_data = nfl.load_player_stats(seasons=self.years).to_pandas()
             self.pbp_data = nfl.load_pbp(seasons=self.years).to_pandas()
-            self.rosters = nfl.load_rosters_weekly(seasons=self.years).to_pandas()
+            self.rosters = load_rosters_weekly(self.years).to_pandas()
             
             try:
                 self.snap_counts = nfl.load_snap_counts(seasons=self.years).to_pandas()
