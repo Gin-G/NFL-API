@@ -115,3 +115,53 @@ def get_player_projections(
         "player_id": player_id,
         "data": [_orm_to_dict(r) for r in rows],
     }
+
+
+@router.get("/season/{season}")
+def get_season_totals(
+    season: int,
+    position: Optional[str] = Query(None, description="Filter to QB/RB/WR/TE"),
+    limit: int = Query(300, le=2000),
+    db: Session = Depends(get_db),
+):
+    """Season-long projected TOTALS per player: summed fantasy points and every
+    component stat (passing/rushing/receiving yards, TDs, receptions, INTs) across all
+    projected weeks, plus games and per-game average. Sorted by total points."""
+    from sqlalchemy import func
+
+    P = PlayerProjection
+    cols = {c: func.sum(getattr(P, c)) for c in (
+        "passing_yards", "passing_tds", "passing_interceptions", "rushing_yards",
+        "rushing_tds", "receiving_yards", "receptions", "receiving_tds")}
+    q = (db.query(
+            P.player_id, P.player_name, P.position, P.team,
+            func.count(P.week).label("games"),
+            func.sum(P.projected_points).label("total_points"),
+            func.avg(P.projected_points).label("ppg"),
+            func.sum(P.floor).label("floor_total"),
+            func.sum(P.ceiling).label("ceiling_total"),
+            *[v.label(k) for k, v in cols.items()],
+         )
+         .filter(P.season == season)
+         .group_by(P.player_id, P.player_name, P.position, P.team))
+    if position:
+        q = q.filter(P.position == position.upper())
+    rows = q.order_by(func.sum(P.projected_points).desc()).limit(limit).all()
+    if not rows:
+        return {"status": "no_data", "season": season, "data": []}
+
+    def r1(v):
+        return round(float(v), 1) if v is not None else None
+
+    data = [{
+        "player_id": r.player_id, "player_name": r.player_name,
+        "position": r.position, "team": r.team, "games": r.games,
+        "total_points": r1(r.total_points), "ppg": r1(r.ppg),
+        "floor_total": r1(r.floor_total), "ceiling_total": r1(r.ceiling_total),
+        "passing_yards": r1(r.passing_yards), "passing_tds": r1(r.passing_tds),
+        "interceptions": r1(r.passing_interceptions),
+        "rushing_yards": r1(r.rushing_yards), "rushing_tds": r1(r.rushing_tds),
+        "receiving_yards": r1(r.receiving_yards), "receptions": r1(r.receptions),
+        "receiving_tds": r1(r.receiving_tds),
+    } for r in rows]
+    return {"status": "success", "season": season, "total": len(data), "data": data}

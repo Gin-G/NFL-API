@@ -167,6 +167,14 @@ def _write_week(db, frame, season: int, week: int, model_version: str) -> int:
             projected_points=_f(r.get("fanduel_fantasy_points")),
             floor=_f(r.get("floor")), median=_f(r.get("projection_median")),
             ceiling=_f(r.get("ceiling")),
+            passing_yards=_f(r.get("passing_yards")),
+            passing_tds=_f(r.get("passing_tds")),
+            passing_interceptions=_f(r.get("passing_interceptions")),
+            rushing_yards=_f(r.get("rushing_yards")),
+            rushing_tds=_f(r.get("rushing_tds")),
+            receiving_yards=_f(r.get("receiving_yards")),
+            receptions=_f(r.get("receptions")),
+            receiving_tds=_f(r.get("receiving_tds")),
             prediction_type=str(r.get("prediction_type") or ""),
             model_version=model_version, computed_at=datetime.utcnow(),
         ))
@@ -196,8 +204,12 @@ def _apply_environment(frame, week: int, env_all):
     if not env:
         return frame
     f = frame[frame["team"].isin(env)].copy()   # drop bye-week teams
-    f["fanduel_fantasy_points"] = f.apply(
-        lambda r: float(r["fanduel_fantasy_points"]) * env.get(r["team"], 1.0), axis=1)
+    mult = f["team"].map(env).fillna(1.0)
+    # scale fantasy points AND the volume/scoring components so they stay consistent
+    for col in ("fanduel_fantasy_points", "passing_yards", "passing_tds", "rushing_yards",
+                "rushing_tds", "receiving_yards", "receptions", "receiving_tds"):
+        if col in f.columns:
+            f[col] = f[col].astype(float) * mult
     return f
 
 

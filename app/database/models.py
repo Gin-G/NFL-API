@@ -265,6 +265,15 @@ class PlayerProjection(Base):
     floor            = Column(Float)   # 10th percentile
     median           = Column(Float)   # 50th percentile
     ceiling          = Column(Float)   # 90th percentile
+    # projected component stats (from the multi-output model / rookie prior)
+    passing_yards        = Column(Float)
+    passing_tds          = Column(Float)
+    passing_interceptions = Column(Float)
+    rushing_yards        = Column(Float)
+    rushing_tds          = Column(Float)
+    receiving_yards      = Column(Float)
+    receptions           = Column(Float)
+    receiving_tds        = Column(Float)
     prediction_type  = Column(String)  # veteran_ml / rookie_ml / injured_out
     model_version    = Column(String)
     computed_at      = Column(DateTime, default=datetime.utcnow)
