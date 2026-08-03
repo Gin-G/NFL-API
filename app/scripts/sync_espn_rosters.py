@@ -12,6 +12,7 @@ Usage (from app/):  python -m scripts.sync_espn_rosters
 import json
 import logging
 import os
+import re
 import sys
 import urllib.request
 from datetime import datetime
@@ -33,10 +34,52 @@ _STATUS = {
 }
 
 
+_OFF_POS = {"QB", "RB", "WR", "TE", "FB"}
+
+
 def _get(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
+
+
+def _get_text(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def _espn_id(athlete):
+    """espn athlete id from a depth-chart cell's href (.../id/<n>/...) or uid (a:<n>)."""
+    for key in ("href", "uid"):
+        m = re.search(r"(?:id/|a:)(\d+)", athlete.get(key, ""))
+        if m:
+            return m.group(1)
+    return None
+
+
+def _depth_ranks(abbr_lower, slug):
+    """{espn_id: pos_rank} from a team's ESPN depth page. The page embeds
+    window['__espnfitt__']; the offensive rows are [POS, starter, 2nd, 3rd, ...] so a
+    cell's column index is its depth rank. Best (lowest) rank wins across formations."""
+    url = f"https://www.espn.com/nfl/team/depth/_/name/{abbr_lower}/{slug}"
+    html = _get_text(url)
+    m = re.search(r"window\['__espnfitt__'\]\s*=\s*(\{.*?\});</script>", html, re.S)
+    if not m:
+        return {}
+    depth = json.loads(m.group(1))["page"]["content"]["depth"]
+    ranks = {}
+    for grp in depth.get("dethTeamGroups", []):
+        for row in grp.get("rows", []):
+            if not row or not isinstance(row[0], str) or row[0].strip().upper() not in _OFF_POS:
+                continue
+            for rank, cell in enumerate(row[1:], start=1):
+                if not isinstance(cell, dict):
+                    continue
+                eid = _espn_id(cell)
+                if eid and (eid not in ranks or rank < ranks[eid]):
+                    ranks[eid] = rank
+    return ranks
 
 
 def _crosswalk():
@@ -77,6 +120,11 @@ def sync(db) -> int:
         except Exception as exc:
             logger.warning("roster fetch failed for %s: %s", abbr, exc)
             continue
+        try:
+            ranks = _depth_ranks(t["team"]["abbreviation"].lower(), t["team"]["slug"])
+        except Exception as exc:
+            logger.warning("depth-chart fetch failed for %s: %s", abbr, exc)
+            ranks = {}
         n = 0
         for p, status in _iter_players(roster):
             espn_id = str(p.get("id"))
@@ -91,10 +139,11 @@ def sync(db) -> int:
                 jersey=str(p.get("jersey")) if p.get("jersey") is not None else None,
                 age=p.get("age"),
                 experience=exp.get("years"),
+                depth_rank=ranks.get(espn_id),
                 updated_at=datetime.utcnow(),
             ))
             n += 1
-        logger.info("%s: %d players", abbr, n)
+        logger.info("%s: %d players (%d with depth rank)", abbr, n, len(ranks))
 
     # Full-snapshot replace so transactions (cuts/trades) are reflected.
     db.query(EspnRoster).delete()
@@ -108,8 +157,9 @@ def sync(db) -> int:
 
 def main():
     from database.session import engine, SessionLocal
-    from database.models import Base, AnalyticsJobStatus
+    from database.models import Base, AnalyticsJobStatus, apply_light_migrations
     Base.metadata.create_all(engine)
+    apply_light_migrations(engine)
     db = SessionLocal()
     job = AnalyticsJobStatus(job_type="roster_sync", status="running",
                              started_at=datetime.utcnow(), updated_at=datetime.utcnow())

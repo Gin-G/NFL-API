@@ -317,6 +317,27 @@ class EspnRoster(Base):
     jersey      = Column(String)
     age         = Column(Integer, nullable=True)
     experience  = Column(Integer, nullable=True)
+    depth_rank  = Column(Integer, nullable=True)  # 1=starter, 2=backup, ... from ESPN depth chart
     updated_at  = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("ix_espn_roster_team_pos", "team", "position"),)
+
+
+def apply_light_migrations(engine) -> None:
+    """Idempotent additive schema fixups for columns added after a table already
+    exists (no Alembic here; ``create_all`` only creates missing tables, never alters
+    existing ones). Adds any missing column via ``ALTER TABLE ... ADD COLUMN`` — the
+    ``ADD COLUMN <name> <type>`` form is supported by both SQLite and Postgres."""
+    from sqlalchemy import inspect, text
+
+    wanted = {("espn_roster", "depth_rank"): "INTEGER"}
+    insp = inspect(engine)
+    existing_tables = set(insp.get_table_names())
+    for (table, col), coltype in wanted.items():
+        if table not in existing_tables:
+            continue  # create_all will make it fresh with the column
+        cols = {c["name"] for c in insp.get_columns(table)}
+        if col in cols:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}"))

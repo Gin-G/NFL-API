@@ -61,8 +61,8 @@ def _update_job(db, job, **kwargs):
 def _espn_frames(db, week: int):
     """Build (rosters, depth_charts) frames for the Projector from the ESPN roster sync,
     for seasons nflreadpy hasn't published rosters for yet. Rosters carry gsis player_id
-    (for history lookup); depth is a minimal frame (all starters) — enough for the
-    preseason path where injuries/depth aren't used."""
+    (for history lookup); depth carries the real ESPN depth rank (1=starter, 2=backup, ...)
+    so the projection engine applies its depth-role discount (backup QBs, committee RBs)."""
     import pandas as pd
     from database.models import EspnRoster
     rows = db.query(EspnRoster).filter(
@@ -75,8 +75,11 @@ def _espn_frames(db, week: int):
         "position": r.position, "team": r.team, "week": week,
         "status": "ACT",  # Projector skips non-"ACT"; we already filtered to active
     } for r in rows])
+    # Null depth_rank (player not on ESPN's depth chart) -> treat as a mid-roster backup,
+    # matching nfl_projections.roles._UNKNOWN_RANK (3).
     depth = pd.DataFrame([{
-        "team": r.team, "pos_abb": r.position, "pos_rank": 1,
+        "team": r.team, "pos_abb": r.position,
+        "pos_rank": int(r.depth_rank) if r.depth_rank else 3,
         "player_name": r.full_name, "player_id": r.gsis_id,
     } for r in rows])
     return rosters, depth
@@ -133,11 +136,13 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None) -> N
     # preseason projection), so train/project once and apply EACH week's game environment
     # + simulator to produce a matchup-varying full-season outlook.
     env_all = _game_environments(season)
+    budgets = _position_budgets(df)
     total = 0
     for w in range(week, (end_week or week) + 1):
         f = _apply_environment(base, w, env_all)     # per-week env; drops bye teams
         if f is None or f.empty:
             continue
+        _apply_roles(f, budgets)                      # depth-role availability + team pool
         _apply_simulator(f, df, w)
         total += _write_week(db, f, season, w, model_version)
         _update_job(db, job, current_coach=f"season {season} week {w}", processed_entries=total)
@@ -199,10 +204,10 @@ def _apply_environment(frame, week: int, env_all):
     dropped (no game). Shootouts boost both teams; the simulator then builds the
     distribution around the adjusted mean, lifting ceilings in high-total games."""
     if env_all is None:
-        return frame
+        return frame.copy()   # copy so later per-week mutations don't compound on `base`
     env = env_all[env_all["week"] == week].set_index("team")["env_mult"].to_dict()
     if not env:
-        return frame
+        return frame.copy()
     f = frame[frame["team"].isin(env)].copy()   # drop bye-week teams
     mult = f["team"].map(env).fillna(1.0)
     # scale fantasy points AND the volume/scoring components so they stay consistent
@@ -211,6 +216,50 @@ def _apply_environment(frame, week: int, env_all):
         if col in f.columns:
             f[col] = f[col].astype(float) * mult
     return f
+
+
+_ROLE_SCALE_COLS = (
+    "fanduel_fantasy_points", "passing_yards", "passing_tds", "passing_interceptions",
+    "rushing_yards", "rushing_tds", "receiving_yards", "receptions", "receiving_tds",
+    "floor", "projection_median", "ceiling",
+)
+
+
+def _position_budgets(history):
+    """Per-position team scoring pool for the finite-pool cap (from nfl_projections.roles)."""
+    try:
+        from nfl_projections import roles
+        return roles.position_budgets(history)
+    except Exception as exc:
+        logger.warning("position budgets unavailable (%s); skipping team cap", exc)
+        return None
+
+
+def _apply_roles(frame, budgets) -> None:
+    """Depth-role corrections on the mean (in place), matching nfl_projections.season:
+      * availability — scale each player's week by expected games for their depth rank
+        (a backup QB behind a healthy starter plays ~1-2 games, not 17), so multiplying
+        one week's form across a season no longer makes non-starters top-tier.
+      * finite team pool — cap each (team, position) group to a realistic per-game total
+        so teammates SHARE (two RBs can't both project as bell cows).
+    The per-game role RATE discount is already applied upstream in the projection engine
+    via the ESPN depth rank; this adds the games/pool layer the weekly path skips.
+    """
+    try:
+        from nfl_projections import roles
+    except Exception as exc:
+        logger.warning("roles unavailable (%s); skipping depth-role corrections", exc)
+        return
+    if "depth_rank" not in frame.columns or "position" not in frame.columns:
+        return
+    scale_cols = [c for c in _ROLE_SCALE_COLS if c in frame.columns]
+    pw = frame.apply(
+        lambda r: roles.play_weight(r.get("position"), r.get("depth_rank")), axis=1)
+    for c in scale_cols:
+        frame[c] = frame[c].astype(float) * pw
+    if budgets:
+        roles.apply_team_budget(frame, budgets, points_col="fanduel_fantasy_points",
+                                group_cols=("team", "position"), scale_cols=scale_cols)
 
 
 def _apply_simulator(frame, history, week: int) -> None:
@@ -260,9 +309,10 @@ def main() -> None:
     logger.info("Projections job: season %d week %d", season, week)
 
     from database.session import engine, SessionLocal
-    from database.models import Base, AnalyticsJobStatus
+    from database.models import Base, AnalyticsJobStatus, apply_light_migrations
 
     Base.metadata.create_all(engine)
+    apply_light_migrations(engine)
     db = SessionLocal()
     try:
         stuck = db.query(AnalyticsJobStatus).filter(
