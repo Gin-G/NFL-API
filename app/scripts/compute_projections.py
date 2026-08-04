@@ -137,12 +137,14 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None) -> N
     # + simulator to produce a matchup-varying full-season outlook.
     env_all = _game_environments(season)
     budgets = _position_budgets(df)
+    share_pred = _predict_shares(df, depth, season)
     total = 0
     for w in range(week, (end_week or week) + 1):
         f = _apply_environment(base, w, env_all)     # per-week env; drops bye teams
         if f is None or f.empty:
             continue
         _apply_roles(f, budgets)                      # depth-role availability + team pool
+        _apply_shares(f, share_pred)                  # redistribute group total by predicted share
         _apply_simulator(f, df, w)
         total += _write_week(db, f, season, w, model_version)
         _update_job(db, job, current_coach=f"season {season} week {w}", processed_entries=total)
@@ -260,6 +262,55 @@ def _apply_roles(frame, budgets) -> None:
     if budgets:
         roles.apply_team_budget(frame, budgets, points_col="fanduel_fantasy_points",
                                 group_cols=("team", "position"), scale_cols=scale_cols)
+
+
+def _predict_shares(history, depth, season: int):
+    """Validated share model (nfl_projections.shares): predicted carry/target share per player
+    for the season, from ESPN depth ranks + prior-year usage. None if unavailable."""
+    try:
+        from nfl_projections import shares as nflp_shares
+        sroster = depth.rename(columns={"pos_abb": "position", "pos_rank": "depth_rank"})[
+            ["player_id", "team", "position", "depth_rank"]].copy()
+        sroster = sroster[sroster["player_id"].astype(str).str.len() > 0]
+        return nflp_shares.project_shares(sroster, history, season)
+    except Exception as exc:
+        logger.warning("share model unavailable (%s); skipping share allocation", exc)
+        return None
+
+
+def _apply_shares(frame, share_pred, blend: float = 0.2) -> None:
+    """Redistribute each (team, position) group's projected fantasy TOTAL by a light blend of
+    rolling-form weight and the validated share model's volume weight (RB = carry+0.5*target,
+    WR/TE = target; QB stays on form), conserving the group total. Backtested modest net win
+    concentrated on role-change cases (committees / vacated share). Modifies `frame` in place."""
+    if share_pred is None or getattr(share_pred, "empty", True):
+        return
+    if not {"team", "position", "player_id", "fanduel_fantasy_points"} <= set(frame.columns):
+        return
+    import numpy as np
+
+    sp = share_pred[["player_id", "team", "carry_share", "target_share"]].drop_duplicates(
+        ["player_id", "team"])
+    m = frame.merge(sp, on=["player_id", "team"], how="left")
+    cs = m["carry_share"].fillna(0.0).to_numpy(float)
+    ts = m["target_share"].fillna(0.0).to_numpy(float)
+    pos = m["position"].to_numpy()
+    vw = np.where(pos == "RB", cs + 0.5 * ts, np.where(np.isin(pos, ["WR", "TE"]), ts, np.nan))
+    m["_vw"] = vw
+
+    grp = m.groupby(["team", "position"])
+    fsum = grp["fanduel_fantasy_points"].transform("sum").to_numpy(float)
+    fp = m["fanduel_fantasy_points"].to_numpy(float)
+    fw = np.where(fsum > 0, fp / fsum, 0.0)
+    vws = grp["_vw"].transform("sum").to_numpy(float)
+    use = np.isin(pos, ["RB", "WR", "TE"]) & (vws > 0)
+    sw = np.where(use, np.where(vws > 0, np.nan_to_num(vw) / np.where(vws > 0, vws, 1.0), fw), fw)
+    blended = blend * sw + (1 - blend) * fw
+    scale = np.where(fw > 0, blended / np.where(fw > 0, fw, 1.0), 1.0)
+
+    for col in _ROLE_SCALE_COLS:
+        if col in frame.columns:
+            frame[col] = frame[col].astype(float).to_numpy() * scale
 
 
 def _apply_simulator(frame, history, week: int) -> None:
