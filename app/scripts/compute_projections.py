@@ -138,12 +138,13 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None) -> N
     env_all = _game_environments(season)
     budgets = _position_budgets(df)
     share_pred = _predict_shares(df, depth, season)
+    games_model, prev_games = _fit_games(df, season)
     total = 0
     for w in range(week, (end_week or week) + 1):
         f = _apply_environment(base, w, env_all)     # per-week env; drops bye teams
         if f is None or f.empty:
             continue
-        _apply_roles(f, budgets)                      # depth-role availability + team pool
+        _apply_roles(f, budgets, games_model, prev_games)  # availability (durability) + team pool
         _apply_shares(f, share_pred)                  # redistribute group total by predicted share
         _apply_simulator(f, df, w)
         total += _write_week(db, f, season, w, model_version)
@@ -237,26 +238,45 @@ def _position_budgets(history):
         return None
 
 
-def _apply_roles(frame, budgets) -> None:
+def _fit_games(history, season: int):
+    """Fit the availability model (games.py) + a prior-year games map. (None, None) if
+    unavailable — callers then fall back to the flat depth-role games assumption."""
+    try:
+        from nfl_projections import games as nflp_games
+        return nflp_games.fit_games_model(history, max_season=season - 1), \
+            nflp_games.prev_games_map(history, season)
+    except Exception as exc:
+        logger.warning("games model unavailable (%s); using flat role games", exc)
+        return None, None
+
+
+def _apply_roles(frame, budgets, games_model=None, prev_games=None) -> None:
     """Depth-role corrections on the mean (in place), matching nfl_projections.season:
-      * availability — scale each player's week by expected games for their depth rank
-        (a backup QB behind a healthy starter plays ~1-2 games, not 17), so multiplying
-        one week's form across a season no longer makes non-starters top-tier.
+      * availability — scale each player's week by their expected GAMES. With the games
+        model (games.py) an established starter's durability (regressed prior-year games)
+        replaces the flat ~16.5; otherwise the depth-role baseline (a backup QB ~1-2 games).
       * finite team pool — cap each (team, position) group to a realistic per-game total
         so teammates SHARE (two RBs can't both project as bell cows).
-    The per-game role RATE discount is already applied upstream in the projection engine
-    via the ESPN depth rank; this adds the games/pool layer the weekly path skips.
+    The per-game role RATE discount is already applied upstream via the ESPN depth rank.
     """
     try:
         from nfl_projections import roles
+        from nfl_projections import games as nflp_games
     except Exception as exc:
         logger.warning("roles unavailable (%s); skipping depth-role corrections", exc)
         return
     if "depth_rank" not in frame.columns or "position" not in frame.columns:
         return
     scale_cols = [c for c in _ROLE_SCALE_COLS if c in frame.columns]
-    pw = frame.apply(
-        lambda r: roles.play_weight(r.get("position"), r.get("depth_rank")), axis=1)
+
+    def play_weight(r):
+        pos, rank = r.get("position"), r.get("depth_rank")
+        if games_model is not None:
+            pg = (prev_games or {}).get(r.get("player_id"))
+            return nflp_games.expected_games(pos, rank, pg, games_model) / 17.0
+        return roles.play_weight(pos, rank)
+
+    pw = frame.apply(play_weight, axis=1)
     for c in scale_cols:
         frame[c] = frame[c].astype(float) * pw
     if budgets:
