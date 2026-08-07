@@ -130,6 +130,40 @@ def _orm_to_dict(obj) -> dict:
     return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
 
 
+def fanduel_points(row) -> float:
+    """FanDuel fantasy points for one player-game from its component stats.
+
+    ``row`` is anything with a ``.get`` (dict, pandas Series). Mirrors what
+    nfl_projections scores its training target on (config.FANDUEL_SCORING, with
+    the same -2 per fumble) — kept here so DB-only code paths can score without
+    importing that package, which drags in TensorFlow. Anything compared
+    against a projection must use THIS function: score the actual on a
+    different scale and the difference shows up as model error.
+
+    Accepts either ``interceptions`` (the API stats schema) or
+    ``passing_interceptions`` (the nflverse/projection name). Note
+    api.player_grades has its own fumble-free variant, deliberately left alone
+    so published grades don't move.
+    """
+    def v(*names):
+        for name in names:
+            val = row.get(name)
+            if val is not None and val == val:  # not None, not NaN
+                return float(val)
+        return 0.0
+
+    py, ry, recy = v("passing_yards"), v("rushing_yards"), v("receiving_yards")
+    fumbles = v("rushing_fumbles") + v("receiving_fumbles") + v("sack_fumbles")
+    return (
+        py * 0.04 + v("passing_tds") * 4 + v("interceptions", "passing_interceptions") * -1
+        + (3 if py >= 300 else 0)
+        + ry * 0.1 + v("rushing_tds") * 6 + (3 if ry >= 100 else 0)
+        + v("receptions") * 0.5 + recy * 0.1 + v("receiving_tds") * 6
+        + (3 if recy >= 100 else 0)
+        + fumbles * -2
+    )
+
+
 def _normalize_stats_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Map nflreadpy load_player_stats column names to the API schema."""
     return df.rename(columns={

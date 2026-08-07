@@ -85,7 +85,8 @@ def _espn_frames(db, week: int):
     return rosters, depth
 
 
-def run(db, season: int, week: int, epochs: int, job, end_week: int = None) -> None:
+def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
+        seeds: int = None) -> None:
     from database.models import PlayerProjection
     import nfl_projections
     from nfl_projections import ProjectionService
@@ -96,8 +97,12 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None) -> N
 
     logger.info("Building dataset from nflreadpy...")
     df = nflp_dataset.build_dataset(output_path=None)  # build in-memory, don't write a CSV
-    logger.info("Training model (mean + quantile, epochs=%d)...", epochs)
-    svc = ProjectionService(dataset=df, quantiles=True, epochs=epochs)
+    # The mean model is a seed ensemble (nfl_projections default 5): averaging
+    # several seeds is worth ~0.04 MAE and removes the single-seed lottery, at
+    # the cost of training that many networks.
+    logger.info("Training model (mean ensemble x%s + quantile, epochs=%d)...",
+                seeds if seeds else "default", epochs)
+    svc = ProjectionService(dataset=df, quantiles=True, epochs=epochs, n_seeds=seeds)
 
     # nflreadpy publishes rosters only through the prior season; for a future season
     # (e.g. 2026 preseason) use the nightly ESPN roster sync + rookie draft-capital prior,
@@ -373,6 +378,9 @@ def main() -> None:
     parser.add_argument("--end-week", type=int, default=None,
                         help="Project --week through --end-week (future-season full-season run)")
     parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--seeds", type=int, default=None,
+                        help="Networks in the mean-model seed ensemble "
+                             "(default: nfl_projections' 5; 1 for a fast run)")
     args = parser.parse_args()
 
     season = args.season or _current_nfl_season()
@@ -406,7 +414,8 @@ def main() -> None:
         db.commit()
         db.refresh(job)
 
-        run(db, season, week, args.epochs, job, end_week=args.end_week)
+        run(db, season, week, args.epochs, job, end_week=args.end_week,
+            seeds=args.seeds)
 
     except Exception as exc:
         logger.error("Projections job failed: %s", exc, exc_info=True)

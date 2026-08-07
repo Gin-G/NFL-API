@@ -1,0 +1,65 @@
+# Prospective projection scoring.
+#
+# Scores the projections in `player_projections` against the actual results in
+# `player_stats` and appends them to `projection_accuracy` — the record of how
+# the model does on games it had NOT seen when it projected them (backtests can
+# only re-run history). Served via GET /projections/accuracy.
+#
+# DB-only: no nfl_projections / TensorFlow, so no runtime pip install, and the
+# whole run takes seconds.
+#
+# Runs DAILY rather than weekly on purpose: the job only scores weeks whose
+# actuals have already loaded, skips player-weeks it has scored before, and
+# never rewrites a scored row — so a daily run simply picks up each week as
+# soon as the stats land, and self-heals if a data load runs late.
+#
+# One-off / backfill run:
+#   kubectl create job -n nfl-api --from=cronjob/nfl-api-projection-accuracy accuracy-manual
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nfl-api-projection-accuracy
+  namespace: nfl-api
+  labels:
+    app: nfl-api-projection-accuracy
+spec:
+  schedule: "0 12 * * *"         # daily 12:00 UTC — after Monday-night stats land
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: nfl-api-projection-accuracy
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: projection-accuracy
+              image: docker.io/ncging/nfl-api:latest
+              imagePullPolicy: Always
+              workingDir: /app
+              command: ["python", "-m", "scripts.score_projections"]
+              env:
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: password
+                - name: DATABASE_URL
+                  value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api-db"
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "1Gi"
+                  cpu: "1"

@@ -5,6 +5,10 @@
 # player_projections table. Progress is tracked in analytics_job_status and
 # exposed via GET /projections/status; results via GET /projections?week=N.
 #
+# The mean model is a 5-seed ensemble (nfl_projections default), so training
+# takes ~5x a single network — worth ~0.04 MAE and no seed lottery. Pass
+# --seeds 1 in the command below for a fast one-off run.
+#
 # The API image does NOT bundle nfl_projections (it drags in TensorFlow), so
 # this job pip-installs it at runtime. Runs weekly; trigger a one-off run with:
 #   kubectl create job -n nfl-api --from=cronjob/nfl-api-projections proj-manual

@@ -284,6 +284,52 @@ class PlayerProjection(Base):
     )
 
 
+class ProjectionAccuracy(Base):
+    """A projection scored against what actually happened — the prospective,
+    truly out-of-sample accuracy record, accruing one week at a time.
+
+    Written by the scripts.score_projections job once a week's actuals land.
+    Rows are FROZEN: the job never rewrites an existing (season, week,
+    player_id), because `player_projections` is keyed the same way and a later
+    projections run would otherwise let hindsight rewrite history.
+
+    `naive_points` is the honest denominator from the model's experiment ledger
+    — the player's trailing-5-game average, which the full model beats by only
+    ~0.05 MAE in backtests. Storing it per row lets every accuracy query report
+    the skill-over-naive margin instead of a bare absolute MAE."""
+    __tablename__ = "projection_accuracy"
+
+    season           = Column(Integer, primary_key=True)
+    week             = Column(Integer, primary_key=True)
+    player_id        = Column(String,  primary_key=True)
+    player_name      = Column(String)
+    position         = Column(String)
+    team             = Column(String)
+
+    projected_points = Column(Float)   # what we said (mean projection)
+    floor            = Column(Float)
+    median           = Column(Float)
+    ceiling          = Column(Float)
+    actual_points    = Column(Float)   # FanDuel points actually scored
+    error            = Column(Float)   # projected - actual (sign = bias direction)
+    abs_error        = Column(Float)
+    in_band          = Column(Integer) # 1 when floor <= actual <= ceiling (band coverage)
+
+    naive_points     = Column(Float)   # trailing-5-game average FanDuel points
+    naive_abs_error  = Column(Float)
+
+    prediction_type  = Column(String)  # veteran_ml / rookie_ml / injured_out
+    model_version    = Column(String)
+    projected_at     = Column(DateTime)  # the projection's computed_at (predates the game)
+    scored_at        = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_projection_accuracy_week", "season", "week"),
+        Index("ix_projection_accuracy_pos", "position", "season"),
+        Index("ix_projection_accuracy_player", "player_id"),
+    )
+
+
 class AnalyticsJobStatus(Base):
     """Tracks progress of long-running analytics pre-computation jobs."""
     __tablename__ = "analytics_job_status"
