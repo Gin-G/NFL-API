@@ -274,6 +274,14 @@ class PlayerProjection(Base):
     receiving_yards      = Column(Float)
     receptions           = Column(Float)
     receiving_tds        = Column(Float)
+    # Expected fraction of THIS week the player is available for — the
+    # availability weight already multiplied into projected_points and every
+    # component above. Summed across a season's rows it is the player's expected
+    # GAMES PLAYED, which is what makes projected_points/exp_games an on-field
+    # rate rather than a rate diluted by the weeks he is projected to miss.
+    # Null on rows written before this column existed, and on the in-season path
+    # where no availability discount is applied.
+    exp_games        = Column(Float, nullable=True)
     prediction_type  = Column(String)  # veteran_ml / rookie_ml / injured_out
     model_version    = Column(String)
     computed_at      = Column(DateTime, default=datetime.utcnow)
@@ -376,7 +384,8 @@ def apply_light_migrations(engine) -> None:
     ``ADD COLUMN <name> <type>`` form is supported by both SQLite and Postgres."""
     from sqlalchemy import inspect, text
 
-    wanted = {("espn_roster", "depth_rank"): "INTEGER"}
+    wanted = {("espn_roster", "depth_rank"): "INTEGER",
+              ("player_projections", "exp_games"): "FLOAT"}
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
     for (table, col), coltype in wanted.items():

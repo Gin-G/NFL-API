@@ -297,7 +297,17 @@ def get_season_totals(
 ):
     """Season-long projected TOTALS per player: summed fantasy points and every
     component stat (passing/rushing/receiving yards, TDs, receptions, INTs) across all
-    projected weeks, plus games and per-game average. Sorted by total points."""
+    projected weeks, plus expected games and per-game rate. Sorted by total points.
+
+    `games` is EXPECTED GAMES PLAYED — the availability weights summed, so an
+    injury-prone starter reads below the number of weeks on his schedule.
+    `ppg` divides by it, making it the rate when he is on the field rather than
+    a rate diluted by the weeks he is projected to miss. `scheduled_weeks` is
+    the raw count of projected weeks (17 for most: 18 minus the bye).
+
+    Rows written before availability was persisted have no weight stored; those
+    players fall back to games = scheduled_weeks, as before.
+    """
     from sqlalchemy import func
 
     P = PlayerProjection
@@ -306,9 +316,9 @@ def get_season_totals(
         "rushing_tds", "receiving_yards", "receptions", "receiving_tds")}
     q = (db.query(
             P.player_id, P.player_name, P.position, P.team,
-            func.count(P.week).label("games"),
+            func.count(P.week).label("scheduled_weeks"),
+            func.sum(P.exp_games).label("exp_games"),
             func.sum(P.projected_points).label("total_points"),
-            func.avg(P.projected_points).label("ppg"),
             func.sum(P.floor).label("floor_total"),
             func.sum(P.ceiling).label("ceiling_total"),
             *[v.label(k) for k, v in cols.items()],
@@ -324,15 +334,24 @@ def get_season_totals(
     def r1(v):
         return round(float(v), 1) if v is not None else None
 
-    data = [{
-        "player_id": r.player_id, "player_name": r.player_name,
-        "position": r.position, "team": r.team, "games": r.games,
-        "total_points": r1(r.total_points), "ppg": r1(r.ppg),
-        "floor_total": r1(r.floor_total), "ceiling_total": r1(r.ceiling_total),
-        "passing_yards": r1(r.passing_yards), "passing_tds": r1(r.passing_tds),
-        "interceptions": r1(r.passing_interceptions),
-        "rushing_yards": r1(r.rushing_yards), "rushing_tds": r1(r.rushing_tds),
-        "receiving_yards": r1(r.receiving_yards), "receptions": r1(r.receptions),
-        "receiving_tds": r1(r.receiving_tds),
-    } for r in rows]
+    def entry(r):
+        # Expected games played, falling back to the week count for rows
+        # written before availability was stored.
+        games = float((r.exp_games if r.exp_games is not None else r.scheduled_weeks) or 0)
+        total = float(r.total_points or 0)
+        return {
+            "player_id": r.player_id, "player_name": r.player_name,
+            "position": r.position, "team": r.team,
+            "games": r1(games), "scheduled_weeks": r.scheduled_weeks,
+            "total_points": r1(total),
+            "ppg": round(total / games, 1) if games > 0 else None,
+            "floor_total": r1(r.floor_total), "ceiling_total": r1(r.ceiling_total),
+            "passing_yards": r1(r.passing_yards), "passing_tds": r1(r.passing_tds),
+            "interceptions": r1(r.passing_interceptions),
+            "rushing_yards": r1(r.rushing_yards), "rushing_tds": r1(r.rushing_tds),
+            "receiving_yards": r1(r.receiving_yards), "receptions": r1(r.receptions),
+            "receiving_tds": r1(r.receiving_tds),
+        }
+
+    data = [entry(r) for r in rows]
     return {"status": "success", "season": season, "total": len(data), "data": data}

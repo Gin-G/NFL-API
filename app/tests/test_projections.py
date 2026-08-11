@@ -90,3 +90,48 @@ class TestProjectionsStatus:
         body = client.get("/projections/status").json()
         assert body["status"] == "completed"
         assert body["pct_complete"] == 100.0
+
+
+class TestSeasonTotalsAvailability:
+    """/projections/season/{season} must report EXPECTED GAMES PLAYED, not the
+    number of weeks on the schedule. Availability is already multiplied into
+    projected_points, so dividing by the week count understated the per-game
+    rate for anyone projected to miss time."""
+
+    def _weeks(self, db, player_id="p1", n=17, points=10.0, exp_games=None,
+               position="QB"):
+        for wk in range(1, n + 1):
+            _add(db, player_id=player_id, week=wk, position=position,
+                 projected_points=points, exp_games=exp_games,
+                 player_name=f"Player {player_id}")
+
+    def test_durable_player_reads_full_schedule(self, client, db_session):
+        self._weeks(db_session, exp_games=1.0)
+        row = client.get("/projections/season/2025").json()["data"][0]
+        assert row["games"] == pytest.approx(17.0)
+        assert row["scheduled_weeks"] == 17
+        assert row["ppg"] == pytest.approx(10.0)
+
+    def test_injury_prone_player_reads_fewer_games_and_a_higher_rate(
+            self, client, db_session):
+        # 17 weeks at a 0.7 availability weight: the points are already
+        # discounted, so the on-field rate is points / 11.9, not points / 17
+        self._weeks(db_session, points=7.0, exp_games=0.7)
+        row = client.get("/projections/season/2025").json()["data"][0]
+        assert row["games"] == pytest.approx(11.9)
+        assert row["scheduled_weeks"] == 17
+        assert row["total_points"] == pytest.approx(119.0)
+        assert row["ppg"] == pytest.approx(10.0)   # not 7.0
+
+    def test_rows_written_before_the_column_fall_back_to_week_count(
+            self, client, db_session):
+        self._weeks(db_session, exp_games=None)
+        row = client.get("/projections/season/2025").json()["data"][0]
+        assert row["games"] == pytest.approx(17.0)
+        assert row["ppg"] == pytest.approx(10.0)
+
+    def test_bye_week_does_not_inflate_expected_games(self, client, db_session):
+        self._weeks(db_session, n=16, exp_games=1.0)   # a week is missing
+        row = client.get("/projections/season/2025").json()["data"][0]
+        assert row["games"] == pytest.approx(16.0)
+        assert row["scheduled_weeks"] == 16

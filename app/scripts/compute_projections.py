@@ -188,6 +188,8 @@ def _write_week(db, frame, season: int, week: int, model_version: str) -> int:
             receiving_yards=_f(r.get("receiving_yards")),
             receptions=_f(r.get("receptions")),
             receiving_tds=_f(r.get("receiving_tds")),
+            # 1.0 on the in-season path, which applies no availability discount
+            exp_games=_f(r.get("exp_games")) if r.get("exp_games") is not None else 1.0,
             prediction_type=str(r.get("prediction_type") or ""),
             model_version=model_version, computed_at=datetime.utcnow(),
         ))
@@ -284,6 +286,10 @@ def _apply_roles(frame, budgets, games_model=None, prev_games=None) -> None:
     pw = frame.apply(play_weight, axis=1)
     for c in scale_cols:
         frame[c] = frame[c].astype(float) * pw
+    # Keep the weight: summed over a season's weeks it is expected games played,
+    # and without it the stored projection cannot be turned back into a per-game
+    # rate downstream (the API used to report games=17 for everyone).
+    frame["exp_games"] = pw
     if budgets:
         roles.apply_team_budget(frame, budgets, points_col="fanduel_fantasy_points",
                                 group_cols=("team", "position"), scale_cols=scale_cols)
