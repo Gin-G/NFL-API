@@ -7,6 +7,15 @@ import pytest
 from database.models import EspnRoster
 
 
+@pytest.fixture(autouse=True)
+def _clean_roster_table(db_session):
+    """The test engine is session-scoped and committed rows persist across
+    tests, so clear the table before each one to avoid PK collisions."""
+    db_session.query(EspnRoster).delete()
+    db_session.commit()
+    yield
+
+
 @pytest.fixture
 def raiders(db_session):
     """A quarterback room where the depth chart says more than the status does."""
