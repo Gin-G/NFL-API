@@ -17,6 +17,17 @@ def _row(r: EspnRoster) -> dict:
         "espn_id": r.espn_id, "gsis_id": r.gsis_id, "player_name": r.full_name,
         "position": r.position, "team": r.team, "status": r.status,
         "jersey": r.jersey, "age": r.age, "experience": r.experience,
+        # Where he sits on his team's depth chart, 1 being the starter. The one
+        # field here that says whether a player will be on the field, and the
+        # only current answer for anyone the weekly nflverse rosters have not
+        # caught up with: a drafted rookie still carried on reserve there shows
+        # up in this table as an active QB2.
+        "depth_rank": r.depth_rank,
+        # When the sync behind this row ran. Exposed because the table is a
+        # snapshot rather than a live read, and a caller weighing it against
+        # other sources should be able to see how old it is instead of assuming
+        # it is current.
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     }
 
 
