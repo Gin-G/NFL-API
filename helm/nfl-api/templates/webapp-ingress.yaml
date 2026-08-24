@@ -16,7 +16,7 @@ metadata:
       nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       cert-manager.io/cluster-issuer: "letsencrypt-cloudflare"
       kubernetes.io/ingress-class: nginx
-      external-dns.alpha.kubernetes.io/target: "8.44.158.127"
+      external-dns.alpha.kubernetes.io/target: "75c20a42-2dd1-4297-8a51-3aefbcb3f004.cfargotunnel.com"
 spec:
   ingressClassName: nginx
   tls:
