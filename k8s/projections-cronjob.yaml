@@ -23,8 +23,18 @@ metadata:
   labels:
     app: nfl-api-projections
 spec:
-  # Wednesday 09:00 UTC — after Tuesday injury reports, before the weekend slate
-  schedule: "0 9 * * 3"
+  # Wednesday 15:00 UTC — after Tuesday injury reports, before the weekend slate.
+  #
+  # The hour matters more than it looks. Each run projects the upcoming week
+  # from everything played so far, so its whole value is that the *previous*
+  # week is already in nflverse when it starts. A Monday-night game ends around
+  # 03:00 UTC Tuesday and nflverse publishes a day or two later; at 09:00 that
+  # is a 30-hour margin, and if it is missed the run silently produces a
+  # projection built on an incomplete week rather than failing.
+  #
+  # 15:00 buys six more hours and costs nothing: the job takes ~45 minutes and
+  # the following Thursday kickoff is still 33 hours away.
+  schedule: "0 15 * * 3"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
