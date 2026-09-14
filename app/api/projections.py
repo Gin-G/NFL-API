@@ -16,12 +16,37 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from database.models import AnalyticsJobStatus, PlayerProjection, ProjectionAccuracy
+from database.models import (AnalyticsJobStatus, PlayerProjection,
+                             PlayerProjectionVintage, ProjectionAccuracy)
 from database.session import get_db
 from .utils import _orm_to_dict, get_current_nfl_season
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _regular_stats(db, season: int) -> dict:
+    """``{(week, player_id): actual fanduel points}`` for one regular season.
+
+    Scored the same way the projections are, via ``api.utils.fanduel_points``,
+    so a vintage MAE is comparable with every other accuracy number the service
+    reports rather than being its own private scale.
+    """
+    from sqlalchemy import or_
+
+    from database.models import PlayerStat
+
+    from .utils import fanduel_points
+
+    rows = db.query(PlayerStat).filter(
+        PlayerStat.season == season,
+        or_(PlayerStat.season_type == "REG", PlayerStat.season_type.is_(None)),
+    ).all()
+    out = {}
+    for st in rows:
+        vals = {c.name: getattr(st, c.name) for c in st.__table__.columns}
+        out[(st.week, st.player_id)] = fanduel_points(vals)
+    return out
 
 
 @router.get("/")
@@ -30,22 +55,33 @@ def get_projections(
     week: Optional[int] = Query(None, description="Week number"),
     position: Optional[str] = Query(None, description="QB/RB/WR/TE"),
     team: Optional[str] = Query(None, description="Team abbreviation"),
+    as_of: Optional[int] = Query(
+        None, description="Historical vintage: the projection as it stood with this "
+                          "many completed weeks behind it (0 = preseason). Omit for "
+                          "the current projection."),
     limit: int = Query(500, le=2000),
     db: Session = Depends(get_db),
 ):
-    """Weekly projections, best-projected first. Filter by week/position/team."""
-    season = season or get_current_nfl_season()
-    q = db.query(PlayerProjection).filter(PlayerProjection.season == season)
-    if week is not None:
-        q = q.filter(PlayerProjection.week == week)
-    if position:
-        q = q.filter(PlayerProjection.position == position.upper())
-    if team:
-        q = q.filter(PlayerProjection.team == team.upper())
+    """Weekly projections, best-projected first. Filter by week/position/team.
 
-    rows = (
-        q.order_by(PlayerProjection.projected_points.desc()).limit(limit).all()
-    )
+    By default this serves the CURRENT projection for each week — the most recent
+    reprojection. Pass `as_of=N` to read the archive instead and get the
+    projection exactly as it stood when N weeks had been played, which is what
+    makes "did week 10 look different in August than it did in week 9" answerable.
+    """
+    season = season or get_current_nfl_season()
+    M = PlayerProjection if as_of is None else PlayerProjectionVintage
+    q = db.query(M).filter(M.season == season)
+    if as_of is not None:
+        q = q.filter(M.as_of_week == as_of)
+    if week is not None:
+        q = q.filter(M.week == week)
+    if position:
+        q = q.filter(M.position == position.upper())
+    if team:
+        q = q.filter(M.team == team.upper())
+
+    rows = q.order_by(M.projected_points.desc()).limit(limit).all()
     if not rows:
         return {
             "status": "no_data",
@@ -61,6 +97,7 @@ def get_projections(
         "status": "success",
         "season": season,
         "week": week,
+        "as_of_week": as_of,
         "count": len(rows),
         "data": [_orm_to_dict(r) for r in rows],
     }
@@ -228,7 +265,8 @@ def get_projection_misses(
 
     rows = q.order_by(ProjectionAccuracy.abs_error.desc()).limit(limit).all()
     if not rows:
-        return {"status": "no_data", "season": season, "data": []}
+        return {"status": "no_data", "season": season,
+                "as_of_week": as_of, "data": []}
     return {
         "status": "success",
         "season": season,
@@ -292,6 +330,9 @@ def get_player_projections(
 def get_season_totals(
     season: int,
     position: Optional[str] = Query(None, description="Filter to QB/RB/WR/TE"),
+    as_of: Optional[int] = Query(
+        None, description="Season outlook as it stood after this many completed "
+                          "weeks (0 = preseason). Omit for the current outlook."),
     limit: int = Query(300, le=2000),
     db: Session = Depends(get_db),
 ):
@@ -307,10 +348,24 @@ def get_season_totals(
 
     Rows written before availability was persisted have no weight stored; those
     players fall back to games = scheduled_weeks, as before.
+
+    `as_of=N` rebuilds the outlook as it stood once N weeks had been played. It
+    is deliberately not "rows stamped N": by week 5 the archive holds nothing
+    new for weeks 1-4, because played weeks are not reprojected. So each week
+    contributes its LATEST vintage at or before N — week 3 keeps whatever was
+    last believed about it, weeks 5-18 use the week-5 reprojection — which is
+    what "the season as we saw it that morning" actually means.
     """
-    from sqlalchemy import func
+    from sqlalchemy import and_, func
 
     P = PlayerProjection
+    if as_of is not None:
+        V = PlayerProjectionVintage
+        latest = (db.query(V.player_id.label("pid"), V.week.label("wk"),
+                           func.max(V.as_of_week).label("mx"))
+                  .filter(V.season == season, V.as_of_week <= as_of)
+                  .group_by(V.player_id, V.week).subquery())
+        P = V
     cols = {c: func.sum(getattr(P, c)) for c in (
         "passing_yards", "passing_tds", "passing_interceptions", "rushing_yards",
         "rushing_tds", "receiving_yards", "receptions", "receiving_tds")}
@@ -325,6 +380,10 @@ def get_season_totals(
          )
          .filter(P.season == season)
          .group_by(P.player_id, P.player_name, P.position, P.team))
+    if as_of is not None:
+        q = q.join(latest, and_(P.player_id == latest.c.pid,
+                                P.week == latest.c.wk,
+                                P.as_of_week == latest.c.mx))
     if position:
         q = q.filter(P.position == position.upper())
     rows = q.order_by(func.sum(P.projected_points).desc()).limit(limit).all()
@@ -355,3 +414,116 @@ def get_season_totals(
 
     data = [entry(r) for r in rows]
     return {"status": "success", "season": season, "total": len(data), "data": data}
+
+
+@router.get("/vintages/accuracy")
+def get_vintage_accuracy(
+    season: Optional[int] = Query(None, description="Season (default: current)"),
+    position: Optional[str] = Query(None, description="Filter to QB/RB/WR/TE"),
+    min_points: float = Query(
+        5.0, description="Ignore player-weeks projected below this; the tail is "
+                         "mostly inactives and swamps the averages."),
+    db: Session = Depends(get_db),
+):
+    """Does a projection get better as the season feeds it?
+
+    For every archived projection whose week has since been played, this scores
+    the projection against the actual box score and buckets it by `lead_weeks`
+    (week - as_of_week) — how far ahead it was looking. If the weekly
+    reprojection is earning its compute, MAE falls as lead time shrinks.
+
+    Buckets are also split by `basis`, and that split is not cosmetic: the rows
+    come from three different pipelines and averaging across them would answer
+    the wrong question.
+
+      preseason       as_of_week 0 — the ESPN-roster path, with the rookie
+                      prior, availability weighting, share model and simulator.
+      current_week    the in-season projection for the upcoming week, left
+                      exactly as production computes it (no game-environment
+                      scaling). This is what the live board bets.
+      extrapolated    an in-season projection for a LATER week: the same
+                      matchup-neutral mean, scaled by that week's game
+                      environment. No availability discount and no share model,
+                      because both need the preseason ESPN depth charts.
+
+    So `current_week` vs `extrapolated` at equal lead is a fair comparison of
+    information; `preseason` vs either is a comparison of pipelines as much as
+    of information, and should be read that way.
+    """
+    season = season or get_current_nfl_season()
+    V = PlayerProjectionVintage
+    # Four columns, not whole ORM objects: a finished season holds ~120k
+    # vintages (171 week-projections x the player pool) and hydrating all of
+    # them to read three floats is the difference between a fast endpoint and
+    # a slow one.
+    q = db.query(V.week, V.player_id, V.as_of_week, V.projected_points).filter(
+        V.season == season, V.projected_points.isnot(None),
+        V.projected_points >= min_points)
+    if position:
+        q = q.filter(V.position == position.upper())
+    vintages = q.all()
+    if not vintages:
+        return {"status": "no_data", "season": season, "data": [],
+                "message": "No archived projections yet for this season."}
+
+    stats = _regular_stats(db, season)
+    if not stats:
+        return {"status": "no_actuals", "season": season, "data": [],
+                "message": "No actuals stored yet; nothing to score against."}
+
+    buckets: dict = {}
+    for v in vintages:
+        actual = stats.get((v.week, v.player_id))
+        if actual is None:
+            continue                      # week not played, or player didn't
+        as_of = v.as_of_week or 0
+        lead = v.week - as_of
+        if lead < 1:
+            continue                      # a projection of an already-played week
+        basis = ("preseason" if as_of == 0
+                 else "current_week" if lead == 1 else "extrapolated")
+        b = buckets.setdefault((basis, lead), {"n": 0, "abs": 0.0, "err": 0.0})
+        e = v.projected_points - actual
+        b["n"] += 1
+        b["abs"] += abs(e)
+        b["err"] += e
+
+    if not buckets:
+        return {"status": "no_overlap", "season": season, "data": [],
+                "message": "Archived projections and actuals do not overlap yet."}
+    data = [{"basis": basis,
+             "lead_weeks": lead,
+             "n": b["n"],
+             "mae": round(b["abs"] / b["n"], 2),
+             "bias": round(b["err"] / b["n"], 2)}
+            for (basis, lead), b in sorted(buckets.items())]
+    return {"status": "success", "season": season, "position": position,
+            "count": sum(b["n"] for b in buckets.values()), "data": data}
+
+
+@router.get("/vintages/{player_id}")
+def get_player_vintages(
+    player_id: str,
+    season: Optional[int] = Query(None, description="Season (default: current)"),
+    week: Optional[int] = Query(None, description="Single week (default: all)"),
+    db: Session = Depends(get_db),
+):
+    """Every projection ever made for this player, by week and vintage.
+
+    The shape is a week -> list of vintages, oldest first, so a single response
+    shows how the model's view of one player-week moved as the season went on.
+    """
+    season = season or get_current_nfl_season()
+    V = PlayerProjectionVintage
+    q = db.query(V).filter(V.season == season, V.player_id == player_id)
+    if week is not None:
+        q = q.filter(V.week == week)
+    rows = q.order_by(V.week, V.as_of_week).all()
+    if not rows:
+        return {"status": "no_data", "season": season, "player_id": player_id,
+                "data": {}}
+    out: dict = {}
+    for r in rows:
+        out.setdefault(str(r.week), []).append(_orm_to_dict(r))
+    return {"status": "success", "season": season, "player_id": player_id,
+            "player_name": rows[-1].player_name, "weeks": len(out), "data": out}

@@ -15,6 +15,25 @@
 #
 # Manual run for a specific week — patch the command args:
 #   ["...", "python", "-m", "scripts.compute_projections", "--week", "3"]
+#
+# Each run now reprojects the upcoming week AND every remaining week of the
+# season, then archives all of it in player_projection_vintages stamped with
+# how many weeks were complete at the time (as_of_week). Over a season that
+# accumulates 18 + 17 + ... + 1 = 171 projections per player, which is what
+# makes "was the week-12 projection better in week 11 than it was in August"
+# a query instead of an argument — see GET /projections/vintages/accuracy.
+#
+# This costs almost nothing: the model is trained ONCE per run and the extra
+# weeks are just the same mean re-scaled by each week's game environment.
+#
+# Only the upcoming week is published to player_projections. The later weeks go
+# to the archive alone, because they are built without the availability and
+# share models (both need preseason ESPN depth charts) and publishing them would
+# strip availability weighting out of GET /projections/season/{season}. So this
+# change is purely additive to what the API serves today.
+#
+# Pass --end-week to limit the horizon (e.g. --week 5 --end-week 5 restores the
+# old single-week behaviour).
 apiVersion: batch/v1
 kind: CronJob
 metadata:

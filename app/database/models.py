@@ -292,6 +292,65 @@ class PlayerProjection(Base):
     )
 
 
+class PlayerProjectionVintage(Base):
+    """Every projection ever made for a player-week, kept forever.
+
+    `player_projections` holds one row per (season, week, player) — the CURRENT
+    best projection, overwritten each time that week is reprojected. That is the
+    right thing for "what do we think about week 10", and the wrong thing for
+    "what did we think about week 10 back in August, and did more data help".
+
+    This table is the second thing. The extra key is `as_of_week`: how many
+    regular-season weeks were complete when the projection was computed. Week 10
+    therefore accumulates a row per vintage —
+
+        as_of_week=0   the preseason full-season outlook
+        as_of_week=1   reprojected once week 1 was in the books
+        ...
+        as_of_week=9   the last projection before week 10 kicks off
+
+    so the season ends with a triangle of 18+17+...+1 = 171 projections per
+    player, and "does a projection get better as the season feeds it" becomes a
+    query rather than an argument. Rows are never deleted, only re-merged in
+    place if the same vintage is recomputed.
+    """
+    __tablename__ = "player_projection_vintages"
+
+    season           = Column(Integer, primary_key=True)
+    week             = Column(Integer, primary_key=True)
+    player_id        = Column(String,  primary_key=True)
+    # Completed regular-season weeks of the SAME season behind this projection.
+    # 0 means preseason: no current-season football had been played.
+    as_of_week       = Column(Integer, primary_key=True)
+    player_name      = Column(String)
+    position         = Column(String)
+    team             = Column(String)
+    projected_points = Column(Float)
+    floor            = Column(Float)
+    median           = Column(Float)
+    ceiling          = Column(Float)
+    passing_yards        = Column(Float)
+    passing_tds          = Column(Float)
+    passing_interceptions = Column(Float)
+    rushing_yards        = Column(Float)
+    rushing_tds          = Column(Float)
+    receiving_yards      = Column(Float)
+    receptions           = Column(Float)
+    receiving_tds        = Column(Float)
+    exp_games        = Column(Float, nullable=True)
+    prediction_type  = Column(String)
+    model_version    = Column(String)
+    computed_at      = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        # The trajectory query: one player-week, every vintage, in order.
+        Index("ix_ppv_player_week", "season", "week", "player_id", "as_of_week"),
+        # The cohort query: everything produced by one run.
+        Index("ix_ppv_asof", "season", "as_of_week"),
+        Index("ix_ppv_pos", "position", "season", "week"),
+    )
+
+
 class ProjectionAccuracy(Base):
     """A projection scored against what actually happened — the prospective,
     truly out-of-sample accuracy record, accruing one week at a time.

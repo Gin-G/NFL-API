@@ -4,8 +4,31 @@ Pre-compute weekly fantasy projections and cache them in `player_projections`.
 
 Self-contained: builds the historical dataset fresh from nflreadpy via the
 nfl_projections package, trains the model (mean + quantile floor/ceiling), and
-projects the requested week. Progress is tracked in analytics_job_status
-(job_type="projections") and served via GET /projections/status.
+projects the requested week THROUGH the end of the regular season. Progress is
+tracked in analytics_job_status (job_type="projections") and served via
+GET /projections/status.
+
+Two tables come out of every run:
+
+  player_projections          one row per (season, week, player) — the current
+                              best answer, replaced each time a week is
+                              reprojected. This is what the API and the betting
+                              board read.
+  player_projection_vintages  the same rows, plus `as_of_week`: how many weeks
+                              were complete when they were computed. Never
+                              deleted, so a week accumulates one row per vintage
+                              and the season ends holding every projection it
+                              ever had.
+
+Training happens once per run, so projecting the remaining 17 weeks instead of
+1 is nearly free — the extra weeks are the same mean re-scaled by each week's
+game environment.
+
+Only the upcoming week is PUBLISHED to player_projections; the rest are
+archived only. That keeps this job additive: every number the API and the
+betting board already serve is exactly what it was, and the later weeks
+accumulate as evidence until the accuracy record says which vintage deserves
+to be the live one.
 
 Run:
     python -m scripts.compute_projections --season 2025 --week 3
@@ -130,11 +153,45 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         return
     model_version = getattr(nfl_projections, "__version__", "unknown")
 
+    # How much current-season football this projection was allowed to see. Stamped
+    # on every row written below, and the axis the vintage archive is keyed on.
+    as_of = _completed_weeks(season)
+    # Capture anything already in player_projections that predates the archive,
+    # before the writes below replace it. Must happen before the first _write_week.
+    _backfill_vintages(db, season)
+
     if not use_espn:
-        # in-season path (nflreadpy rosters): single matchup-neutral week, as before
-        written = _write_week(db, base, season, week, model_version)
-        _update_job(db, job, status="completed", total_entries=written, processed_entries=written)
-        logger.info("Wrote %d projections for %d week %d (model %s)", written, season, week, model_version)
+        # In-season path (nflreadpy rosters). The base projection is matchup-neutral
+        # and reflects form through week `as_of`; applying each remaining week's game
+        # environment turns it into an outlook for the rest of the season. Doing that
+        # every week is what builds the triangle: 18 weeks projected preseason, 17
+        # after week 1, and so on, each vintage kept for comparison.
+        #
+        # Only the upcoming week is PUBLISHED to player_projections. The later weeks
+        # are archived only — see _write_week — so this job adds a record without
+        # changing a single number the board or the season endpoint already serves.
+        last = end_week if end_week is not None else _final_week(season)
+        env_all = _game_environments(season)
+        written = archived = 0
+        for w in range(week, max(last, week) + 1):
+            f = base if w == week else _apply_environment(base, w, env_all)
+            if f is None or getattr(f, "empty", False):
+                continue        # bye week, or no environment for that week
+            if w != week:
+                # Re-roll the range for the target week; the mean already moved.
+                _apply_simulator(f, df, w)
+            n = _write_week(db, f, season, w, model_version, as_of_week=as_of,
+                            live=(w == week))
+            archived += n
+            if w == week:
+                written = n
+            _update_job(db, job, current_coach=f"season {season} week {w}",
+                        processed_entries=archived)
+        _update_job(db, job, status="completed", total_entries=written,
+                    processed_entries=archived)
+        logger.info("Published %d projections for %d week %d; archived %d across "
+                    "weeks %d-%d as_of week %d (model %s)",
+                    written, season, week, archived, week, last, as_of, model_version)
         return
 
     # Future-season path: the base projection is matchup-neutral (same every week for a
@@ -152,7 +209,7 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         _apply_roles(f, budgets, games_model, prev_games)  # availability (durability) + team pool
         _apply_shares(f, share_pred)                  # redistribute group total by predicted share
         _apply_simulator(f, df, w)
-        total += _write_week(db, f, season, w, model_version)
+        total += _write_week(db, f, season, w, model_version, as_of_week=as_of)
         _update_job(db, job, current_coach=f"season {season} week {w}", processed_entries=total)
         logger.info("week %d: wrote %d projections", w, len(f))
     _update_job(db, job, status="completed", total_entries=total, processed_entries=total)
@@ -160,19 +217,38 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
                 total, season, week, end_week or week, model_version)
 
 
-def _write_week(db, frame, season: int, week: int, model_version: str) -> int:
-    """Replace the season/week rows in player_projections with `frame`."""
-    from database.models import PlayerProjection
-    db.query(PlayerProjection).filter(
-        PlayerProjection.season == season, PlayerProjection.week == week
-    ).delete()
-    db.commit()
+def _write_week(db, frame, season: int, week: int, model_version: str,
+                as_of_week: int = 0, live: bool = True) -> int:
+    """Archive `frame` as the `as_of_week` vintage, and when `live`, also make it
+    the current projection for that week.
+
+    Two destinations, deliberately. `player_projections` is the current best
+    answer and is replaced; `player_projection_vintages` is the permanent record
+    and is only ever merged, so reprojecting week 10 in week 5 leaves week 10's
+    preseason and week-1..4 vintages exactly where they were.
+
+    `live=False` archives without publishing. The in-season run uses it for
+    every week after the upcoming one: those extrapolations are worth recording
+    and comparing, but they are built without the availability and share models
+    (both need the preseason ESPN depth charts), so promoting them over the
+    preseason full-season projection would quietly strip the availability
+    weighting out of the season-totals endpoint. Which projection actually
+    deserves to be live for a distant week is a question the archive is being
+    built to answer — see GET /projections/vintages/accuracy — rather than one
+    to guess at here.
+    """
+    from database.models import PlayerProjection, PlayerProjectionVintage
+    if live:
+        db.query(PlayerProjection).filter(
+            PlayerProjection.season == season, PlayerProjection.week == week
+        ).delete()
+        db.commit()
     written = 0
     for _, r in frame.iterrows():
         pid = str(r.get("player_id") or "").strip()
         if not pid:
             continue
-        db.merge(PlayerProjection(
+        payload = dict(
             season=season, week=week, player_id=pid,
             player_name=str(r.get("player_name") or ""),
             position=str(r.get("position") or ""),
@@ -192,10 +268,119 @@ def _write_week(db, frame, season: int, week: int, model_version: str) -> int:
             exp_games=_f(r.get("exp_games")) if r.get("exp_games") is not None else 1.0,
             prediction_type=str(r.get("prediction_type") or ""),
             model_version=model_version, computed_at=datetime.utcnow(),
-        ))
+        )
+        if live:
+            db.merge(PlayerProjection(**payload))
+        db.merge(PlayerProjectionVintage(as_of_week=as_of_week, **payload))
         written += 1
     db.commit()
     return written
+
+
+def _final_week(season: int) -> int:
+    """Last scheduled regular-season week (18 in the current format, 17 before).
+
+    Read from the schedule rather than hard-coded so a future format change does
+    not silently truncate the projection horizon.
+    """
+    try:
+        import nflreadpy as nfl
+
+        sched = nfl.load_schedules(seasons=[season])
+        sched = sched.to_pandas() if hasattr(sched, "to_pandas") else sched
+        return int(sched[sched["game_type"] == "REG"]["week"].max())
+    except Exception as exc:
+        logger.warning("Could not determine final week (%s); using 18", exc)
+        return 18
+
+
+def _completed_weeks(season: int, when=None) -> int:
+    """Completed regular-season weeks of `season` as of `when` (default now).
+
+    This is the `as_of_week` stamp: the amount of current-season football the
+    projection was allowed to learn from. A week counts as complete once its
+    LAST game has kicked off plus a few hours, so a Wednesday run sees the
+    Monday nighter that just finished. Returns 0 preseason, and 0 on any error —
+    understating what the model knew is the safe direction for an archive whose
+    whole purpose is comparing vintages.
+    """
+    try:
+        import nflreadpy as nfl
+        import pandas as pd
+
+        sched = nfl.load_schedules(seasons=[season])
+        sched = sched.to_pandas() if hasattr(sched, "to_pandas") else sched
+        sched = sched[sched["game_type"] == "REG"].copy()
+        sched["kick"] = pd.to_datetime(sched["gameday"], errors="coerce")
+        cutoff = (pd.Timestamp(when) if when is not None
+                  else pd.Timestamp.now()) - pd.Timedelta(hours=6)
+        # A week is complete once its LAST game is in the books, so take the
+        # latest kickoff per week and count the weeks entirely behind us. Using
+        # the max (not the min) is what stops a Thursday game from marking the
+        # whole week done.
+        last = sched.groupby("week")["kick"].max().dropna()
+        complete = [int(w) for w, k in last.items() if k < cutoff]
+        return max(complete) if complete else 0
+    except Exception as exc:
+        logger.warning("Could not determine completed weeks (%s); using 0", exc)
+        return 0
+
+
+def _backfill_vintages(db, season: int) -> int:
+    """Archive any `player_projections` row that has no vintage row yet.
+
+    Everything written before this table existed is otherwise lost the first
+    time its week is reprojected — including the preseason full-season outlook,
+    which is the most interesting vintage in the whole archive precisely because
+    it is the one built with the least information. Each row's vintage is
+    recovered from its own `computed_at`, so the August batch lands at
+    as_of_week=0 and a mid-season recompute lands where it belongs.
+
+    Idempotent: only inserts (season, week, player_id, as_of_week) keys that are
+    missing, so re-running it never disturbs an existing vintage.
+    """
+    from database.models import PlayerProjection, PlayerProjectionVintage
+
+    rows = db.query(PlayerProjection).filter(
+        PlayerProjection.season == season).all()
+    if not rows:
+        return 0
+    # tuple(), not the Row objects themselves — a Row will not hash-match a
+    # plain tuple, and the membership test below would silently never hit.
+    have = {tuple(k) for k in db.query(
+        PlayerProjectionVintage.week, PlayerProjectionVintage.player_id,
+        PlayerProjectionVintage.as_of_week).filter(
+            PlayerProjectionVintage.season == season).all()}
+
+    # One schedule lookup per distinct computed_at, not per row.
+    asof_cache: dict = {}
+    added = 0
+    for r in rows:
+        stamp = r.computed_at or datetime.utcnow()
+        bucket = stamp.replace(minute=0, second=0, microsecond=0)
+        if bucket not in asof_cache:
+            asof_cache[bucket] = _completed_weeks(season, stamp)
+        as_of = asof_cache[bucket]
+        if (r.week, r.player_id, as_of) in have:
+            continue
+        db.add(PlayerProjectionVintage(
+            season=r.season, week=r.week, player_id=r.player_id, as_of_week=as_of,
+            player_name=r.player_name, position=r.position, team=r.team,
+            projected_points=r.projected_points, floor=r.floor,
+            median=r.median, ceiling=r.ceiling,
+            passing_yards=r.passing_yards, passing_tds=r.passing_tds,
+            passing_interceptions=r.passing_interceptions,
+            rushing_yards=r.rushing_yards, rushing_tds=r.rushing_tds,
+            receiving_yards=r.receiving_yards, receptions=r.receptions,
+            receiving_tds=r.receiving_tds, exp_games=r.exp_games,
+            prediction_type=r.prediction_type, model_version=r.model_version,
+            computed_at=r.computed_at,
+        ))
+        added += 1
+    if added:
+        db.commit()
+        logger.info("Backfilled %d existing projections into the vintage archive", added)
+    return added
 
 
 def _game_environments(season: int):
@@ -382,7 +567,10 @@ def main() -> None:
     parser.add_argument("--season", type=int, default=None)
     parser.add_argument("--week", type=int, default=None)
     parser.add_argument("--end-week", type=int, default=None,
-                        help="Project --week through --end-week (future-season full-season run)")
+                        help="Project --week through --end-week. Defaults to the "
+                             "last regular-season week, so a run reprojects the "
+                             "whole remaining season; pass the same value as "
+                             "--week for a single-week run.")
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--seeds", type=int, default=None,
                         help="Networks in the mean-model seed ensemble "
