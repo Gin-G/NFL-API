@@ -198,6 +198,9 @@ class TestComputeRunWritesBothTables:
         mod.dataset = ds
         monkeypatch.setitem(sys.modules, "nfl_projections", mod)
         monkeypatch.setitem(sys.modules, "nfl_projections.dataset", ds)
+        # No network in tests: nothing has kicked off unless a test says so.
+        from scripts import compute_projections as cp
+        monkeypatch.setattr(cp, "_kicked_off_teams", lambda season, week: set())
         return base
 
     def test_projects_remaining_weeks_into_both_tables(
@@ -352,3 +355,160 @@ class TestComputeRunWritesBothTables:
         assert live["00-0000001"] == pytest.approx(16.5)
         assert live["00-0000002"] == pytest.approx(10.8)
         assert simulated == [5, 6]
+
+    def test_incomplete_previous_week_is_refused_before_training(
+            self, db_session, stub_nfl_projections, monkeypatch):
+        import sys
+
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        monkeypatch.setattr(cp, "_teams_missing_stats", lambda df, season: (4, ["DEN", "KC"]))
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+
+        cp.run(db_session, 2025, 5, epochs=1, job=job)
+
+        assert job.status == "failed"
+        assert "DEN, KC" in job.error_message
+        assert sys.modules["nfl_projections"].calls == []      # never projected
+        assert db_session.query(PlayerProjection).count() == 0  # nothing published
+
+
+    def test_teams_already_playing_keep_their_pregame_projection(
+            self, db_session, stub_nfl_projections, monkeypatch):
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        # PHI kicked off Wednesday; the Wednesday-night run lands after it.
+        db_session.add(PlayerProjection(
+            season=2025, week=5, player_id="00-0000002", player_name="WR Two",
+            position="WR", team="PHI", projected_points=9.0,
+            computed_at=datetime(2025, 10, 1, 20, 0)))
+        db_session.commit()
+        monkeypatch.setattr(cp, "_kicked_off_teams", lambda season, week: {"PHI"})
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 4)
+        monkeypatch.setattr(cp, "_final_week", lambda season: 6)
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+
+        cp.run(db_session, 2025, 5, epochs=1, job=job)
+
+        live = {r.player_id: r.projected_points for r in db_session.query(
+            PlayerProjection).filter(PlayerProjection.season == 2025,
+                                     PlayerProjection.week == 5)}
+        assert live == {"00-0000001": 15.0, "00-0000002": 9.0}
+        # Nothing post-kickoff reaches the archive either: week 5 holds only the
+        # pre-game row (backfilled, 9.0), while PHI's week 6, not yet started, is
+        # archived from this run as usual.
+        phi = {v.week: v.projected_points for v in db_session.query(
+            PlayerProjectionVintage).filter(
+            PlayerProjectionVintage.player_id == "00-0000002",
+            PlayerProjectionVintage.as_of_week == 4)}
+        assert phi == {5: 9.0, 6: 12.0}
+
+    def test_overwrite_started_rewrites_everything(
+            self, db_session, stub_nfl_projections, monkeypatch):
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        db_session.add(PlayerProjection(
+            season=2025, week=5, player_id="00-0000002", player_name="WR Two",
+            position="WR", team="PHI", projected_points=9.0))
+        db_session.commit()
+        monkeypatch.setattr(cp, "_kicked_off_teams", lambda season, week: {"PHI"})
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 4)
+        monkeypatch.setattr(cp, "_final_week", lambda season: 5)
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+
+        cp.run(db_session, 2025, 5, epochs=1, job=job, overwrite_started=True)
+
+        phi = db_session.query(PlayerProjection).filter(
+            PlayerProjection.player_id == "00-0000002").one()
+        assert phi.projected_points == 12.0
+
+
+class TestKickedOffTeams:
+    @staticmethod
+    def _schedule():
+        import pandas as pd
+
+        return pd.DataFrame({
+            "season": [2026] * 3, "week": [12] * 3, "game_type": ["REG"] * 3,
+            "gameday": ["2026-11-25", "2026-11-26", "2026-11-29"],
+            "gametime": ["20:00", "16:30", None],
+            "home_team": ["LA", "DAL", "KC"], "away_team": ["GB", "NYG", "BUF"],
+        })
+
+    def test_wednesday_night_run_after_a_wednesday_game(self):
+        from scripts import compute_projections as cp
+
+        # 21:00 Mountain Wednesday = 04:00 UTC Thursday; GB@LA kicked at 20:00 ET.
+        got = cp._kicked_off_teams(2026, 12, now="2026-11-26T04:00:00Z",
+                                   schedule=self._schedule())
+        assert got == {"GB", "LA"}
+
+    def test_before_any_kickoff(self):
+        from scripts import compute_projections as cp
+
+        got = cp._kicked_off_teams(2026, 12, now="2026-11-25T12:00:00Z",
+                                   schedule=self._schedule())
+        assert got == set()
+
+    def test_missing_gametime_counts_from_midnight(self):
+        from scripts import compute_projections as cp
+
+        got = cp._kicked_off_teams(2026, 12, now="2026-11-29T06:00:00Z",
+                                   schedule=self._schedule())
+        assert got == {"GB", "LA", "DAL", "NYG", "KC", "BUF"}
+
+
+class TestTeamsMissingStats:
+    """Scores post within hours; nflverse stats can trail by a day."""
+
+    @staticmethod
+    def _schedule():
+        import pandas as pd
+
+        return pd.DataFrame({
+            "season": [2026] * 3, "week": [1, 1, 1], "game_type": ["REG"] * 3,
+            "home_team": ["SEA", "KC", "BUF"], "away_team": ["NE", "DEN", "MIA"],
+            # BUF-MIA never got a score: cancelled, or not final yet.
+            "home_score": [13.0, 24.0, None],
+        })
+
+    def test_flags_scored_games_without_stats(self, monkeypatch):
+        import pandas as pd
+
+        from scripts import compute_projections as cp
+
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 1)
+        df = pd.DataFrame({"season": [2026, 2026, 2025, 2026],
+                           "week": [1, 1, 1, "AVG"],
+                           "team": ["SEA", "NE", "KC", "DEN"]})
+        week, missing = cp._teams_missing_stats(df, 2026, schedule=self._schedule())
+        # KC's only row is last season and DEN's is a season-average row.
+        assert (week, missing) == (1, ["DEN", "KC"])
+
+    def test_complete_week_passes(self, monkeypatch):
+        import pandas as pd
+
+        from scripts import compute_projections as cp
+
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 1)
+        df = pd.DataFrame({"season": [2026] * 4, "week": [1] * 4,
+                           "team": ["SEA", "NE", "KC", "DEN"]})
+        assert cp._teams_missing_stats(df, 2026, schedule=self._schedule()) == (1, [])
+
+    def test_preseason_is_not_checked(self, monkeypatch):
+        import pandas as pd
+
+        from scripts import compute_projections as cp
+
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 0)
+        df = pd.DataFrame({"season": [2026], "week": [1], "team": ["SEA"]})
+        assert cp._teams_missing_stats(df, 2026, schedule=self._schedule()) == (None, [])

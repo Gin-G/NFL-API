@@ -10,7 +10,8 @@
 # --seeds 1 in the command below for a fast one-off run.
 #
 # The API image does NOT bundle nfl_projections (it drags in TensorFlow), so
-# this job pip-installs it at runtime. Runs weekly; trigger a one-off run with:
+# this job pip-installs it at runtime. Runs Tuesday and Wednesday nights; trigger a
+# one-off run with:
 #   kubectl create job -n nfl-api --from=cronjob/nfl-api-projections proj-manual
 #
 # Manual run for a specific week — patch the command args:
@@ -42,18 +43,28 @@ metadata:
   labels:
     app: nfl-api-projections
 spec:
-  # Wednesday 15:00 UTC — after Tuesday injury reports, before the weekend slate.
+  # Tuesday and Wednesday, 21:00 Denver time.
   #
-  # The hour matters more than it looks. Each run projects the upcoming week
-  # from everything played so far, so its whole value is that the *previous*
-  # week is already in nflverse when it starts. A Monday-night game ends around
-  # 03:00 UTC Tuesday and nflverse publishes a day or two later; at 09:00 that
-  # is a 30-hour margin, and if it is missed the run silently produces a
-  # projection built on an incomplete week rather than failing.
+  # Tuesday night is the first run with the whole previous week in hand: Monday
+  # Night Football ends around 03:00 UTC Tuesday and nflverse posts its stats
+  # within the day. Wednesday night runs again, because injury news keeps moving
+  # all week — it picks up the first practice report, and it is the backstop if
+  # Tuesday's run was refused.
   #
-  # 15:00 buys six more hours and costs nothing: the job takes ~45 minutes and
-  # the following Thursday kickoff is still 33 hours away.
-  schedule: "0 15 * * 3"
+  # Refused, not wrong: each run projects the upcoming week from everything
+  # played so far, and a run that lands after the scores but before the stats
+  # used to project off an incomplete week without a word. compute_projections
+  # now checks that every scored game of the last completed week has stats and
+  # fails the job (visible at /projections/status) when one doesn't.
+  #
+  # Nothing later than Wednesday. From Thursday's kickoff on, a run would
+  # overwrite projections for games already played, and those are the rows
+  # projection_accuracy scores (it refuses any computed after the gameday).
+  #
+  # timeZone is explicit: without it the schedule follows the controller's local
+  # clock, which on this cluster is Mountain time, not UTC.
+  schedule: "0 21 * * 2,3"
+  timeZone: "America/Denver"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

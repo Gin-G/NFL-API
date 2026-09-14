@@ -109,7 +109,7 @@ def _espn_frames(db, week: int):
 
 
 def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
-        seeds: int = None) -> None:
+        seeds: int = None, overwrite_started: bool = False) -> None:
     from database.models import PlayerProjection
     import nfl_projections
     from nfl_projections import ProjectionService
@@ -120,6 +120,18 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
 
     logger.info("Building dataset from nflreadpy...")
     df = nflp_dataset.build_dataset(output_path=None)  # build in-memory, don't write a CSV
+
+    # Before training: a run that lands after the scores but before nflverse's
+    # stats would project off an incomplete week and say nothing. Refuse instead;
+    # the job runs again the next night.
+    if season <= int(df["season"].max()):
+        done_week, missing = _teams_missing_stats(df, season)
+        if missing:
+            msg = (f"week {done_week} has final scores but no nflverse stats yet for "
+                   f"{', '.join(missing)}; not projecting off an incomplete week")
+            logger.error(msg)
+            _update_job(db, job, status="failed", error_message=msg)
+            return
     # The mean model is a seed ensemble (nfl_projections default 5): averaging
     # several seeds is worth ~0.04 MAE and removes the single-seed lottery, at
     # the cost of training that many networks.
@@ -158,6 +170,13 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
     # How much current-season football this projection was allowed to see. Stamped
     # on every row written below, and the axis the vintage archive is keyed on.
     as_of = _completed_weeks(season)
+    # Teams already playing (or done) keep the projection they went in with. The
+    # Wednesday-night run lands after a Wednesday kickoff (week 12's GB@LA), and a
+    # row computed after kickoff is one projection_accuracy refuses to score.
+    started = set() if overwrite_started else _kicked_off_teams(season, week)
+    if started:
+        logger.info("Leaving week %d projections for %s as they were: already kicked off",
+                    week, ", ".join(sorted(started)))
     # Capture anything already in player_projections that predates the archive,
     # before the writes below replace it. Must happen before the first _write_week.
     _backfill_vintages(db, season)
@@ -185,7 +204,7 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
                 continue        # bye week, or no environment for that week
             _apply_simulator(f, df, w)
             n = _write_week(db, f, season, w, model_version, as_of_week=as_of,
-                            live=(w == week))
+                            live=(w == week), started=started if w == week else ())
             archived += n
             if w == week:
                 written = n
@@ -213,7 +232,8 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         _apply_roles(f, budgets, games_model, prev_games)  # availability (durability) + team pool
         _apply_shares(f, share_pred)                  # redistribute group total by predicted share
         _apply_simulator(f, df, w)
-        total += _write_week(db, f, season, w, model_version, as_of_week=as_of)
+        total += _write_week(db, f, season, w, model_version, as_of_week=as_of,
+                             started=started if w == week else ())
         _update_job(db, job, current_coach=f"season {season} week {w}", processed_entries=total)
         logger.info("week %d: wrote %d projections", w, len(f))
     _update_job(db, job, status="completed", total_entries=total, processed_entries=total)
@@ -222,7 +242,7 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
 
 
 def _write_week(db, frame, season: int, week: int, model_version: str,
-                as_of_week: int = 0, live: bool = True) -> int:
+                as_of_week: int = 0, live: bool = True, started=()) -> int:
     """Archive `frame` as the `as_of_week` vintage, and when `live`, also make it
     the current projection for that week.
 
@@ -240,17 +260,23 @@ def _write_week(db, frame, season: int, week: int, model_version: str,
     deserves to be live for a distant week is a question the archive is being
     built to answer — see GET /projections/vintages/accuracy — rather than one
     to guess at here.
+
+    `started` teams are skipped in both tables: their game has kicked off, so the
+    rows already there are the last honest pre-game projection.
     """
     from database.models import PlayerProjection, PlayerProjectionVintage
+    started = set(started or ())
     if live:
-        db.query(PlayerProjection).filter(
-            PlayerProjection.season == season, PlayerProjection.week == week
-        ).delete()
+        stale = db.query(PlayerProjection).filter(
+            PlayerProjection.season == season, PlayerProjection.week == week)
+        if started:
+            stale = stale.filter(~PlayerProjection.team.in_(sorted(started)))
+        stale.delete(synchronize_session=False)
         db.commit()
     written = 0
     for _, r in frame.iterrows():
         pid = str(r.get("player_id") or "").strip()
-        if not pid:
+        if not pid or str(r.get("team") or "") in started:
             continue
         payload = dict(
             season=season, week=week, player_id=pid,
@@ -328,6 +354,69 @@ def _completed_weeks(season: int, when=None) -> int:
     except Exception as exc:
         logger.warning("Could not determine completed weeks (%s); using 0", exc)
         return 0
+
+
+def _kicked_off_teams(season: int, week: int, now=None, schedule=None) -> set:
+    """Teams whose game in `week` has kicked off by `now` (default: now).
+
+    nflverse's gametime is US Eastern. A missing gametime counts as midnight, so a
+    game dated today is treated as started: the cost of that is keeping a
+    projection a few hours older, where the other way is overwriting a live game.
+    """
+    import pandas as pd
+
+    try:
+        if schedule is None:
+            import nflreadpy as nfl
+
+            schedule = nfl.load_schedules(seasons=[season])
+            schedule = schedule.to_pandas() if hasattr(schedule, "to_pandas") else schedule
+        games = schedule[(schedule["season"] == season) & (schedule["week"] == week)
+                         & (schedule["game_type"] == "REG")]
+        kick = pd.to_datetime(games["gameday"].astype(str) + " "
+                              + games["gametime"].fillna("00:00").astype(str),
+                              errors="coerce")
+        kick = kick.dt.tz_localize("America/New_York", ambiguous="NaT",
+                                   nonexistent="NaT").dt.tz_convert("UTC")
+        now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+        now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+        begun = games[kick.notna() & (kick <= now)]
+    except Exception as exc:
+        logger.warning("Could not check week %d kickoffs (%s); overwriting all teams",
+                       week, exc)
+        return set()
+    return set(begun["home_team"]) | set(begun["away_team"])
+
+
+def _teams_missing_stats(df, season: int, schedule=None):
+    """``(week, teams)``: teams whose game in the last completed week has a final
+    score but no player stats in the dataset. ``(week, [])`` when the week is all
+    there; ``(None, [])`` when it can't be checked, which lets the run proceed.
+
+    Only scored games count. A score posts within hours of the final whistle and
+    nflverse's stats can trail it by a day, which is the window a run the night
+    after Monday Night Football can land in. A cancelled game never gets a score,
+    so it can't block every run for a week.
+    """
+    import pandas as pd
+
+    week = _completed_weeks(season)
+    if week < 1 or not {"season", "week", "team"} <= set(df.columns):
+        return None, []
+    try:
+        if schedule is None:
+            import nflreadpy as nfl
+
+            schedule = nfl.load_schedules(seasons=[season])
+            schedule = schedule.to_pandas() if hasattr(schedule, "to_pandas") else schedule
+        games = schedule[(schedule["season"] == season) & (schedule["week"] == week)
+                         & (schedule["game_type"] == "REG") & schedule["home_score"].notna()]
+    except Exception as exc:
+        logger.warning("Could not check week %d stats completeness (%s)", week, exc)
+        return None, []
+    played = set(games["home_team"]) | set(games["away_team"])
+    rows = df[(df["season"] == season) & (pd.to_numeric(df["week"], errors="coerce") == week)]
+    return week, sorted(played - set(rows["team"].dropna()))
 
 
 def _backfill_vintages(db, season: int) -> int:
@@ -576,6 +665,10 @@ def main() -> None:
                              "whole remaining season; pass the same value as "
                              "--week for a single-week run.")
     parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--overwrite-started", action="store_true",
+                        help="Also rewrite teams whose game has kicked off (by default "
+                             "they keep their pre-game projection; needed to rerun a "
+                             "past week on purpose)")
     parser.add_argument("--seeds", type=int, default=None,
                         help="Networks in the mean-model seed ensemble "
                              "(default: nfl_projections' 5; 1 for a fast run)")
@@ -613,7 +706,7 @@ def main() -> None:
         db.refresh(job)
 
         run(db, season, week, args.epochs, job, end_week=args.end_week,
-            seeds=args.seeds)
+            seeds=args.seeds, overwrite_started=args.overwrite_started)
 
     except Exception as exc:
         logger.error("Projections job failed: %s", exc, exc_info=True)
