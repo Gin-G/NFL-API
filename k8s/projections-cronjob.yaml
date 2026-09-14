@@ -57,9 +57,11 @@ spec:
   # now checks that every scored game of the last completed week has stats and
   # fails the job (visible at /projections/status) when one doesn't.
   #
-  # Nothing later than Wednesday. From Thursday's kickoff on, a run would
-  # overwrite projections for games already played, and those are the rows
-  # projection_accuracy scores (it refuses any computed after the gameday).
+  # Teams whose game has kicked off keep their pre-game projection — week 12's
+  # Wednesday game (GB@LA, 18:00 MT) is already under way at 21:00 — because a
+  # row computed after kickoff is one projection_accuracy refuses to score. The
+  # same lock is what would make a Friday or Saturday run safe, for the final
+  # injury designations: it would refresh only the teams still to play.
   #
   # timeZone is explicit: without it the schedule follows the controller's local
   # clock, which on this cluster is Mountain time, not UTC.
