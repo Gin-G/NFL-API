@@ -132,7 +132,10 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
     # and derive floor/ceiling from the Monte-Carlo simulator (no current-season form yet).
     max_nflreadpy_season = int(df["season"].max())
     use_espn = season > max_nflreadpy_season
-    proj_kwargs = {}
+    # Both paths keep the draft-capital prior: the network needs two games of
+    # history, so without it every first-year player would drop off the board
+    # until week 3.
+    proj_kwargs = dict(rookie_fallback=True)
     if use_espn:
         rosters, depth = _espn_frames(db, week)
         if rosters.empty:
@@ -142,8 +145,7 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
             return
         logger.info("Using ESPN rosters (%d players) + rookie prior for season %d",
                     len(rosters), season)
-        proj_kwargs = dict(rosters=rosters, depth_charts=depth,
-                           rookie_fallback=True, use_injuries=False)
+        proj_kwargs.update(rosters=rosters, depth_charts=depth, use_injuries=False)
 
     logger.info("Projecting season %d week %d...", season, week)
     base = svc.project(season, week, as_frame=True, **proj_kwargs)
@@ -174,12 +176,14 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         env_all = _game_environments(season)
         written = archived = 0
         for w in range(week, max(last, week) + 1):
-            f = base if w == week else _apply_environment(base, w, env_all)
+            # The upcoming week included: the base is matchup-neutral, and
+            # publishing it bare would ignore the Vegas total that is already
+            # posted for exactly that week. The simulator then builds the range
+            # around the adjusted mean, the same as the preseason path does.
+            f = _apply_environment(base, w, env_all)
             if f is None or getattr(f, "empty", False):
                 continue        # bye week, or no environment for that week
-            if w != week:
-                # Re-roll the range for the target week; the mean already moved.
-                _apply_simulator(f, df, w)
+            _apply_simulator(f, df, w)
             n = _write_week(db, f, season, w, model_version, as_of_week=as_of,
                             live=(w == week))
             archived += n

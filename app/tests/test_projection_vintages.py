@@ -176,16 +176,20 @@ class TestComputeRunWritesBothTables:
             "receptions": [2.0, 6.0], "prediction_type": ["veteran_ml"] * 2,
         })
 
+        calls = []
+
         class FakeService:
             def __init__(self, **kw):
                 pass
 
             def project(self, season, week, as_frame=True, **kw):
+                calls.append(kw)
                 return base.copy()
 
         mod = types.ModuleType("nfl_projections")
         mod.__version__ = "9.9.9"
         mod.ProjectionService = FakeService
+        mod.calls = calls           # every project() call's keyword arguments
         ds = types.ModuleType("nfl_projections.dataset")
         # The dataset must REACH the target season, or `use_espn` flips true and
         # run() takes the preseason ESPN-roster path instead of the in-season one.
@@ -295,3 +299,56 @@ class TestComputeRunWritesBothTables:
             PlayerProjection.season == 2025, PlayerProjection.week == 6,
             PlayerProjection.player_id == "00-0000001").one()
         assert still_live.projected_points == 11.0
+
+    def test_in_season_run_keeps_the_rookie_prior_and_injuries(
+            self, db_session, stub_nfl_projections, monkeypatch):
+        import sys
+
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 1)
+        monkeypatch.setattr(cp, "_final_week", lambda season: 2)
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+
+        cp.run(db_session, 2025, 2, epochs=1, job=job)
+
+        (kw,) = sys.modules["nfl_projections"].calls
+        # Rookies have one game at most in week 2; the network needs two, so
+        # without the prior every first-year player vanishes from the board.
+        assert kw.get("rookie_fallback") is True
+        # In season the injury report is real information: nothing turns it off,
+        # and nflverse rosters, not the preseason ESPN frames, are used.
+        assert kw.get("use_injuries", True) is True
+        assert "rosters" not in kw and "depth_charts" not in kw
+
+    def test_upcoming_week_gets_its_environment_and_simulator(
+            self, db_session, stub_nfl_projections, monkeypatch):
+        import pandas as pd
+
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        env = pd.DataFrame({"week": [5, 5, 6, 6], "team": ["DAL", "PHI", "DAL", "PHI"],
+                            "env_mult": [1.10, 0.90, 1.0, 1.0]})
+        monkeypatch.setattr(cp, "_game_environments", lambda season: env)
+        simulated = []
+        monkeypatch.setattr(cp, "_apply_simulator",
+                            lambda frame, history, week: simulated.append(week))
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 4)
+        monkeypatch.setattr(cp, "_final_week", lambda season: 6)
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+
+        cp.run(db_session, 2025, 5, epochs=1, job=job)
+
+        live = {r.player_id: r.projected_points for r in db_session.query(
+            PlayerProjection).filter(PlayerProjection.season == 2025,
+                                     PlayerProjection.week == 5)}
+        # The published week used to go out matchup-neutral: 15.0 and 12.0.
+        assert live["00-0000001"] == pytest.approx(16.5)
+        assert live["00-0000002"] == pytest.approx(10.8)
+        assert simulated == [5, 6]

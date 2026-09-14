@@ -624,11 +624,20 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
     # depth charts / snap counts for a season.
     loaders = [load_schedules, load_rosters, load_player_stats,
                load_depth_charts, load_snap_counts, load_pbp]
+    # ...but "present" only means "done" for a finished season. The season in
+    # progress gains a week of games every week, and the per-table skip used to
+    # stop at whatever the first in-season run found: 2026 would have loaded week 1
+    # and nothing after, stalling the accuracy record with it. These loaders merge
+    # on their primary keys, so re-running them is safe. PBP appends, so it is not.
+    from api.utils import get_current_nfl_season
+    current = get_current_nfl_season()
+    refresh = {load_schedules, load_rosters, load_player_stats,
+               load_depth_charts, load_snap_counts}
     for season in seasons:
         logger.info("=== Processing season %d ===", season)
         for fn in loaders:
             try:
-                fn(db, season, force=force)
+                fn(db, season, force=force or (season >= current and fn in refresh))
             except Exception as exc:
                 logger.error("Failed %s for %d: %s", fn.__name__, season, exc)
                 db.rollback()
