@@ -711,6 +711,19 @@ export interface PlayerProjectionsResponse {
   data: WeeklyProjection[]
 }
 
+/** One week of the board, every player. */
+export interface WeeklyProjectionsResponse {
+  status: string
+  season: number
+  week: number | null
+  /** Which vintage this is: how many weeks were complete when it was
+   *  computed, or null for the current projection. See the projections job. */
+  as_of_week: number | null
+  count?: number
+  data: WeeklyProjection[]
+  message?: string
+}
+
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {
