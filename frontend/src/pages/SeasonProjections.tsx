@@ -10,6 +10,7 @@ import SeasonProjectionsTable from '../components/SeasonProjectionsTable'
 import WeeklyProjectionsTable from '../components/WeeklyProjectionsTable'
 import PlayerProjectionWeeks from '../components/PlayerProjectionWeeks'
 import PlayerPanel from '../components/PlayerPanel'
+import RefreshProjectionsButton from '../components/RefreshProjectionsButton'
 
 const SEASONS = getAvailableSeasons()
 /** '' is the "all positions" tab. */
@@ -38,7 +39,11 @@ export default function SeasonProjections() {
   // number, and a projection with no football behind it should not look like
   // one that has seen five games.
   const stamp = weekQ.data?.data?.[0]?.computed_at ?? null
-  const computedAt = stamp ? new Date(stamp).toLocaleDateString() : null
+  const computedAt = stamp
+    ? new Date(stamp).toLocaleString(undefined, {
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      })
+    : null
   const stale = !!stamp && new Date(stamp) < new Date(`${season}-09-01`)
 
   const matches = (name: string, team: string | null) => {
@@ -123,6 +128,9 @@ export default function SeasonProjections() {
           className="bg-slate-700 border border-slate-600 text-white placeholder-slate-400 rounded-lg px-3 py-1.5 text-sm w-56"
           aria-label="Search player or team"
         />
+        <div className="ml-auto">
+          <RefreshProjectionsButton />
+        </div>
       </div>
 
       {/* Position tabs */}
@@ -215,9 +223,9 @@ export default function SeasonProjections() {
               <Info size={14} className="shrink-0 mt-0.5" />
               <span>
                 This is the preseason projection for week {week}, not a refreshed one. The job
-                republishes the <span className="font-medium">upcoming</span> week each Wednesday;
-                later weeks keep their preseason number until their turn comes round, so nothing
-                here has seen a snap of this season.
+                republishes the <span className="font-medium">upcoming</span> week on Tuesday and
+                Wednesday nights; later weeks keep their preseason number until their turn comes
+                round, so nothing here has seen a snap of this season.
               </span>
             </div>
           )}

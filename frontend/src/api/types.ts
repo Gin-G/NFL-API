@@ -746,3 +746,39 @@ export interface HealthResponse {
     coaching_analytics: boolean
   }
 }
+
+// ─── Projection refresh ───────────────────────────────────────────────────────
+
+/** Whether the projections job can be started right now. The endpoint is open,
+ *  so a cooldown stands in for auth: one run at a time, then a quiet period. */
+export interface ProjectionRefreshState {
+  status: string
+  can_refresh: boolean
+  reason: string | null
+  running: boolean
+  job_status: string | null
+  last_run_at: string | null
+  retry_after_seconds: number
+  cooldown_minutes: number
+}
+
+export interface ProjectionRefreshStarted {
+  status: string
+  job_name: string
+  message: string
+}
+
+/** Progress of the projections pre-computation job. */
+export interface ProjectionJobStatus {
+  status: string
+  job_id?: number
+  started_at: string | null
+  updated_at: string | null
+  total_entries: number
+  processed_entries: number
+  failed_entries: number
+  pct_complete: number
+  current_season: number | null
+  error_message: string | null
+  message?: string
+}

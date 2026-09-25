@@ -11,9 +11,11 @@ model training happens at request time.
 
 import logging
 import math
+import os
+from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database.models import (AnalyticsJobStatus, PlayerProjection,
@@ -116,7 +118,8 @@ def get_projections_status(db: Session = Depends(get_db)):
         return {"status": "no_job", "message": "No projections job has been run yet."}
     done = (job.processed_entries or 0) + (job.skipped_entries or 0)
     total = job.total_entries or 0
-    pct = round(done / total * 100, 1) if total > 0 else 0.0
+    # Capped: rows-vs-weeks mismatches in older job rows used to report 1500%.
+    pct = round(min(done / total * 100, 100.0), 1) if total > 0 else 0.0
     return {
         "status": job.status,
         "job_id": job.id,
@@ -129,6 +132,89 @@ def get_projections_status(db: Session = Depends(get_db)):
         "current_season": job.current_season,
         "error_message": job.error_message,
     }
+
+
+# A refresh costs a pod and a few minutes, and the endpoint is open, so it is
+# rate limited rather than authenticated: one run at a time, and a quiet period
+# after each. Tune with PROJECTION_REFRESH_COOLDOWN_MINUTES.
+REFRESH_COOLDOWN = timedelta(minutes=int(os.getenv("PROJECTION_REFRESH_COOLDOWN_MINUTES", "15")))
+# A job whose heartbeat stopped this long ago is treated as dead, not running,
+# so a crashed pod cannot block refreshes forever.
+RUN_HEARTBEAT_TIMEOUT = timedelta(hours=2)
+
+
+def _latest_projection_job(db):
+    return (db.query(AnalyticsJobStatus)
+            .filter(AnalyticsJobStatus.job_type == "projections")
+            .order_by(AnalyticsJobStatus.id.desc())
+            .first())
+
+
+def _refresh_state(db, now=None) -> dict:
+    """Whether a refresh can start, and why not when it can't."""
+    now = now or datetime.utcnow()
+    job = _latest_projection_job(db)
+    state = {
+        "can_refresh": True,
+        "reason": None,
+        "running": False,
+        "job_status": job.status if job else None,
+        "last_run_at": None,
+        "retry_after_seconds": 0,
+        "cooldown_minutes": int(REFRESH_COOLDOWN.total_seconds() // 60),
+    }
+    if job is None:
+        return state
+
+    beat = job.updated_at or job.started_at
+    state["last_run_at"] = beat.isoformat() if beat else None
+    if job.status == "running" and beat and now - beat < RUN_HEARTBEAT_TIMEOUT:
+        state.update(can_refresh=False, running=True,
+                     reason="A projections run is already going; watch /projections/status.")
+        return state
+    if job.status != "running" and beat:
+        since = now - beat
+        if since < REFRESH_COOLDOWN:
+            wait = REFRESH_COOLDOWN - since
+            state.update(can_refresh=False,
+                         retry_after_seconds=int(wait.total_seconds()),
+                         reason=(f"Projections were refreshed {int(since.total_seconds() // 60)} "
+                                 f"minutes ago; try again in "
+                                 f"{max(1, int(wait.total_seconds() // 60 + 1))} minutes."))
+    return state
+
+
+@router.get("/refresh")
+def get_refresh_state(db: Session = Depends(get_db)):
+    """Can a refresh start right now — what the button reads to enable itself."""
+    return {"status": "success", **_refresh_state(db)}
+
+
+@router.post("/refresh")
+def refresh_projections(db: Session = Depends(get_db)):
+    """Recompute this week's projections now, in a Kubernetes job.
+
+    For the news that lands between scheduled runs — a Friday injury
+    designation, a depth-chart change — rather than for new football: the run
+    reuses the model already trained for this week (see
+    scripts.compute_projections) and spends its few minutes on the projection.
+    """
+    from .k8s_jobs import JobStartError, start_projection_job
+
+    state = _refresh_state(db)
+    if not state["can_refresh"]:
+        code = 409 if state["running"] else 429
+        raise HTTPException(status_code=code, detail=state["reason"],
+                            headers=({"Retry-After": str(state["retry_after_seconds"])}
+                                     if state["retry_after_seconds"] else None))
+    try:
+        name = start_projection_job()
+    except JobStartError as exc:
+        logger.error("Refresh could not start: %s", exc)
+        raise HTTPException(status_code=503,
+                            detail=f"Could not start the projections job: {exc}")
+    return {"status": "started", "job_name": name,
+            "message": "Recomputing projections; follow /projections/status."}
 
 
 def _pearson(xs, ys) -> Optional[float]:

@@ -178,9 +178,11 @@ class TestComputeRunWritesBothTables:
 
         calls = []
 
+        built = []
+
         class FakeService:
             def __init__(self, **kw):
-                pass
+                built.append(kw)
 
             def project(self, season, week, as_frame=True, **kw):
                 calls.append(kw)
@@ -190,6 +192,7 @@ class TestComputeRunWritesBothTables:
         mod.__version__ = "9.9.9"
         mod.ProjectionService = FakeService
         mod.calls = calls           # every project() call's keyword arguments
+        mod.built = built           # every ProjectionService(...) construction
         ds = types.ModuleType("nfl_projections.dataset")
         # The dataset must REACH the target season, or `use_espn` flips true and
         # run() takes the preseason ESPN-roster path instead of the in-season one.
@@ -356,6 +359,28 @@ class TestComputeRunWritesBothTables:
         assert live["00-0000002"] == pytest.approx(10.8)
         assert simulated == [5, 6]
 
+    def test_run_reuses_a_matching_cache_instead_of_training(
+            self, db_session, stub_nfl_projections, monkeypatch, tmp_path):
+        import sys
+
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 4)
+        monkeypatch.setattr(cp, "_final_week", lambda season: 5)
+        cp._save_model(str(tmp_path), cp._cache_key(2025, 4, None, 1),
+                       TestModelCache.FakeService())
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+
+        cp.run(db_session, 2025, 5, epochs=1, job=job, model_cache=str(tmp_path))
+
+        # The stub service records how it was built: loaded, not trained.
+        (built,) = sys.modules["nfl_projections"].built
+        assert built["model_dir"] and built["quantile_model_dir"]
+        assert "epochs" not in built
+
     def test_incomplete_previous_week_is_refused_before_training(
             self, db_session, stub_nfl_projections, monkeypatch):
         import sys
@@ -512,3 +537,55 @@ class TestTeamsMissingStats:
         monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 0)
         df = pd.DataFrame({"season": [2026], "week": [1], "team": ["SEA"]})
         assert cp._teams_missing_stats(df, 2026, schedule=self._schedule()) == (None, [])
+
+
+class TestModelCache:
+    """Training is ~35 of a run's ~42 minutes, and the model only changes when
+    another week is played — so runs inside one week share one."""
+
+    class FakeModel:
+        def __init__(self, marker):
+            self.marker = marker
+
+        def save(self, directory):
+            import os
+
+            os.makedirs(directory, exist_ok=True)
+            name = "metadata.json" if directory.endswith("mean") else "q_metadata.json"
+            with open(os.path.join(directory, name), "w") as f:
+                f.write(self.marker)
+
+    class FakeService:
+        def __init__(self, marker="m"):
+            outer = TestModelCache
+            self.model = outer.FakeModel(marker)
+            self.quantile_model = outer.FakeModel(marker)
+
+    def test_round_trip(self, tmp_path):
+        from scripts import compute_projections as cp
+
+        key = cp._cache_key(2026, 3, 5, 60)
+        cp._save_model(str(tmp_path), key, self.FakeService())
+        mean_dir, quantile_dir = cp._cached_model(str(tmp_path), key)
+        assert mean_dir and quantile_dir
+
+    def test_another_week_of_football_invalidates_it(self, tmp_path):
+        from scripts import compute_projections as cp
+
+        cp._save_model(str(tmp_path), cp._cache_key(2026, 3, 5, 60), self.FakeService())
+        assert cp._cached_model(str(tmp_path), cp._cache_key(2026, 4, 5, 60)) == (None, None)
+        # ...as does training it differently.
+        assert cp._cached_model(str(tmp_path), cp._cache_key(2026, 3, 1, 60)) == (None, None)
+
+    def test_empty_cache_is_a_miss(self, tmp_path):
+        from scripts import compute_projections as cp
+
+        assert cp._cached_model(str(tmp_path), cp._cache_key(2026, 3, 5, 60)) == (None, None)
+
+    def test_half_written_cache_is_a_miss(self, tmp_path):
+        from scripts import compute_projections as cp
+
+        key = cp._cache_key(2026, 3, 5, 60)
+        cp._save_model(str(tmp_path), key, self.FakeService())
+        (tmp_path / "quantile" / "q_metadata.json").unlink()
+        assert cp._cached_model(str(tmp_path), key) == (None, None)

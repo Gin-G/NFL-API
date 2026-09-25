@@ -98,7 +98,16 @@ spec:
                   pip install --no-cache-dir
                   "nfl-projections @ https://github.com/Gin-G/nfl-data-py/archive/refs/heads/main.tar.gz"
                   && python -m scripts.compute_projections
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /models
               env:
+                # Where the trained model is kept between runs. A run reuses it
+                # when no football has been played since it was trained, which is
+                # what makes the Wednesday run — and POST /projections/refresh —
+                # minutes rather than the better part of an hour.
+                - name: PROJECTION_MODEL_CACHE
+                  value: /models
                 - name: PGUSER
                   valueFrom:
                     secretKeyRef:
@@ -118,3 +127,7 @@ spec:
                 limits:
                   memory: "8Gi"
                   cpu: "3"
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: nfl-api-model-cache

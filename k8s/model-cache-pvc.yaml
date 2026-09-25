@@ -1,0 +1,22 @@
+# Holds the trained projection model between runs.
+#
+# Training five networks is ~35 of the ~42 minutes a run takes, and the model is
+# a function of the games played — so every run inside one week can share one,
+# and a mid-week refresh (POST /projections/refresh) spends its time on the
+# projection instead. compute_projections re-trains by itself once another week
+# is in the books; the manifest in here records which week the model saw.
+#
+# ReadWriteMany (cephfs): a scheduled run and a manual refresh can land on
+# different nodes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfl-api-model-cache
+  namespace: nfl-api
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: rook-cephfs
+  resources:
+    requests:
+      storage: 5Gi

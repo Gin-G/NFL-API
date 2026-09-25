@@ -1,9 +1,12 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from './client'
 import type {
   SeasonProjectionsResponse,
   PlayerProjectionsResponse,
   WeeklyProjectionsResponse,
+  ProjectionJobStatus,
+  ProjectionRefreshStarted,
+  ProjectionRefreshState,
 } from './types'
 
 /**
@@ -71,5 +74,50 @@ export function useWeeklyProjections(
       return data
     },
     staleTime: 1000 * 60 * 30,
+  })
+}
+
+/**
+ * Whether a projections refresh can start now.
+ *
+ * Polled quickly while a run is going (that is how the button follows it) and
+ * lazily otherwise.
+ */
+export function useProjectionRefreshState() {
+  return useQuery({
+    queryKey: ['projectionRefreshState'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<ProjectionRefreshState>('/projections/refresh')
+      return data
+    },
+    refetchInterval: (query) => (query.state.data?.running ? 10_000 : 60_000),
+  })
+}
+
+/** Progress of the running job — only polled while one is running. */
+export function useProjectionJobStatus(enabled: boolean) {
+  return useQuery({
+    queryKey: ['projectionJobStatus'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<ProjectionJobStatus>('/projections/status')
+      return data
+    },
+    enabled,
+    refetchInterval: enabled ? 10_000 : false,
+  })
+}
+
+/** Start a recompute. 409 while one runs, 429 inside the cooldown. */
+export function useStartProjectionRefresh() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const { data } = await apiClient.post<ProjectionRefreshStarted>('/projections/refresh')
+      return data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projectionRefreshState'] })
+      queryClient.invalidateQueries({ queryKey: ['projectionJobStatus'] })
+    },
   })
 }

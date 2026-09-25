@@ -39,7 +39,9 @@ Requires the nfl_projections package (installed from git in the job image):
 """
 
 import argparse
+import json
 import logging
+import os
 import sys
 from datetime import datetime
 
@@ -108,8 +110,75 @@ def _espn_frames(db, week: int):
     return rosters, depth
 
 
+MODEL_CACHE_ENV = "PROJECTION_MODEL_CACHE"
+
+
+def _cache_key(season: int, as_of: int, seeds, epochs: int) -> dict:
+    """What a cached model has to match to be reusable: the same football.
+
+    The model is a function of the training data, which only changes when
+    another week is played — so every run inside one week can share one model,
+    and the extra runs cost a dataset build and a projection rather than 40
+    minutes of training. Seeds and epochs are in the key because a model trained
+    with fewer of either is a different model.
+    """
+    try:
+        import nfl_projections
+
+        version = getattr(nfl_projections, "__version__", "unknown")
+    except ImportError:
+        version = "unknown"      # the API image has no nfl_projections; the job does
+
+    return {
+        "season": season,
+        "as_of_week": as_of,
+        "seeds": seeds,
+        "epochs": epochs,
+        "package_version": version,
+    }
+
+
+def _cached_model(cache_dir: str, key: dict):
+    """``(mean_dir, quantile_dir)`` when the cache holds a model for this exact
+    key, else ``(None, None)``."""
+    try:
+        with open(os.path.join(cache_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return None, None
+    if {k: manifest.get(k) for k in key} != key:
+        return None, None
+    mean_dir = os.path.join(cache_dir, "mean")
+    quantile_dir = os.path.join(cache_dir, "quantile")
+    if not os.path.exists(os.path.join(mean_dir, "metadata.json")):
+        return None, None
+    if not os.path.exists(os.path.join(quantile_dir, "q_metadata.json")):
+        return None, None
+    return mean_dir, quantile_dir
+
+
+def _save_model(cache_dir: str, key: dict, svc) -> None:
+    """Cache the trained models, manifest LAST so a half-written cache is never
+    mistaken for a usable one. Never fatal: a projection run that cannot write
+    its cache is still a good projection run."""
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        manifest_path = os.path.join(cache_dir, "manifest.json")
+        if os.path.exists(manifest_path):
+            os.remove(manifest_path)
+        svc.model.save(os.path.join(cache_dir, "mean"))
+        if svc.quantile_model is not None:
+            svc.quantile_model.save(os.path.join(cache_dir, "quantile"))
+        with open(manifest_path, "w") as f:
+            json.dump({**key, "trained_at": datetime.utcnow().isoformat()}, f, indent=2)
+        logger.info("Cached the trained model in %s", cache_dir)
+    except Exception as exc:
+        logger.warning("Could not cache the trained model (%s)", exc)
+
+
 def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
-        seeds: int = None, overwrite_started: bool = False) -> None:
+        seeds: int = None, overwrite_started: bool = False,
+        model_cache: str = None) -> None:
     from database.models import PlayerProjection
     import nfl_projections
     from nfl_projections import ProjectionService
@@ -132,12 +201,31 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
             logger.error(msg)
             _update_job(db, job, status="failed", error_message=msg)
             return
+    # How much current-season football this projection was allowed to see. Stamped
+    # on every row written below, the axis the vintage archive is keyed on, and
+    # what decides whether a cached model still fits.
+    as_of = _completed_weeks(season)
+
     # The mean model is a seed ensemble (nfl_projections default 5): averaging
     # several seeds is worth ~0.04 MAE and removes the single-seed lottery, at
-    # the cost of training that many networks.
-    logger.info("Training model (mean ensemble x%s + quantile, epochs=%d)...",
-                seeds if seeds else "default", epochs)
-    svc = ProjectionService(dataset=df, quantiles=True, epochs=epochs, n_seeds=seeds)
+    # the cost of training that many networks. Which is why a second run in the
+    # same week reuses the first run's model: no new football has been played,
+    # so it would train an equivalent model to project fresher injuries and
+    # depth charts against.
+    cache_dir = model_cache or os.getenv(MODEL_CACHE_ENV)
+    key = _cache_key(season, as_of, seeds, epochs)
+    mean_dir, quantile_dir = _cached_model(cache_dir, key) if cache_dir else (None, None)
+    if mean_dir:
+        logger.info("Reusing the model already trained for %d through week %d (%s)",
+                    season, as_of, cache_dir)
+        svc = ProjectionService(dataset=df, model_dir=mean_dir,
+                                quantile_model_dir=quantile_dir)
+    else:
+        logger.info("Training model (mean ensemble x%s + quantile, epochs=%d)...",
+                    seeds if seeds else "default", epochs)
+        svc = ProjectionService(dataset=df, quantiles=True, epochs=epochs, n_seeds=seeds)
+        if cache_dir:
+            _save_model(cache_dir, key, svc)
 
     # nflreadpy publishes rosters only through the prior season; for a future season
     # (e.g. 2026 preseason) use the nightly ESPN roster sync + rookie draft-capital prior,
@@ -167,9 +255,6 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         return
     model_version = getattr(nfl_projections, "__version__", "unknown")
 
-    # How much current-season football this projection was allowed to see. Stamped
-    # on every row written below, and the axis the vintage archive is keyed on.
-    as_of = _completed_weeks(season)
     # Teams already playing (or done) keep the projection they went in with. The
     # Wednesday-night run lands after a Wednesday kickoff (week 12's GB@LA), and a
     # row computed after kickoff is one projection_accuracy refuses to score.
@@ -193,7 +278,11 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         # changing a single number the board or the season endpoint already serves.
         last = end_week if end_week is not None else _final_week(season)
         env_all = _game_environments(season)
-        written = archived = 0
+        # Progress is counted in WEEKS, not rows: a run writes one week live and
+        # archives the rest, so counting rows had /projections/status reporting
+        # 1500% complete and gave a progress bar nothing to work with.
+        _update_job(db, job, total_entries=max(last, week) - week + 1, processed_entries=0)
+        written = archived = weeks_done = 0
         for w in range(week, max(last, week) + 1):
             # The upcoming week included: the base is matchup-neutral, and
             # publishing it bare would ignore the Vegas total that is already
@@ -206,12 +295,12 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
             n = _write_week(db, f, season, w, model_version, as_of_week=as_of,
                             live=(w == week), started=started if w == week else ())
             archived += n
+            weeks_done += 1
             if w == week:
                 written = n
             _update_job(db, job, current_coach=f"season {season} week {w}",
-                        processed_entries=archived)
-        _update_job(db, job, status="completed", total_entries=written,
-                    processed_entries=archived)
+                        processed_entries=weeks_done)
+        _update_job(db, job, status="completed", processed_entries=weeks_done)
         logger.info("Published %d projections for %d week %d; archived %d across "
                     "weeks %d-%d as_of week %d (model %s)",
                     written, season, week, archived, week, last, as_of, model_version)
@@ -224,7 +313,8 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
     budgets = _position_budgets(df)
     share_pred = _predict_shares(df, depth, season)
     games_model, prev_games = _fit_games(df, season)
-    total = 0
+    _update_job(db, job, total_entries=(end_week or week) - week + 1, processed_entries=0)
+    total = weeks_done = 0
     for w in range(week, (end_week or week) + 1):
         f = _apply_environment(base, w, env_all)     # per-week env; drops bye teams
         if f is None or f.empty:
@@ -234,9 +324,11 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         _apply_simulator(f, df, w)
         total += _write_week(db, f, season, w, model_version, as_of_week=as_of,
                              started=started if w == week else ())
-        _update_job(db, job, current_coach=f"season {season} week {w}", processed_entries=total)
+        weeks_done += 1
+        _update_job(db, job, current_coach=f"season {season} week {w}",
+                    processed_entries=weeks_done)
         logger.info("week %d: wrote %d projections", w, len(f))
-    _update_job(db, job, status="completed", total_entries=total, processed_entries=total)
+    _update_job(db, job, status="completed", processed_entries=weeks_done)
     logger.info("Wrote %d total projections for %d weeks %d-%d (model %s)",
                 total, season, week, end_week or week, model_version)
 
@@ -665,6 +757,10 @@ def main() -> None:
                              "whole remaining season; pass the same value as "
                              "--week for a single-week run.")
     parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--model-cache", default=None,
+                        help=f"Directory holding the trained model (default: ${MODEL_CACHE_ENV}). "
+                             "A run reuses it when no new football has been played since "
+                             "it was trained, which is what makes a mid-week refresh quick.")
     parser.add_argument("--overwrite-started", action="store_true",
                         help="Also rewrite teams whose game has kicked off (by default "
                              "they keep their pre-game projection; needed to rerun a "
@@ -706,7 +802,8 @@ def main() -> None:
         db.refresh(job)
 
         run(db, season, week, args.epochs, job, end_week=args.end_week,
-            seeds=args.seeds, overwrite_started=args.overwrite_started)
+            seeds=args.seeds, overwrite_started=args.overwrite_started,
+            model_cache=args.model_cache)
 
     except Exception as exc:
         logger.error("Projections job failed: %s", exc, exc_info=True)

@@ -16,6 +16,9 @@ spec:
       labels:
         app: {{ .Values.webapp.name }}
     spec:
+      # Carries the Role that lets POST /projections/refresh start the
+      # projections job (templates/projections-rbac.yaml).
+      serviceAccountName: {{ .Values.webapp.name }}
       containers:
       - name: {{ .Values.webapp.name }}
         image: {{ .Values.webapp.container.image }}
