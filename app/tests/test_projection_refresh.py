@@ -21,6 +21,14 @@ def _clean(db_session):
     yield
 
 
+@pytest.fixture(autouse=True)
+def no_cluster(monkeypatch):
+    """No Kubernetes in tests: nothing is running unless a test says so."""
+    from api import k8s_jobs
+
+    monkeypatch.setattr(k8s_jobs, "active_projection_jobs", lambda *a, **k: [])
+
+
 @pytest.fixture
 def started(monkeypatch):
     """Record job starts instead of talking to Kubernetes."""
@@ -114,3 +122,32 @@ class TestStatusPercent:
             updated_at=datetime.utcnow(), total_entries=592, processed_entries=8880))
         db_session.commit()
         assert client.get("/projections/status").json()["pct_complete"] == 100.0
+
+
+class TestStartRace:
+    """A started job writes its status row minutes later — the window that let a
+    second press start a second run in production."""
+
+    def test_the_placeholder_row_refuses_a_second_press(self, client, started):
+        client.post("/projections/refresh")
+        # The pod exists but has written nothing yet; only the placeholder knows.
+        assert client.post("/projections/refresh").status_code == 409
+        assert len(started) == 1
+
+    def test_kubernetes_alone_refuses_a_second_press(
+            self, client, db_session, started, monkeypatch):
+        from api import k8s_jobs
+
+        # Belt and braces: even with no placeholder — a cron run, say, which the
+        # API never queued — an active Job is enough to refuse.
+        monkeypatch.setattr(k8s_jobs, "active_projection_jobs",
+                            lambda *a, **k: ["nfl-api-projections-29836980"])
+        assert client.post("/projections/refresh").status_code == 409
+        assert started == []
+
+    def test_the_placeholder_says_which_job_it_stands_for(self, client, db_session, started):
+        client.post("/projections/refresh")
+        row = db_session.query(AnalyticsJobStatus).order_by(
+            AnalyticsJobStatus.id.desc()).first()
+        assert row.status == "running"
+        assert "nfl-api-projections-manual-1" in row.current_coach

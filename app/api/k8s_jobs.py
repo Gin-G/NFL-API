@@ -32,6 +32,28 @@ def current_namespace() -> str:
         return os.getenv("POD_NAMESPACE", "nfl-api")
 
 
+def active_projection_jobs(cronjob: str = None, namespace: str = None) -> list:
+    """Names of projection Jobs still running, straight from Kubernetes.
+
+    The database says a run is going only once the pod has installed its
+    dependencies and written a status row, which is minutes after the Job
+    exists. Asking Kubernetes closes that window. An empty list on any failure:
+    this narrows a race, and the caller still has the database to fall back on.
+    """
+    cronjob = cronjob or CRONJOB_NAME
+    namespace = namespace or current_namespace()
+    try:
+        from kubernetes import client, config
+
+        config.load_incluster_config()
+        jobs = client.BatchV1Api().list_namespaced_job(
+            namespace, label_selector=f"app={cronjob}").items
+    except Exception as exc:
+        logger.debug("Could not list projection jobs (%s)", exc)
+        return []
+    return [j.metadata.name for j in jobs if (j.status.active or 0) > 0]
+
+
 def start_projection_job(cronjob: str = None, namespace: str = None) -> str:
     """Create a one-off Job from the projections CronJob; return its name.
 

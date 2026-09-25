@@ -151,7 +151,14 @@ def _latest_projection_job(db):
 
 
 def _refresh_state(db, now=None) -> dict:
-    """Whether a refresh can start, and why not when it can't."""
+    """Whether a refresh can start, and why not when it can't.
+
+    Kubernetes is asked as well as the database: a job that was started two
+    minutes ago is still installing its dependencies and has written no status
+    row yet, and without that check a second press starts a second run.
+    """
+    from .k8s_jobs import active_projection_jobs
+
     now = now or datetime.utcnow()
     job = _latest_projection_job(db)
     state = {
@@ -163,6 +170,10 @@ def _refresh_state(db, now=None) -> dict:
         "retry_after_seconds": 0,
         "cooldown_minutes": int(REFRESH_COOLDOWN.total_seconds() // 60),
     }
+    if active_projection_jobs():
+        state.update(can_refresh=False, running=True,
+                     reason="A projections run is already going; watch /projections/status.")
+        return state
     if job is None:
         return state
 
@@ -209,6 +220,16 @@ def refresh_projections(db: Session = Depends(get_db)):
                                      if state["retry_after_seconds"] else None))
     try:
         name = start_projection_job()
+        # Claim the slot now. The job's own status row is minutes away (it
+        # pip-installs TensorFlow first), and until it lands this placeholder is
+        # what stops a second press starting a second run. compute_projections
+        # marks leftover "running" rows interrupted when it starts, so this row
+        # never outlives the run it stands for.
+        db.add(AnalyticsJobStatus(
+            job_type="projections", status="running", started_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(), current_coach=f"queued: {name}",
+            total_entries=0, processed_entries=0))
+        db.commit()
     except JobStartError as exc:
         logger.error("Refresh could not start: %s", exc)
         raise HTTPException(status_code=503,
