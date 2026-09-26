@@ -84,16 +84,20 @@ def _update_job(db, job, **kwargs):
 
 
 def _espn_frames(db, week: int):
-    """Build (rosters, depth_charts) frames for the Projector from the ESPN roster sync,
+    """Build (rosters, depth_charts) frames for the Projector from the roster sync,
     for seasons nflreadpy hasn't published rosters for yet. Rosters carry gsis player_id
-    (for history lookup); depth carries the real ESPN depth rank (1=starter, 2=backup, ...)
-    so the projection engine applies its depth-role discount (backup QBs, committee RBs)."""
+    (for history lookup); depth carries the real depth rank (1=starter, 2=backup, ...)
+    so the projection engine applies its depth-role discount (backup QBs, committee RBs).
+
+    Only used on the preseason path, where the sync's rows are ESPN's; in season the
+    Projector reads nflverse directly.
+    """
     import pandas as pd
-    from database.models import EspnRoster
-    rows = db.query(EspnRoster).filter(
-        EspnRoster.status == "active",
-        EspnRoster.position.in_(["QB", "RB", "WR", "TE"]),
-        EspnRoster.gsis_id.isnot(None),
+    from database.models import CurrentRoster
+    rows = db.query(CurrentRoster).filter(
+        CurrentRoster.status == "active",
+        CurrentRoster.position.in_(["QB", "RB", "WR", "TE"]),
+        CurrentRoster.gsis_id.isnot(None),
     ).all()
     rosters = pd.DataFrame([{
         "player_id": r.gsis_id, "player_name": r.full_name, "full_name": r.full_name,

@@ -1,8 +1,11 @@
-# Nightly ESPN roster sync.
+# Nightly roster sync.
 #
-# nflreadpy doesn't publish weekly rosters until in-season, so ESPN's live API is our
-# source of truth for current team assignments and transactions. Populates the
-# `espn_roster` table (espn_id mapped to gsis_id), served via GET /rosters/{team}.
+# nflverse's weekly rosters once a season is under way — official, already in the
+# image, no scraping — and ESPN's live API only while nflverse has nothing for the
+# new year, which is the reason this job was ESPN-only to begin with. Depth rank
+# comes from nflverse's latest depth-chart snapshot. Populates `current_roster`
+# (`source` says which upstream), served via GET /rosters/{team}.
+#
 # Uses only nflreadpy (already in the API image) + stdlib — no nfl_projections/TF, so
 # no runtime pip install.
 #
@@ -15,7 +18,7 @@ metadata:
   labels:
     app: nfl-api-roster-sync
 spec:
-  schedule: "0 8 * * *"          # daily 08:00 UTC
+  schedule: "0 8 * * *"          # daily 08:00, cluster local time
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 2
@@ -34,7 +37,7 @@ spec:
               image: docker.io/ncging/nfl-api:latest
               imagePullPolicy: Always
               workingDir: /app
-              command: ["python", "-m", "scripts.sync_espn_rosters"]
+              command: ["python", "-m", "scripts.sync_rosters"]
               env:
                 - name: PGUSER
                   valueFrom:

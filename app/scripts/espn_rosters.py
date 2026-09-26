@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Sync current NFL rosters from ESPN into the `espn_roster` table.
+"""Scrape current rosters from ESPN — the preseason roster source.
 
-nflreadpy doesn't publish weekly rosters until in-season, so ESPN's live API is our
-source of truth for current team assignments and transactions (offseason and in-season).
-Run nightly (see k8s/roster-sync-cronjob.yaml). Each run is a full snapshot: the table is
-replaced, so cuts/trades/signings are reflected. ESPN athlete ids are mapped to gsis_id
-(via nflreadpy's player crosswalk) so these rows join to historical stats and projections.
+nflverse publishes weekly rosters only once a season is under way, so through the
+summer this is the only read on who is on which team. scripts.sync_rosters uses
+it as a fallback and nflverse the rest of the year; this module is the fetching
+half, kept separate so it has no database imports and can be exercised alone.
 
-Usage (from app/):  python -m scripts.sync_espn_rosters
+ESPN athlete ids map to gsis_id through nflreadpy's player crosswalk, so the rows
+join to stats and projections like any other.
 """
 import json
 import logging
@@ -22,7 +22,7 @@ if _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-logger = logging.getLogger("sync_espn_rosters")
+logger = logging.getLogger("espn_rosters")
 
 _BASE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl"
 # ESPN abbreviation -> nflverse abbreviation (for joins to schedules/grades/stats)
@@ -105,13 +105,18 @@ def _iter_players(roster_json):
             yield p, status
 
 
-def sync(db) -> int:
-    from database.models import EspnRoster
+def fetch_espn_rosters():
+    """Roster rows as plain dicts, ready for CurrentRoster(**fields).
+
+    Depth rank comes from each team's depth page, where a cell's column index IS
+    the rank. A team whose page fails to parse still contributes its players,
+    without ranks, rather than taking the whole sync down.
+    """
     esp2gsis = _crosswalk()
     logger.info("crosswalk: %d espn->gsis entries", len(esp2gsis))
 
     teams = _get(f"{_BASE}/teams")["sports"][0]["leagues"][0]["teams"]
-    rows = []
+    out = []
     for t in teams:
         tid = t["team"]["id"]
         abbr = _TEAM_FIX.get(t["team"]["abbreviation"], t["team"]["abbreviation"])
@@ -129,58 +134,20 @@ def sync(db) -> int:
         for p, status in _iter_players(roster):
             espn_id = str(p.get("id"))
             exp = p.get("experience") or {}
-            rows.append(EspnRoster(
-                espn_id=espn_id,
-                gsis_id=esp2gsis.get(espn_id),
-                full_name=p.get("fullName"),
-                position=(p.get("position") or {}).get("abbreviation"),
-                team=abbr,
-                status=status,
-                jersey=str(p.get("jersey")) if p.get("jersey") is not None else None,
-                age=p.get("age"),
-                experience=exp.get("years"),
-                depth_rank=ranks.get(espn_id),
-                updated_at=datetime.utcnow(),
-            ))
+            out.append({
+                "espn_id": espn_id,
+                "gsis_id": esp2gsis.get(espn_id),
+                "full_name": p.get("fullName"),
+                "position": (p.get("position") or {}).get("abbreviation"),
+                "team": abbr,
+                "status": status,
+                "raw_status": status,
+                "jersey": str(p.get("jersey")) if p.get("jersey") is not None else None,
+                "age": p.get("age"),
+                "experience": exp.get("years"),
+                "depth_rank": ranks.get(espn_id),
+                "week": None,
+            })
             n += 1
         logger.info("%s: %d players (%d with depth rank)", abbr, n, len(ranks))
-
-    # Full-snapshot replace so transactions (cuts/trades) are reflected.
-    db.query(EspnRoster).delete()
-    db.bulk_save_objects(rows)
-    db.commit()
-    mapped = sum(1 for r in rows if r.gsis_id)
-    logger.info("Synced %d roster rows (%d mapped to gsis, %.0f%%)",
-                len(rows), mapped, 100 * mapped / max(len(rows), 1))
-    return len(rows)
-
-
-def main():
-    from database.session import engine, SessionLocal
-    from database.models import Base, AnalyticsJobStatus, apply_light_migrations
-    Base.metadata.create_all(engine)
-    apply_light_migrations(engine)
-    db = SessionLocal()
-    job = AnalyticsJobStatus(job_type="roster_sync", status="running",
-                             started_at=datetime.utcnow(), updated_at=datetime.utcnow())
-    db.add(job); db.commit()
-    ok = True
-    try:
-        n = sync(db)
-        job.status = "completed"; job.processed_entries = n
-    except Exception as exc:
-        logger.error("roster sync failed: %s", exc)
-        job.status = "failed"; job.error_message = str(exc)[:500]
-        db.rollback()
-        ok = False
-    finally:
-        job.updated_at = datetime.utcnow()
-        db.merge(job); db.commit()
-        db.close()
-    logger.info("Done.")
-    if not ok:
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+    return out

@@ -3,10 +3,13 @@
 SQLAlchemy ORM models for NFL data.
 """
 
+import logging
 from datetime import datetime
 
 from sqlalchemy import Column, String, Integer, Float, Text, DateTime, UniqueConstraint, Index
 from sqlalchemy.orm import DeclarativeBase
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -415,25 +418,38 @@ class AnalyticsJobStatus(Base):
     error_message     = Column(Text, nullable=True)
 
 
-class EspnRoster(Base):
-    """Current NFL rosters synced nightly from ESPN (the live source for team
-    assignments / transactions that nflreadpy doesn't publish until in-season).
-    espn_id maps to gsis_id so these join to historical stats and projections."""
-    __tablename__ = "espn_roster"
+class CurrentRoster(Base):
+    """Who is on which team right now, replaced by every roster sync.
 
-    espn_id     = Column(String, primary_key=True)
+    nflverse's weekly rosters once the season is under way, ESPN's live API
+    before it exists for the new year (`source` says which). A cache of an
+    upstream snapshot, never the system of record — so the sync rebuilds it
+    wholesale and `updated_at` is published, since a caller weighing it against
+    other sources should be able to age it rather than assume it is current.
+    """
+    __tablename__ = "current_roster"
+
+    # Surrogate key: the table is rebuilt each run, and neither natural id is
+    # dependably present — nflverse carries no espn_id for some veterans, ESPN no
+    # gsis_id for some rookies.
+    id          = Column(Integer, primary_key=True, autoincrement=True)
     gsis_id     = Column(String, index=True)   # nflverse id (for joins); may be null
+    espn_id     = Column(String, index=True)   # may be null
     full_name   = Column(String)
     position    = Column(String, index=True)
     team        = Column(String, index=True)   # standard nflverse abbreviation
-    status      = Column(String)               # active | injured_reserve | practice_squad | suspended
+    # active | injured_reserve | practice_squad | suspended | exempt | cut | retired
+    status      = Column(String, index=True)
+    raw_status  = Column(String)               # the source's own code, e.g. nflverse ACT/INA/RES
     jersey      = Column(String)
     age         = Column(Integer, nullable=True)
     experience  = Column(Integer, nullable=True)
-    depth_rank  = Column(Integer, nullable=True)  # 1=starter, 2=backup, ... from ESPN depth chart
+    depth_rank  = Column(Integer, nullable=True)  # 1=starter, 2=backup, ... latest depth chart
+    source      = Column(String)               # nflverse | espn
+    week        = Column(Integer, nullable=True)  # the roster week nflverse published
     updated_at  = Column(DateTime, default=datetime.utcnow)
 
-    __table_args__ = (Index("ix_espn_roster_team_pos", "team", "position"),)
+    __table_args__ = (Index("ix_current_roster_team_pos", "team", "position"),)
 
 
 def apply_light_migrations(engine) -> None:
@@ -443,8 +459,17 @@ def apply_light_migrations(engine) -> None:
     ``ADD COLUMN <name> <type>`` form is supported by both SQLite and Postgres."""
     from sqlalchemy import inspect, text
 
-    wanted = {("espn_roster", "depth_rank"): "INTEGER",
-              ("player_projections", "exp_games"): "FLOAT"}
+    # espn_roster became current_roster when nflverse took over as the source: a
+    # rebuilt-nightly cache with a different primary key, so it is dropped rather
+    # than migrated, and the next sync fills the new table.
+    with engine.begin() as conn:
+        try:
+            if inspect(engine).has_table("espn_roster"):
+                conn.execute(text("DROP TABLE espn_roster"))
+        except Exception as exc:                       # pragma: no cover - best effort
+            logger.warning("Could not drop the old espn_roster table: %s", exc)
+
+    wanted = {("player_projections", "exp_games"): "FLOAT"}
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
     for (table, col), coltype in wanted.items():
