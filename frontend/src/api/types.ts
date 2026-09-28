@@ -756,6 +756,8 @@ export interface ProjectionRefreshState {
   can_refresh: boolean
   reason: string | null
   running: boolean
+  /** Job created but nothing has started it — the cluster has no room yet. */
+  queued: boolean
   job_status: string | null
   last_run_at: string | null
   retry_after_seconds: number

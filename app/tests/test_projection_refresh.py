@@ -140,8 +140,9 @@ class TestStartRace:
 
         # Belt and braces: even with no placeholder — a cron run, say, which the
         # API never queued — an active Job is enough to refuse.
-        monkeypatch.setattr(k8s_jobs, "active_projection_jobs",
-                            lambda *a, **k: ["nfl-api-projections-29836980"])
+        monkeypatch.setattr(
+            k8s_jobs, "active_projection_jobs",
+            lambda *a, **k: [{"name": "nfl-api-projections-29836980", "ready": True}])
         assert client.post("/projections/refresh").status_code == 409
         assert started == []
 
@@ -151,3 +152,15 @@ class TestStartRace:
             AnalyticsJobStatus.id.desc()).first()
         assert row.status == "running"
         assert "nfl-api-projections-manual-1" in row.current_coach
+
+    def test_a_job_with_nowhere_to_run_says_queued(self, client, monkeypatch, started):
+        from api import k8s_jobs
+
+        # 2026-09-27: a refresh sat Pending for 37 hours while the cluster had no
+        # room, and the dashboard showed "Recomputing... 0%" the whole time.
+        monkeypatch.setattr(
+            k8s_jobs, "active_projection_jobs",
+            lambda *a, **k: [{"name": "nfl-api-projections-manual-1", "ready": False}])
+        body = client.get("/projections/refresh").json()
+        assert (body["running"], body["queued"]) == (True, True)
+        assert "waiting for room" in body["reason"]

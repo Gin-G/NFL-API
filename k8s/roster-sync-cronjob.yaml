@@ -25,6 +25,10 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
+      # 1 h: the sync itself takes seconds, so this only fires for a pod the
+      # scheduler cannot place. concurrencyPolicy Forbid means one stuck job
+      # blocks every night after it — one sat Pending for 26 hours in September.
+      activeDeadlineSeconds: 3600
       ttlSecondsAfterFinished: 86400
       template:
         metadata:

@@ -33,12 +33,16 @@ def current_namespace() -> str:
 
 
 def active_projection_jobs(cronjob: str = None, namespace: str = None) -> list:
-    """Names of projection Jobs still running, straight from Kubernetes.
+    """Projection Jobs that have not finished, as ``{"name", "ready"}``.
 
     The database says a run is going only once the pod has installed its
     dependencies and written a status row, which is minutes after the Job
-    exists. Asking Kubernetes closes that window. An empty list on any failure:
-    this narrows a race, and the caller still has the database to fall back on.
+    exists. Asking Kubernetes closes that window.
+
+    ``ready`` separates a pod doing the work from one the scheduler has nowhere
+    to put: this cluster ran out of room for 37 hours in September and a queued
+    refresh looked, from the dashboard, exactly like a running one. An empty
+    list on any failure — the caller still has the database to fall back on.
     """
     cronjob = cronjob or CRONJOB_NAME
     namespace = namespace or current_namespace()
@@ -51,7 +55,15 @@ def active_projection_jobs(cronjob: str = None, namespace: str = None) -> list:
     except Exception as exc:
         logger.debug("Could not list projection jobs (%s)", exc)
         return []
-    return [j.metadata.name for j in jobs if (j.status.active or 0) > 0]
+    out = []
+    for j in jobs:
+        if (j.status.active or 0) <= 0:
+            continue
+        ready = j.status.ready
+        # `ready` is None on clusters that do not report it; assume it is running
+        # rather than claim a queue that may not exist.
+        out.append({"name": j.metadata.name, "ready": True if ready is None else ready > 0})
+    return out
 
 
 def start_projection_job(cronjob: str = None, namespace: str = None) -> str:

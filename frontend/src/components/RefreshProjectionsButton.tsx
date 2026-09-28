@@ -40,12 +40,17 @@ export default function RefreshProjectionsButton() {
   }, [running, queryClient])
 
   const failed = stateQ.data?.job_status === 'failed'
+  const queued = stateQ.data?.queued ?? false
   const pct = statusQ.data?.pct_complete ?? 0
   const disabled = start.isPending || !(stateQ.data?.can_refresh ?? false)
   const startError = start.error as { response?: { data?: { detail?: string } } } | null
-  const message = running
-    ? `Recomputing… ${Math.round(pct)}%`
-    : startError?.response?.data?.detail ?? stateQ.data?.reason
+  // Queued is not running: the job exists but the cluster has nowhere to put it,
+  // and showing progress for that reads as work happening when none is.
+  const message = queued
+    ? 'Queued — waiting for room on the cluster'
+    : running
+      ? `Recomputing… ${Math.round(pct)}%`
+      : startError?.response?.data?.detail ?? stateQ.data?.reason
 
   return (
     <div className="flex items-center gap-2">
@@ -59,8 +64,8 @@ export default function RefreshProjectionsButton() {
             : 'bg-brand-green text-white hover:brightness-110'
         }`}
       >
-        <RefreshCw size={14} className={running ? 'animate-spin' : undefined} />
-        {running ? 'Recomputing' : 'Refresh projections'}
+        <RefreshCw size={14} className={running && !queued ? 'animate-spin' : undefined} />
+        {queued ? 'Queued' : running ? 'Recomputing' : 'Refresh projections'}
       </button>
       {message && (
         <span

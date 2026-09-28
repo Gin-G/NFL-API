@@ -165,14 +165,20 @@ def _refresh_state(db, now=None) -> dict:
         "can_refresh": True,
         "reason": None,
         "running": False,
+        "queued": False,
         "job_status": job.status if job else None,
         "last_run_at": None,
         "retry_after_seconds": 0,
         "cooldown_minutes": int(REFRESH_COOLDOWN.total_seconds() // 60),
     }
-    if active_projection_jobs():
-        state.update(can_refresh=False, running=True,
-                     reason="A projections run is already going; watch /projections/status.")
+    active = active_projection_jobs()
+    if active:
+        queued = not any(j["ready"] for j in active)
+        state.update(
+            can_refresh=False, running=True, queued=queued,
+            reason=("A projections run is queued, waiting for room on the cluster."
+                    if queued
+                    else "A projections run is already going; watch /projections/status."))
         return state
     if job is None:
         return state
