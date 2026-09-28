@@ -589,3 +589,45 @@ class TestModelCache:
         cp._save_model(str(tmp_path), key, self.FakeService())
         (tmp_path / "quantile" / "q_metadata.json").unlink()
         assert cp._cached_model(str(tmp_path), key) == (None, None)
+
+
+class TestCompletedWeeks:
+    """A week is complete when its last game has been PLAYED.
+
+    Reading `gameday` alone put every game at midnight, so a week with a Monday
+    night game counted as complete from that morning: the archive was stamped
+    with football that had not happened, and a cached model was thrown away a
+    day early (2026-09-28, week 3).
+    """
+
+    @staticmethod
+    def _schedule():
+        import pandas as pd
+
+        return pd.DataFrame({
+            "season": [2026] * 5,
+            "week": [2, 2, 3, 3, 3],
+            "game_type": ["REG"] * 5,
+            "gameday": ["2026-09-17", "2026-09-21", "2026-09-24", "2026-09-27", "2026-09-28"],
+            "gametime": ["20:15", "20:15", "20:15", "13:00", "20:15"],
+        })
+
+    def _weeks(self, when):
+        from scripts import compute_projections as cp
+
+        return cp._completed_weeks(2026, when=when, schedule=self._schedule())
+
+    def test_monday_morning_is_not_the_end_of_the_week(self):
+        # 10:00 UTC on the day of week 3's Monday nighter: week 2 is done, 3 is not.
+        assert self._weeks("2026-09-28T10:00:00Z") == 2
+
+    def test_the_week_closes_after_the_last_game_is_played(self):
+        # Kickoff 20:15 ET Monday = 00:15 UTC Tuesday; done a few hours later.
+        assert self._weeks("2026-09-29T02:00:00Z") == 2
+        assert self._weeks("2026-09-29T05:00:00Z") == 3
+
+    def test_a_thursday_game_does_not_close_its_week(self):
+        assert self._weeks("2026-09-25T12:00:00Z") == 2
+
+    def test_before_any_football(self):
+        assert self._weeks("2026-09-01T12:00:00Z") == 0

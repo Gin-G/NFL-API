@@ -420,31 +420,57 @@ def _final_week(season: int) -> int:
         return 18
 
 
-def _completed_weeks(season: int, when=None) -> int:
+GAME_LENGTH = 4   # hours from kickoff to a final score, generously
+
+
+def _kickoff_times(schedule, season: int):
+    """Kickoff instants (UTC) for a season's regular-season games.
+
+    nflverse dates a game in `gameday` and times it in `gametime`, US Eastern. A
+    missing time counts as midnight — treating a game as earlier than it is,
+    which is the safe direction for "has this kicked off".
+    """
+    import pandas as pd
+
+    games = schedule[(schedule["season"] == season) & (schedule["game_type"] == "REG")].copy()
+    kick = pd.to_datetime(games["gameday"].astype(str) + " "
+                          + games["gametime"].fillna("00:00").astype(str), errors="coerce")
+    games["kick"] = (kick.dt.tz_localize("America/New_York", ambiguous="NaT", nonexistent="NaT")
+                     .dt.tz_convert("UTC"))
+    return games
+
+
+def _load_schedule(season: int):
+    import nflreadpy as nfl
+
+    sched = nfl.load_schedules(seasons=[season])
+    return sched.to_pandas() if hasattr(sched, "to_pandas") else sched
+
+
+def _completed_weeks(season: int, when=None, schedule=None) -> int:
     """Completed regular-season weeks of `season` as of `when` (default now).
 
     This is the `as_of_week` stamp: the amount of current-season football the
-    projection was allowed to learn from. A week counts as complete once its
-    LAST game has kicked off plus a few hours, so a Wednesday run sees the
-    Monday nighter that just finished. Returns 0 preseason, and 0 on any error —
-    understating what the model knew is the safe direction for an archive whose
-    whole purpose is comparing vintages.
+    projection was allowed to learn from. A week is complete once its LAST game
+    has been played, so a Tuesday-night run sees the Monday nighter.
+
+    The times matter. Reading `gameday` alone put every game at midnight, which
+    marked a week complete on the MORNING of its Monday night game: it stamped
+    the archive with football that had not happened, and retrained a model whose
+    cached copy was still perfectly good. Returns 0 preseason, and 0 on any
+    error — understating what the model knew is the safe direction for an
+    archive whose whole purpose is comparing vintages.
     """
     try:
-        import nflreadpy as nfl
         import pandas as pd
 
-        sched = nfl.load_schedules(seasons=[season])
-        sched = sched.to_pandas() if hasattr(sched, "to_pandas") else sched
-        sched = sched[sched["game_type"] == "REG"].copy()
-        sched["kick"] = pd.to_datetime(sched["gameday"], errors="coerce")
-        cutoff = (pd.Timestamp(when) if when is not None
-                  else pd.Timestamp.now()) - pd.Timedelta(hours=6)
-        # A week is complete once its LAST game is in the books, so take the
-        # latest kickoff per week and count the weeks entirely behind us. Using
-        # the max (not the min) is what stops a Thursday game from marking the
-        # whole week done.
-        last = sched.groupby("week")["kick"].max().dropna()
+        games = _kickoff_times(schedule if schedule is not None else _load_schedule(season), season)
+        now = pd.Timestamp(when) if when is not None else pd.Timestamp.now(tz="UTC")
+        now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+        cutoff = now - pd.Timedelta(hours=GAME_LENGTH)
+        # The LAST game of a week decides it, which is what stops a Thursday
+        # nighter from marking the whole week done.
+        last = games.groupby("week")["kick"].max().dropna()
         complete = [int(w) for w, k in last.items() if k < cutoff]
         return max(complete) if complete else 0
     except Exception as exc:
@@ -462,21 +488,11 @@ def _kicked_off_teams(season: int, week: int, now=None, schedule=None) -> set:
     import pandas as pd
 
     try:
-        if schedule is None:
-            import nflreadpy as nfl
-
-            schedule = nfl.load_schedules(seasons=[season])
-            schedule = schedule.to_pandas() if hasattr(schedule, "to_pandas") else schedule
-        games = schedule[(schedule["season"] == season) & (schedule["week"] == week)
-                         & (schedule["game_type"] == "REG")]
-        kick = pd.to_datetime(games["gameday"].astype(str) + " "
-                              + games["gametime"].fillna("00:00").astype(str),
-                              errors="coerce")
-        kick = kick.dt.tz_localize("America/New_York", ambiguous="NaT",
-                                   nonexistent="NaT").dt.tz_convert("UTC")
+        games = _kickoff_times(schedule if schedule is not None else _load_schedule(season), season)
+        games = games[games["week"] == week]
         now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
         now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
-        begun = games[kick.notna() & (kick <= now)]
+        begun = games[games["kick"].notna() & (games["kick"] <= now)]
     except Exception as exc:
         logger.warning("Could not check week %d kickoffs (%s); overwriting all teams",
                        week, exc)

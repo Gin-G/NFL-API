@@ -83,9 +83,17 @@ spec:
             app: nfl-api-projections
         spec:
           restartPolicy: Never
-          # No nodeSelector: with ceph storage the job is node-independent, so let
-          # the scheduler pick a node with memory + pod headroom (gingmachine is at
-          # its pod cap; gingworker is memory-constrained).
+          # TensorFlow needs AVX, and gingmachine's CPU does not have it: a run
+          # scheduled there dies with "Illegal instruction (core dumped)" the
+          # moment training starts (2026-09-28). Nodes that can run it are
+          # labelled `cpu-avx=true`:
+          #   kubectl label node <node> cpu-avx=true
+          # That leaves two eligible nodes, so a run can wait for room —
+          # activeDeadlineSeconds above decides how long before it gives up, and
+          # GET /projections/refresh reports the wait as queued rather than
+          # running.
+          nodeSelector:
+            cpu-avx: "true"
           containers:
             - name: projections
               image: docker.io/ncging/nfl-api:latest
