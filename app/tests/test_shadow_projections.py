@@ -293,3 +293,42 @@ class TestPackageWindowFallback:
 
         monkeypatch.setitem(sys.modules, "nfl_projections", types.ModuleType("nfl_projections"))
         assert cp._package_min_season() == cp.FALLBACK_MIN_SEASON == 2020
+
+
+class TestStatusIsAboutTheBoard:
+    def test_the_job_completes_before_the_shadow_runs(self, db_session, fake_package,
+                                                      monkeypatch):
+        """The shadow trains for another half hour and publishes nothing, so a
+        status of "running" while it works tells board consumers the wrong thing
+        (seen live on 2026-10-07: the board was ready at 16 minutes, the endpoint
+        said running for 35)."""
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        order = []
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 4)
+        monkeypatch.setattr(cp, "_final_week", lambda season: 5)
+        monkeypatch.setattr(cp, "_kicked_off_teams", lambda season, week: set())
+        monkeypatch.setattr(cp, "_run_shadow",
+                            lambda *a, **k: order.append("shadow") or 0)
+        ds = types.ModuleType("nfl_projections.dataset")
+        ds.build_dataset = lambda output_path=None: pd.DataFrame(
+            {"season": [2025, 2026, 2026], "week": [1, 1, 2]})
+        fake_package.dataset = ds
+        monkeypatch.setitem(sys.modules, "nfl_projections.dataset", ds)
+
+        real_update = cp._update_job
+
+        def watched(db, job, **kw):
+            if kw.get("status") == "completed":
+                order.append("completed")
+            return real_update(db, job, **kw)
+
+        monkeypatch.setattr(cp, "_update_job", watched)
+
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+        cp.run(db_session, 2026, 5, epochs=1, job=job, shadow_min_season=2020)
+
+        assert order == ["completed", "shadow"]

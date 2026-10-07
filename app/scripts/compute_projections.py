@@ -364,15 +364,19 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
                 written = n
             _update_job(db, job, current_coach=f"season {season} week {w}",
                         processed_entries=weeks_done)
+        # The board is finished HERE. The shadow model publishes nothing, so
+        # completing the job first keeps /projections/status (and the dashboard
+        # button reading it) about the board rather than about an experiment
+        # that runs for another half hour behind it.
+        _update_job(db, job, status="completed", processed_entries=weeks_done)
+        logger.info("Published %d projections for %d week %d; archived %d across "
+                    "weeks %d-%d as_of week %d (model %s)",
+                    written, season, week, archived, week, last, as_of, model_version)
         if shadow_min_season and shadow_min_season != live_min_season:
             _run_shadow(db, df, season, week, model_version,
                         min_season=shadow_min_season, seeds=seeds, epochs=epochs,
                         proj_kwargs=proj_kwargs, env_all=env_all, cache_dir=cache_dir,
                         as_of=as_of, started=started)
-        _update_job(db, job, status="completed", processed_entries=weeks_done)
-        logger.info("Published %d projections for %d week %d; archived %d across "
-                    "weeks %d-%d as_of week %d (model %s)",
-                    written, season, week, archived, week, last, as_of, model_version)
         return
 
     # Future-season path: the base projection is matchup-neutral (same every week for a
@@ -397,14 +401,14 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         _update_job(db, job, current_coach=f"season {season} week {w}",
                     processed_entries=weeks_done)
         logger.info("week %d: wrote %d projections", w, len(f))
+    _update_job(db, job, status="completed", processed_entries=weeks_done)
+    logger.info("Wrote %d total projections for %d weeks %d-%d (model %s)",
+                total, season, week, end_week or week, model_version)
     if shadow_min_season and shadow_min_season != live_min_season:
         _run_shadow(db, df, season, week, model_version,
                     min_season=shadow_min_season, seeds=seeds, epochs=epochs,
                     proj_kwargs=proj_kwargs, env_all=env_all, cache_dir=cache_dir,
                     as_of=as_of, started=started)
-    _update_job(db, job, status="completed", processed_entries=weeks_done)
-    logger.info("Wrote %d total projections for %d weeks %d-%d (model %s)",
-                total, season, week, end_week or week, model_version)
 
 
 def _run_shadow(db, df, season: int, week: int, model_version: str, *,
