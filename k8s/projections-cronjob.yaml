@@ -35,6 +35,14 @@
 #
 # Pass --end-week to limit the horizon (e.g. --week 5 --end-week 5 restores the
 # old single-week behaviour).
+#
+# Each run also trains a SHADOW model on a shallower window (last season onward,
+# --shadow-min-season; 0 turns it off) and projects the upcoming week with it into
+# shadow_projections. Published nowhere: it is graded against the live model on
+# the week itself via GET /projections/shadow/accuracy, because EXPERIMENTS #26
+# and #27 could only ask "would less history be better" of finished seasons and
+# liked the shallow window by a margin too small to ship on. Costs ~7 minutes of
+# training on top of the run, and its own slot in the model cache.
 apiVersion: batch/v1
 kind: CronJob
 metadata:

@@ -117,7 +117,17 @@ def _espn_frames(db, week: int):
 MODEL_CACHE_ENV = "PROJECTION_MODEL_CACHE"
 
 
-def _cache_key(season: int, as_of: int, seeds, epochs: int) -> dict:
+def _production_min_season() -> int:
+    """The training window the live model uses (nfl_projections' own default)."""
+    try:
+        from nfl_projections import config as nflp_config
+
+        return int(nflp_config.TRAINING_MIN_SEASON)
+    except Exception:
+        return 0
+
+
+def _cache_key(season: int, as_of: int, seeds, epochs: int, min_season=None) -> dict:
     """What a cached model has to match to be reusable: the same football.
 
     The model is a function of the training data, which only changes when
@@ -138,6 +148,7 @@ def _cache_key(season: int, as_of: int, seeds, epochs: int) -> dict:
         "as_of_week": as_of,
         "seeds": seeds,
         "epochs": epochs,
+        "min_season": min_season,
         "package_version": version,
     }
 
@@ -182,7 +193,7 @@ def _save_model(cache_dir: str, key: dict, svc) -> None:
 
 def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         seeds: int = None, overwrite_started: bool = False,
-        model_cache: str = None) -> None:
+        model_cache: str = None, shadow_min_season: int = None) -> None:
     from database.models import PlayerProjection
     import nfl_projections
     from nfl_projections import ProjectionService
@@ -217,7 +228,8 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
     # so it would train an equivalent model to project fresher injuries and
     # depth charts against.
     cache_dir = model_cache or os.getenv(MODEL_CACHE_ENV)
-    key = _cache_key(season, as_of, seeds, epochs)
+    production_min_season = _production_min_season()
+    key = _cache_key(season, as_of, seeds, epochs, min_season=production_min_season)
     mean_dir, quantile_dir = _cached_model(cache_dir, key) if cache_dir else (None, None)
     if mean_dir:
         logger.info("Reusing the model already trained for %d through week %d (%s)",
@@ -304,6 +316,11 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
                 written = n
             _update_job(db, job, current_coach=f"season {season} week {w}",
                         processed_entries=weeks_done)
+        if shadow_min_season:
+            _run_shadow(db, df, season, week, model_version,
+                        min_season=shadow_min_season, seeds=seeds, epochs=epochs,
+                        proj_kwargs=proj_kwargs, env_all=env_all, cache_dir=cache_dir,
+                        as_of=as_of, started=started)
         _update_job(db, job, status="completed", processed_entries=weeks_done)
         logger.info("Published %d projections for %d week %d; archived %d across "
                     "weeks %d-%d as_of week %d (model %s)",
@@ -332,9 +349,84 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         _update_job(db, job, current_coach=f"season {season} week {w}",
                     processed_entries=weeks_done)
         logger.info("week %d: wrote %d projections", w, len(f))
+    if shadow_min_season:
+        _run_shadow(db, df, season, week, model_version,
+                    min_season=shadow_min_season, seeds=seeds, epochs=epochs,
+                    proj_kwargs=proj_kwargs, env_all=env_all, cache_dir=cache_dir,
+                    as_of=as_of, started=started)
     _update_job(db, job, status="completed", processed_entries=weeks_done)
     logger.info("Wrote %d total projections for %d weeks %d-%d (model %s)",
                 total, season, week, end_week or week, model_version)
+
+
+def _run_shadow(db, df, season: int, week: int, model_version: str, *,
+                min_season: int, seeds, epochs: int, proj_kwargs: dict,
+                env_all, cache_dir: str, as_of: int, started) -> int:
+    """Train a challenger on a shallower window, project the same week, park the
+    rows in `shadow_projections`.
+
+    Published nowhere. It exists so "would less history have been better" is
+    settled on football nobody had seen, the same way the board itself is
+    judged — EXPERIMENTS #26/#27 could only ask it of finished seasons. Same
+    pipeline as the live projection (same roster/injury inputs, same game
+    environment) so the only difference left is the training window.
+
+    Quantiles and the simulator are skipped: the comparison is of the point
+    projection, and the simulator is most of the run's remaining time.
+    """
+    from nfl_projections import ProjectionService
+    from database.models import ShadowProjection
+
+    variant = f"min_season_{min_season}"
+    logger.info("Shadow run %s: training on %d onward...", variant, min_season)
+    try:
+        key = _cache_key(season, as_of, seeds, epochs, min_season=min_season)
+        shadow_cache = os.path.join(cache_dir, variant) if cache_dir else None
+        mean_dir, _ = _cached_model(shadow_cache, key) if shadow_cache else (None, None)
+        if mean_dir:
+            logger.info("Reusing the cached %s model", variant)
+            svc = ProjectionService(dataset=df, model_dir=mean_dir)
+        else:
+            svc = ProjectionService(dataset=df, quantiles=False, epochs=epochs,
+                                    n_seeds=seeds, min_season=min_season)
+            if shadow_cache:
+                _save_model(shadow_cache, key, svc)
+        frame = svc.project(season, week, as_frame=True, **proj_kwargs)
+        if frame is None or getattr(frame, "empty", False):
+            logger.warning("Shadow run %s produced nothing", variant)
+            return 0
+        frame = _apply_environment(frame, week, env_all)
+    except Exception as exc:
+        # A challenger is never worth failing the real projection over.
+        logger.warning("Shadow run %s failed (%s); the live projection stands", variant, exc)
+        return 0
+
+    config_json = json.dumps({"min_season": min_season, "seeds": seeds,
+                              "epochs": epochs, "as_of_week": as_of})
+    locked = set(started or ())
+    db.query(ShadowProjection).filter(
+        ShadowProjection.season == season, ShadowProjection.week == week,
+        ShadowProjection.variant == variant).delete(synchronize_session=False)
+    written = 0
+    for _, r in frame.iterrows():
+        pid = str(r.get("player_id") or "").strip()
+        if not pid or str(r.get("team") or "") in locked:
+            continue
+        db.add(ShadowProjection(
+            season=season, week=week, player_id=pid, variant=variant,
+            player_name=str(r.get("player_name") or ""),
+            position=str(r.get("position") or ""),
+            team=str(r.get("team") or ""),
+            projected_points=_f(r.get("fanduel_fantasy_points")),
+            floor=_f(r.get("floor")), ceiling=_f(r.get("ceiling")),
+            prediction_type=str(r.get("prediction_type") or ""),
+            model_version=model_version, config_json=config_json,
+            computed_at=datetime.utcnow(),
+        ))
+        written += 1
+    db.commit()
+    logger.info("Shadow run %s: %d projections recorded for week %d", variant, written, week)
+    return written
 
 
 def _write_week(db, frame, season: int, week: int, model_version: str,
@@ -777,6 +869,11 @@ def main() -> None:
                              "whole remaining season; pass the same value as "
                              "--week for a single-week run.")
     parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--shadow-min-season", type=int, default=None,
+                        help="Train a challenger on this season onward and record it in "
+                             "shadow_projections, to be graded against the live model on "
+                             "the week itself (default: last season, i.e. the shallow "
+                             "window EXPERIMENTS #27 liked). 0 turns it off.")
     parser.add_argument("--model-cache", default=None,
                         help=f"Directory holding the trained model (default: ${MODEL_CACHE_ENV}). "
                              "A run reuses it when no new football has been played since "
@@ -823,7 +920,9 @@ def main() -> None:
 
         run(db, season, week, args.epochs, job, end_week=args.end_week,
             seeds=args.seeds, overwrite_started=args.overwrite_started,
-            model_cache=args.model_cache)
+            model_cache=args.model_cache,
+            shadow_min_season=(season - 1 if args.shadow_min_season is None
+                               else args.shadow_min_season or None))
 
     except Exception as exc:
         logger.error("Projections job failed: %s", exc, exc_info=True)

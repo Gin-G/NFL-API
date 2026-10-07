@@ -354,6 +354,44 @@ class PlayerProjectionVintage(Base):
     )
 
 
+class ShadowProjection(Base):
+    """A projection from an ALTERNATIVE model, published nowhere, kept to be
+    graded against the live one on the same week.
+
+    The board is settled by prospective accuracy rather than by backtests
+    (projection_accuracy), and a backtest cannot answer whether a different
+    training window would have done better on football nobody had seen. So the
+    weekly job trains the challenger too, projects the same week with the same
+    pipeline, and parks the rows here. Nothing reads them for the board; the
+    comparison is a join against projection_accuracy, which already holds the
+    frozen actuals for exactly those player-weeks.
+
+    `variant` names the challenger — "min_season_2025" for a model trained on
+    last season and this one — so several can run at once, and `config_json`
+    records what it was so a result stays interpretable after the code moves on.
+    """
+    __tablename__ = "shadow_projections"
+
+    season           = Column(Integer, primary_key=True)
+    week             = Column(Integer, primary_key=True)
+    player_id        = Column(String,  primary_key=True)
+    variant          = Column(String,  primary_key=True)
+    player_name      = Column(String)
+    position         = Column(String)
+    team             = Column(String)
+    projected_points = Column(Float)
+    floor            = Column(Float)
+    ceiling          = Column(Float)
+    prediction_type  = Column(String)
+    model_version    = Column(String)
+    config_json      = Column(Text)        # {"min_season": 2025, "seeds": 5, ...}
+    computed_at      = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_shadow_variant", "season", "variant", "week"),
+    )
+
+
 class ProjectionAccuracy(Base):
     """A projection scored against what actually happened — the prospective,
     truly out-of-sample accuracy record, accruing one week at a time.

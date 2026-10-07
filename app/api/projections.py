@@ -19,7 +19,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database.models import (AnalyticsJobStatus, PlayerProjection,
-                             PlayerProjectionVintage, ProjectionAccuracy)
+                             PlayerProjectionVintage, ProjectionAccuracy,
+                             ShadowProjection)
 from database.session import get_db
 from .utils import _orm_to_dict, get_current_nfl_season
 
@@ -242,6 +243,81 @@ def refresh_projections(db: Session = Depends(get_db)):
                             detail=f"Could not start the projections job: {exc}")
     return {"status": "started", "job_name": name,
             "message": "Recomputing projections; follow /projections/status."}
+
+
+@router.get("/shadow/accuracy")
+def get_shadow_accuracy(
+    season: Optional[int] = Query(None, description="Season (default: current)"),
+    variant: Optional[str] = Query(None, description="One challenger, e.g. min_season_2025"),
+    db: Session = Depends(get_db),
+):
+    """Live model vs each challenger, on football neither had seen.
+
+    EXPERIMENTS #26 and #27 could only ask "would a different training window
+    have been better" of finished seasons. The weekly job now also projects each
+    upcoming week with a challenger (shadow_projections), and this grades both
+    against the actuals already frozen in projection_accuracy — joined on
+    player-week, so the two are scored on exactly the same players and the same
+    stat lines, which is the whole point.
+
+    `delta` is positive when the challenger is WORSE. Read it the way the ledger
+    reads MAE: a few hundredths over a couple of weeks is noise.
+    """
+    season = season or get_current_nfl_season()
+
+    scored = db.query(ProjectionAccuracy).filter(
+        ProjectionAccuracy.season == season).all()
+    if not scored:
+        return {"status": "no_actuals", "season": season, "data": [],
+                "message": "No scored weeks yet; the challenger cannot be graded."}
+    live = {(r.week, r.player_id): (r.projected_points, r.actual_points) for r in scored}
+
+    q = db.query(ShadowProjection).filter(ShadowProjection.season == season)
+    if variant:
+        q = q.filter(ShadowProjection.variant == variant)
+    shadow_rows = q.all()
+    if not shadow_rows:
+        return {"status": "no_data", "season": season, "data": [],
+                "message": ("No shadow projections recorded. The weekly job writes them "
+                            "unless --shadow-min-season 0.")}
+
+    buckets: dict = {}
+    for row in shadow_rows:
+        pair = live.get((row.week, row.player_id))
+        if pair is None or row.projected_points is None:
+            continue       # not scored: the player did not play, or the week is open
+        live_proj, actual = pair
+        by_variant = buckets.setdefault(row.variant, {})
+        by_variant.setdefault(row.week, []).append(
+            (float(row.projected_points), float(live_proj), float(actual)))
+
+    def summarise(samples):
+        n = len(samples)
+        if not n:
+            return None
+        shadow_mae = sum(abs(s - a) for s, _, a in samples) / n
+        live_mae = sum(abs(l - a) for _, l, a in samples) / n
+        return {
+            "n": n,
+            "shadow_mae": round(shadow_mae, 3),
+            "live_mae": round(live_mae, 3),
+            "delta": round(shadow_mae - live_mae, 3),
+            "shadow_bias": round(sum(s - a for s, _, a in samples) / n, 3),
+            "live_bias": round(sum(l - a for _, l, a in samples) / n, 3),
+        }
+
+    data = []
+    for name, weeks in sorted(buckets.items()):
+        pooled = [s for samples in weeks.values() for s in samples]
+        config_row = next((r for r in shadow_rows if r.variant == name), None)
+        data.append({
+            "variant": name,
+            "config": config_row.config_json if config_row else None,
+            "weeks_scored": sorted(weeks),
+            "overall": summarise(pooled),
+            "by_week": {str(w): summarise(s) for w, s in sorted(weeks.items())},
+        })
+    return {"status": "success", "season": season, "count": len(data), "data": data}
 
 
 def _pearson(xs, ys) -> Optional[float]:

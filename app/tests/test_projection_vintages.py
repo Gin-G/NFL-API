@@ -368,7 +368,11 @@ class TestComputeRunWritesBothTables:
 
         monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 4)
         monkeypatch.setattr(cp, "_final_week", lambda season: 5)
-        cp._save_model(str(tmp_path), cp._cache_key(2025, 4, None, 1),
+        # Built the way run() builds it — the key carries the training window
+        # now, so that a shadow run cannot pick up the live model by mistake.
+        cp._save_model(str(tmp_path),
+                       cp._cache_key(2025, 4, None, 1,
+                                     min_season=cp._production_min_season()),
                        TestModelCache.FakeService())
         job = AnalyticsJobStatus(job_type="projections", status="pending")
         db_session.add(job)
