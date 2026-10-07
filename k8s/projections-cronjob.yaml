@@ -36,13 +36,19 @@
 # Pass --end-week to limit the horizon (e.g. --week 5 --end-week 5 restores the
 # old single-week behaviour).
 #
-# Each run also trains a SHADOW model on a shallower window (last season onward,
-# --shadow-min-season; 0 turns it off) and projects the upcoming week with it into
-# shadow_projections. Published nowhere: it is graded against the live model on
-# the week itself via GET /projections/shadow/accuracy, because EXPERIMENTS #26
-# and #27 could only ask "would less history be better" of finished seasons and
-# liked the shallow window by a margin too small to ship on. Costs ~7 minutes of
-# training on top of the run, and its own slot in the model cache.
+# THE LIVE MODEL TRAINS ON THE CURRENT SEASON ALONE (owner's call, 2026-10-07):
+# a board for this season is trained on this season. Before the season has a
+# completed week there is nothing to train on, so the preseason board still uses
+# the historical window — PROJECTION_MIN_CURRENT_WEEKS sets that threshold.
+#
+# That choice costs ~0.097 MAE on finished seasons (EXPERIMENTS #26, replicated
+# 2024 and 2025 at five seeds), so each run also trains a SHADOW model on the
+# historical window it replaced (--shadow-min-season; 0 turns it off) and
+# projects the same upcoming week with it into shadow_projections. Published
+# nowhere: it is graded against the live model on the week itself via
+# GET /projections/shadow/accuracy, so the trade keeps being measured on live
+# football rather than argued about. The shadow is now the expensive half of the
+# run (~35 min of training); the live model is minutes.
 apiVersion: batch/v1
 kind: CronJob
 metadata:

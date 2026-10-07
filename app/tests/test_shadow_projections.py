@@ -205,3 +205,80 @@ class TestShadowAccuracy:
         db_session.commit()
         assert client.get("/projections/shadow/accuracy?season=2026").json()["status"] == (
             "no_data")
+
+
+class TestTrainingWindow:
+    """The live model is this season's, by the owner's call (2026-10-07) — taken
+    against the measurement, not because of it (EXPERIMENTS #26: ~0.097 MAE).
+    History survives in exactly the case that reasoning allows: before the
+    season has any football to train on.
+    """
+
+    @staticmethod
+    def _df(season_weeks):
+        return pd.DataFrame([{"season": s, "week": w} for s, w in season_weeks])
+
+    def test_in_season_trains_on_the_current_season(self):
+        from scripts import compute_projections as cp
+
+        df = self._df([(2025, 1), (2026, 1), (2026, 2), (2026, 3)])
+        assert cp._training_window(df, 2026, as_of=3) == 2026
+
+    def test_preseason_keeps_the_history(self):
+        from scripts import compute_projections as cp
+
+        df = self._df([(2024, 1), (2025, 1)])
+        assert cp._training_window(df, 2026, as_of=0) == cp._package_min_season()
+
+    def test_a_week_in_progress_is_not_a_week_played(self):
+        # Rows exist for week 1 but it has not finished, so there is still no
+        # complete week of current-season football to learn from.
+        from scripts import compute_projections as cp
+
+        df = self._df([(2025, 1), (2026, 1)])
+        assert cp._training_window(df, 2026, as_of=0) == cp._package_min_season()
+
+    def test_the_threshold_is_tunable(self):
+        from scripts import compute_projections as cp
+
+        df = self._df([(2025, 1), (2026, 1), (2026, 2)])
+        assert cp._training_window(df, 2026, as_of=2, min_current_weeks=4) == (
+            cp._package_min_season())
+        assert cp._training_window(df, 2026, as_of=2, min_current_weeks=2) == 2026
+
+
+class TestShadowIsTheRoadNotTaken:
+    def test_the_challenger_is_the_window_the_board_gave_up(self, db_session,
+                                                            fake_package, monkeypatch):
+        """Default shadow = the deep historical window, so the trade stays scored."""
+        from scripts import compute_projections as cp
+
+        cp._run_shadow(db_session, pd.DataFrame({"season": [2026]}), 2026, 7, "1.5.0",
+                       min_season=cp._package_min_season(), seeds=5, epochs=60,
+                       proj_kwargs={}, env_all=None, cache_dir=None, as_of=6, started=())
+        variants = {r.variant for r in db_session.query(ShadowProjection).all()}
+        assert variants == {f"min_season_{cp._package_min_season()}"}
+
+    def test_no_shadow_when_it_would_duplicate_the_live_model(self, db_session,
+                                                              fake_package, monkeypatch):
+        """Preseason both windows are the historical one; training it twice is waste."""
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        calls = []
+        monkeypatch.setattr(cp, "_run_shadow", lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 0)
+        monkeypatch.setattr(cp, "_final_week", lambda season: 2)
+        monkeypatch.setattr(cp, "_kicked_off_teams", lambda season, week: set())
+        ds = types.ModuleType("nfl_projections.dataset")
+        ds.build_dataset = lambda output_path=None: pd.DataFrame(
+            {"season": [2024, 2025], "week": [1, 2]})
+        fake_package.dataset = ds
+        monkeypatch.setitem(sys.modules, "nfl_projections.dataset", ds)
+
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+        cp.run(db_session, 2025, 1, epochs=1, job=job,
+               shadow_min_season=cp._package_min_season())
+        assert calls == []

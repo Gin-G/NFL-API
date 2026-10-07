@@ -117,14 +117,51 @@ def _espn_frames(db, week: int):
 MODEL_CACHE_ENV = "PROJECTION_MODEL_CACHE"
 
 
-def _production_min_season() -> int:
-    """The training window the live model uses (nfl_projections' own default)."""
+# Weeks of the current season that have to be in the books before the live model
+# trains on the current season ALONE. The board is deliberately a this-season
+# model (see _training_window); before that threshold there is nothing to train
+# on, which is the one case where the old seasons still earn their place.
+MIN_CURRENT_WEEKS = int(os.getenv("PROJECTION_MIN_CURRENT_WEEKS", "1"))
+
+
+def _package_min_season() -> int:
+    """nfl_projections' own default training window (the deep one)."""
     try:
         from nfl_projections import config as nflp_config
 
         return int(nflp_config.TRAINING_MIN_SEASON)
     except Exception:
         return 0
+
+
+def _training_window(df, season: int, as_of: int, min_current_weeks: int = None) -> int:
+    """`min_season` for the live model: the current season once it has football
+    in it, the historical default before that.
+
+    Owner's call (2026-10-07), made against the measurement rather than because
+    of it: a board for this season should be trained on this season. The cost is
+    ~0.097 MAE on finished seasons, replicated 2024 and 2025 at five seeds
+    (EXPERIMENTS #26) — the reasoning being that a weekly MAE average flatters
+    whichever model happened to fit the week, while what the board is FOR is the
+    season being played. The deep window is kept as the shadow model so the
+    trade keeps being measured on live weeks instead of argued about.
+
+    The exception falls out of the same reasoning: with no current-season games
+    there is nothing to train on, so the preseason board still uses history.
+    """
+    threshold = MIN_CURRENT_WEEKS if min_current_weeks is None else min_current_weeks
+    import pandas as pd
+
+    if "season" not in df.columns:
+        return _package_min_season()
+    current = df[df["season"] == season]
+    weeks = pd.to_numeric(current.get("week"), errors="coerce") if len(current) else None
+    played = int(weeks.dropna().nunique()) if weeks is not None else 0
+    if min(played, as_of) >= threshold:
+        return season
+    logger.info("Only %d week(s) of %d on hand (need %d); training on %d onward instead",
+                min(played, as_of), season, threshold, _package_min_season())
+    return _package_min_season()
 
 
 def _cache_key(season: int, as_of: int, seeds, epochs: int, min_season=None) -> dict:
@@ -228,8 +265,9 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
     # so it would train an equivalent model to project fresher injuries and
     # depth charts against.
     cache_dir = model_cache or os.getenv(MODEL_CACHE_ENV)
-    production_min_season = _production_min_season()
-    key = _cache_key(season, as_of, seeds, epochs, min_season=production_min_season)
+    live_min_season = _training_window(df, season, as_of)
+    logger.info("Live model trains on %d onward", live_min_season)
+    key = _cache_key(season, as_of, seeds, epochs, min_season=live_min_season)
     mean_dir, quantile_dir = _cached_model(cache_dir, key) if cache_dir else (None, None)
     if mean_dir:
         logger.info("Reusing the model already trained for %d through week %d (%s)",
@@ -239,7 +277,8 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
     else:
         logger.info("Training model (mean ensemble x%s + quantile, epochs=%d)...",
                     seeds if seeds else "default", epochs)
-        svc = ProjectionService(dataset=df, quantiles=True, epochs=epochs, n_seeds=seeds)
+        svc = ProjectionService(dataset=df, quantiles=True, epochs=epochs, n_seeds=seeds,
+                                min_season=live_min_season)
         if cache_dir:
             _save_model(cache_dir, key, svc)
 
@@ -316,7 +355,7 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
                 written = n
             _update_job(db, job, current_coach=f"season {season} week {w}",
                         processed_entries=weeks_done)
-        if shadow_min_season:
+        if shadow_min_season and shadow_min_season != live_min_season:
             _run_shadow(db, df, season, week, model_version,
                         min_season=shadow_min_season, seeds=seeds, epochs=epochs,
                         proj_kwargs=proj_kwargs, env_all=env_all, cache_dir=cache_dir,
@@ -349,7 +388,7 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         _update_job(db, job, current_coach=f"season {season} week {w}",
                     processed_entries=weeks_done)
         logger.info("week %d: wrote %d projections", w, len(f))
-    if shadow_min_season:
+    if shadow_min_season and shadow_min_season != live_min_season:
         _run_shadow(db, df, season, week, model_version,
                     min_season=shadow_min_season, seeds=seeds, epochs=epochs,
                     proj_kwargs=proj_kwargs, env_all=env_all, cache_dir=cache_dir,
@@ -872,8 +911,9 @@ def main() -> None:
     parser.add_argument("--shadow-min-season", type=int, default=None,
                         help="Train a challenger on this season onward and record it in "
                              "shadow_projections, to be graded against the live model on "
-                             "the week itself (default: last season, i.e. the shallow "
-                             "window EXPERIMENTS #27 liked). 0 turns it off.")
+                             "the week itself. Defaults to the historical window the live "
+                             "model no longer uses, so the trade stays measured. 0 turns "
+                             "it off.")
     parser.add_argument("--model-cache", default=None,
                         help=f"Directory holding the trained model (default: ${MODEL_CACHE_ENV}). "
                              "A run reuses it when no new football has been played since "
@@ -921,7 +961,9 @@ def main() -> None:
         run(db, season, week, args.epochs, job, end_week=args.end_week,
             seeds=args.seeds, overwrite_started=args.overwrite_started,
             model_cache=args.model_cache,
-            shadow_min_season=(season - 1 if args.shadow_min_season is None
+            # The live model is this season's; the challenger is the deep
+            # historical window it replaced, so the choice keeps being scored.
+            shadow_min_season=(_package_min_season() if args.shadow_min_season is None
                                else args.shadow_min_season or None))
 
     except Exception as exc:
