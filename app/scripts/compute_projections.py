@@ -124,14 +124,23 @@ MODEL_CACHE_ENV = "PROJECTION_MODEL_CACHE"
 MIN_CURRENT_WEEKS = int(os.getenv("PROJECTION_MIN_CURRENT_WEEKS", "1"))
 
 
+# What the historical window is when nfl_projections cannot be asked. The job
+# pip-installs the package so it normally can, but the API image deliberately
+# does not carry it (TensorFlow), and 0 would mean "every season ever" for the
+# preseason fallback and "no shadow model" for the challenger — both silent.
+FALLBACK_MIN_SEASON = 2020
+
+
 def _package_min_season() -> int:
     """nfl_projections' own default training window (the deep one)."""
     try:
         from nfl_projections import config as nflp_config
 
         return int(nflp_config.TRAINING_MIN_SEASON)
-    except Exception:
-        return 0
+    except Exception as exc:
+        logger.warning("Could not read the package training window (%s); using %d",
+                       exc, FALLBACK_MIN_SEASON)
+        return FALLBACK_MIN_SEASON
 
 
 def _training_window(df, season: int, as_of: int, min_current_weeks: int = None) -> int:

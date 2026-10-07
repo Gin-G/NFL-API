@@ -282,3 +282,14 @@ class TestShadowIsTheRoadNotTaken:
         cp.run(db_session, 2025, 1, epochs=1, job=job,
                shadow_min_season=cp._package_min_season())
         assert calls == []
+
+
+class TestPackageWindowFallback:
+    def test_an_unreadable_package_does_not_mean_season_zero(self, monkeypatch):
+        """0 would read as "every season ever" for the preseason fallback and as
+        "no shadow model" for the challenger — both silently wrong. The API image
+        has no nfl_projections at all, so this path is real."""
+        from scripts import compute_projections as cp
+
+        monkeypatch.setitem(sys.modules, "nfl_projections", types.ModuleType("nfl_projections"))
+        assert cp._package_min_season() == cp.FALLBACK_MIN_SEASON == 2020
