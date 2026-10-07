@@ -332,3 +332,37 @@ class TestStatusIsAboutTheBoard:
         cp.run(db_session, 2026, 5, epochs=1, job=job, shadow_min_season=2020)
 
         assert order == ["completed", "shadow"]
+
+
+class TestShadowCompare:
+    """Readable before a week is played: does the window move the board at all?"""
+
+    def _rows(self, db):
+        db.add(PlayerProjection(
+            season=2026, week=7, player_id="00-1", player_name="Steady RB",
+            position="RB", team="DAL", projected_points=15.0))
+        db.add(PlayerProjection(
+            season=2026, week=7, player_id="00-2", player_name="Moved WR",
+            position="WR", team="PHI", projected_points=10.0))
+        for pid, proj in (("00-1", 15.2), ("00-2", 14.0)):
+            db.add(ShadowProjection(
+                season=2026, week=7, player_id=pid, variant="min_season_2020",
+                player_name="x", position="RB", team="DAL", projected_points=proj,
+                model_version="1.5.0", config_json="{}", computed_at=datetime.utcnow()))
+        db.commit()
+
+    def test_summarises_the_gap_and_names_the_movers(self, client, db_session):
+        self._rows(db_session)
+        body = client.get("/projections/shadow/compare?season=2026&week=7").json()
+        (entry,) = body["data"]
+        assert entry["n"] == 2
+        assert entry["mean_abs_difference"] == 2.1       # (0.2 + 4.0) / 2
+        assert entry["biggest_disagreements"][0]["difference"] == 4.0
+
+    def test_defaults_to_the_latest_week_with_rows(self, client, db_session):
+        self._rows(db_session)
+        assert client.get("/projections/shadow/compare?season=2026").json()["week"] == 7
+
+    def test_nothing_recorded_says_so(self, client):
+        assert client.get("/projections/shadow/compare?season=2026").json()["status"] == (
+            "no_data")

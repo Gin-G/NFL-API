@@ -245,6 +245,74 @@ def refresh_projections(db: Session = Depends(get_db)):
             "message": "Recomputing projections; follow /projections/status."}
 
 
+@router.get("/shadow/compare")
+def compare_shadow_board(
+    season: Optional[int] = Query(None, description="Season (default: current)"),
+    week: Optional[int] = Query(None, description="Week (default: the latest with shadow rows)"),
+    variant: Optional[str] = Query(None, description="Challenger, e.g. min_season_2020"),
+    limit: int = Query(20, le=500, description="Biggest disagreements to list"),
+    db: Session = Depends(get_db),
+):
+    """How far apart the live board and a challenger are on a week nobody has played.
+
+    /shadow/accuracy can only speak once a week is scored. This is readable the
+    moment a run finishes, and answers the cheaper question: does the training
+    window move the board at all, and where. Two models that agree to a tenth of
+    a point are not a decision worth waiting on.
+    """
+    season = season or get_current_nfl_season()
+    q = db.query(ShadowProjection).filter(ShadowProjection.season == season)
+    if variant:
+        q = q.filter(ShadowProjection.variant == variant)
+    if week is None:
+        weeks = [w for (w,) in db.query(ShadowProjection.week).filter(
+            ShadowProjection.season == season).distinct().all()]
+        if not weeks:
+            return {"status": "no_data", "season": season,
+                    "message": "No shadow projections recorded yet."}
+        week = max(weeks)
+    rows = q.filter(ShadowProjection.week == week).all()
+    if not rows:
+        return {"status": "no_data", "season": season, "week": week,
+                "message": "No shadow projections for that week."}
+
+    live = {r.player_id: r for r in db.query(PlayerProjection).filter(
+        PlayerProjection.season == season, PlayerProjection.week == week).all()}
+
+    out = []
+    for name in sorted({r.variant for r in rows}):
+        pairs = []
+        for r in rows:
+            if r.variant != name:
+                continue
+            l = live.get(r.player_id)
+            if l is None or l.projected_points is None or r.projected_points is None:
+                continue
+            pairs.append((r.player_name, r.position, r.team,
+                          float(l.projected_points), float(r.projected_points)))
+        if not pairs:
+            continue
+        diffs = [s - l for _, _, _, l, s in pairs]
+        n = len(diffs)
+        mean_abs = sum(abs(d) for d in diffs) / n
+        out.append({
+            "variant": name,
+            "n": n,
+            "mean_abs_difference": round(mean_abs, 3),
+            "mean_difference": round(sum(diffs) / n, 3),
+            "max_abs_difference": round(max(abs(d) for d in diffs), 2),
+            "correlation": _pearson([l for _, _, _, l, _ in pairs],
+                                    [s for _, _, _, _, s in pairs]),
+            "biggest_disagreements": [
+                {"player_name": p, "position": pos, "team": t,
+                 "live": round(l, 1), "shadow": round(sh, 1), "difference": round(sh - l, 1)}
+                for p, pos, t, l, sh in sorted(
+                    pairs, key=lambda x: -abs(x[4] - x[3]))[:limit]],
+        })
+    return {"status": "success", "season": season, "week": week,
+            "count": len(out), "data": out}
+
+
 @router.get("/shadow/accuracy")
 def get_shadow_accuracy(
     season: Optional[int] = Query(None, description="Season (default: current)"),
