@@ -5,7 +5,7 @@ webapp:
   path: /
   replicaCount: 1
   container:
-    image: docker.io/ncging/nfl-api:2026-10-07.19.44
+    image: docker.io/ncging/nfl-api:2026-10-07.20.25
     imagePullPolicy: Always
     port: 8000
     memoryLimit: "1Gi"
