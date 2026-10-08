@@ -8,6 +8,7 @@ import {
   Gauge,
   Award,
   TrendingUp,
+  ListOrdered,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -28,6 +29,7 @@ export const navItems: NavItem[] = [
   { to: '/ratings', label: 'Team Ratings', short: 'Ratings', icon: Gauge },
   { to: '/player-grades', label: 'Player Grades', short: 'Grades', icon: Award },
   { to: '/projections', label: 'Season Projections', short: 'Proj', icon: TrendingUp },
+  { to: '/optimizer', label: 'Lineup Optimizer', short: 'Lineups', icon: ListOrdered },
   { to: '/coaches', label: 'Coaches', short: 'Coaches', icon: Briefcase },
   { to: '/chat', label: 'Chat', short: 'Chat', icon: MessageCircle },
 ]

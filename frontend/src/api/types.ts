@@ -784,3 +784,49 @@ export interface ProjectionJobStatus {
   error_message: string | null
   message?: string
 }
+
+// ─── Lineup optimizer ─────────────────────────────────────────────────────────
+
+export interface LineupPlayer {
+  player_name: string
+  roster_position: string
+  team: string | null
+  salary: number | null
+  projected: number | null
+  /** False when the number came from FanDuel's FPPG — defenses, which the model
+   *  does not project, and anyone the name join missed. */
+  from_model: boolean
+}
+
+export interface Lineup {
+  lineup: number
+  salary: number
+  projected: number
+  players: LineupPlayer[]
+}
+
+export interface LineupResponse {
+  status: string
+  season: number
+  week: number
+  objective: string
+  salary_cap: number
+  requested: number
+  /** Set when fewer lineups were built than asked for — usually the exposure cap. */
+  note: string | null
+  slate_players: number
+  matched_to_projections: number
+  count: number
+  data: Lineup[]
+}
+
+export interface SlateCoverage {
+  status: string
+  season: number
+  week: number | null
+  projected_players?: number
+  by_position?: Record<string, number>
+  computed_at?: string | null
+  note?: string
+  message?: string
+}
