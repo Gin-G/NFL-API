@@ -147,6 +147,7 @@ async def build_lineups(
     max_usage_percentage: int = Form(50),
     exclude: str = Form(""),
     slate: str = Form("all"),
+    one_kicker: bool = Form(True),
     db: Session = Depends(get_db),
 ):
     """Build lineups from a FanDuel slate CSV and the week's published projections.
@@ -185,9 +186,17 @@ async def build_lineups(
 
     salaries = await _read_csv(file)
     slate_size = len(salaries)
-    # The export is always the full Thursday-Monday list, so a narrower contest
-    # means dropping the games it does not include.
-    teams, games = _slate_teams(db, season, week, slate)
+
+    # Showdown is its own contest, not a classic slate with fewer games: five
+    # players from one game, one MVP at 1.5x points and 1.5x salary. Run through
+    # the classic optimizer it yields nothing, since no row names a classic slot
+    # — which is exactly what the first real upload here did.
+    showdown = opt.is_showdown(salaries)
+    teams, games = (None, [])
+    if not showdown:
+        # The export is always the full Thursday-Monday list, so a narrower
+        # contest means dropping the games it does not include.
+        teams, games = _slate_teams(db, season, week, slate)
     if teams is not None and "Team" in salaries.columns:
         salaries = salaries[salaries["Team"].astype(str).str.upper().isin(teams)]
         if salaries.empty:
@@ -200,14 +209,28 @@ async def build_lineups(
     matched = int(merged["fanduel_fantasy_points"].notna().sum())
 
     excludes = [n.strip() for n in exclude.split(",") if n.strip()]
+    extra = {}
+    if showdown and one_kicker:
+        # Showdown lets a lineup take every kicker and defense in the game, and
+        # FanDuel's season-average FPPG — all these positions have, since the
+        # model does not project them — makes them look cheap and dependable.
+        # The first real slate duly produced a lineup with both kickers in it.
+        extra["position_limits"] = {"K": 1, "D": 1}
+    build = opt.optimize_showdown if showdown else opt.optimize_lineups
     try:
-        lineups = opt.optimize_lineups(
+        lineups = build(
             merged, num_lineups=num_lineups, salary_cap=salary_cap,
             exclude_players=excludes or None,
-            max_usage_percentage=max_usage_percentage, objective=objective)
+            max_usage_percentage=max_usage_percentage, objective=objective, **extra)
     except Exception as exc:
         logger.exception("Lineup optimisation failed")
         raise HTTPException(status_code=422, detail=f"Could not build lineups: {exc}")
+    if not lineups and showdown:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"No Showdown lineup fits. Five players at MVP pricing have to come in "
+                    f"under ${salary_cap:,}, and {len(merged)} players are in this pool "
+                    f"after exclusions."))
     if not lineups:
         # Say WHICH slot could not be filled. The first real slate upload failed
         # with a generic version of this message and the cause — bare "RB" roster
@@ -250,8 +273,11 @@ async def build_lineups(
         "objective": objective,
         "salary_cap": salary_cap,
         "requested": num_lineups,
-        "slate": slate,
-        "slate_description": SLATES[slate],
+        "contest": "showdown" if showdown else "classic",
+        "position_limits": extra.get("position_limits"),
+        "slate": "single_game" if showdown else slate,
+        "slate_description": ("Showdown — one game, five players, one MVP at 1.5x"
+                              if showdown else SLATES[slate]),
         "games": games,
         # Fewer than requested is normal rather than an error: the exposure cap
         # limits how often a player may repeat, so a thin slate (or a short

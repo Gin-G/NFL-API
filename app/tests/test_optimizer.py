@@ -283,3 +283,73 @@ class TestSlates:
         body = _post(client, num_lineups=1, slate="all").json()
         assert body["slate"] == "all"
         assert body["players_in_file"] == len(SLATE_ROWS)
+
+
+class TestShowdownRouting:
+    """A Showdown export is detected and routed, not forced through classic rules."""
+
+    @staticmethod
+    def _showdown_csv():
+        rows = [
+            ("CeeDee Lamb", "WR", 12600, 18900, 25.7),
+            ("Dak Prescott", "QB", 11800, 17700, 21.3),
+            ("Bucky Irving", "RB", 11200, 16800, 10.2),
+            ("Mike Evans", "WR", 9800, 14700, 14.1),
+            ("Jake Ferguson", "TE", 7600, 11400, 9.4),
+            ("Cheap Flyer", "WR", 4500, 6750, 5.0),
+            ("Deep Guy", "TE", 3500, 5250, 3.0),
+            ("Dallas Cowboys", "D", 4200, 6300, 7.5),
+        ]
+        lines = ["Id,Position,Nickname,FPPG,Salary,MVP 1.5x Salary,Game,Team,"
+                 "Opponent,Injury Indicator,Roster Position"]
+        for i, (name, pos, salary, mvp_salary, fppg) in enumerate(rows):
+            lines.append(f"{i},{pos},{name},{fppg},{salary},{mvp_salary},TB@DAL,DAL,TB,,"
+                         f"MVP - 1.5X Points/AnyFLEX")
+        return io.BytesIO("\n".join(lines).encode())
+
+    def _board(self, db):
+        _project(db, [("CeeDee Lamb", 18.0), ("Dak Prescott", 19.0),
+                      ("Bucky Irving", 12.0), ("Mike Evans", 13.0),
+                      ("Jake Ferguson", 9.0), ("Cheap Flyer", 6.0), ("Deep Guy", 4.0)])
+
+    def test_it_builds_a_five_player_lineup(self, client, db_session):
+        self._board(db_session)
+        body = _post(client, csv=self._showdown_csv(), num_lineups=1).json()
+        assert body["contest"] == "showdown"
+        assert body["slate"] == "single_game"
+        (lineup,) = body["data"]
+        assert len(lineup["players"]) == 5
+        assert lineup["players"][0]["roster_position"] == "MVP"
+        assert lineup["salary"] <= 60000
+
+    def test_the_slate_filter_is_ignored_for_one_game(self, client, db_session):
+        # "main" would drop every team if applied; a Showdown file has one game.
+        self._board(db_session)
+        body = _post(client, csv=self._showdown_csv(), num_lineups=1, slate="main").json()
+        assert body["contest"] == "showdown"
+        assert body["games"] == []
+
+    def test_an_impossible_cap_explains_mvp_pricing(self, client, db_session):
+        self._board(db_session)
+        resp = _post(client, csv=self._showdown_csv(), num_lineups=1, salary_cap=5000)
+        assert resp.status_code == 422
+        assert "MVP pricing" in resp.json()["detail"]
+
+    def test_a_classic_file_still_goes_through_classic(self, client, db_session):
+        _project(db_session, _board())
+        assert _post(client, num_lineups=1).json()["contest"] == "classic"
+
+    def test_one_kicker_by_default(self, client, db_session):
+        self._board(db_session)
+        body = _post(client, csv=self._showdown_csv(), num_lineups=1).json()
+        assert body["position_limits"] == {"K": 1, "D": 1}
+
+    def test_the_limit_can_be_turned_off(self, client, db_session):
+        self._board(db_session)
+        body = _post(client, csv=self._showdown_csv(), num_lineups=1,
+                     one_kicker=False).json()
+        assert body["position_limits"] is None
+
+    def test_classic_is_unaffected_by_it(self, client, db_session):
+        _project(db_session, _board())
+        assert _post(client, num_lineups=1).json()["position_limits"] is None
