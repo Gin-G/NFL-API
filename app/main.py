@@ -27,6 +27,7 @@ from api.fpa import router as fpa_router
 from api.opportunities import router as opportunities_router
 from api.ratings import router as ratings_router
 from api.player_grades import router as player_grades_router
+from api.optimizer import router as optimizer_router
 from api.rosters import router as rosters_router
 
 # Configure logging
@@ -98,6 +99,7 @@ app.include_router(fpa_router, prefix="/fpa", tags=["fpa"])
 app.include_router(opportunities_router, prefix="/opportunities", tags=["opportunities"])
 app.include_router(ratings_router, prefix="/ratings", tags=["ratings"])
 app.include_router(player_grades_router, prefix="/player-grades", tags=["player-grades"])
+app.include_router(optimizer_router, prefix="/optimizer", tags=["optimizer"])
 app.include_router(rosters_router, prefix="/rosters", tags=["rosters"])
 
 @app.get("/")

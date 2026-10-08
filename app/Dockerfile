@@ -27,6 +27,15 @@ WORKDIR /app
 COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# The FanDuel lineup optimizer (api/optimizer.py) lives in nfl_projections.
+# --no-deps on purpose: the package declares TensorFlow for its training code,
+# which this image must not carry, and the optimizer is pandas and a greedy
+# loop. nfl_projections defers its model imports so this works (see that
+# package's __init__). The projections CRONJOB installs the package properly,
+# with TensorFlow, at runtime.
+RUN pip install --no-cache-dir --no-deps \
+    "nfl-projections @ https://github.com/Gin-G/nfl-data-py/archive/refs/heads/main.tar.gz"
+
 # Copy the application source
 COPY app/ .
 
