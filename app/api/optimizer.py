@@ -15,13 +15,14 @@ TensorFlow (the package defers its model imports), so the web image stays small.
 """
 import io
 import logging
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
-from database.models import PlayerProjection
+from database.models import PlayerProjection, Schedule
 from database.session import get_db
 
 from .utils import get_current_nfl_season
@@ -31,6 +32,63 @@ router = APIRouter()
 
 MAX_CSV_BYTES = 5 * 1024 * 1024        # a full slate export is ~100 KB
 REQUIRED_COLUMNS = ("Nickname", "Salary", "Position", "Roster Position")
+
+# Slates, as FanDuel sells them. The export is the whole Thursday-Monday player
+# list whichever contest you are entering, and it carries no kickoff times — so
+# the windows come from our own schedule, matched on team.
+#
+# "main" is the 1pm and 4pm Sunday windows: no Thursday or Monday game, no
+# Sunday night game, and not the 9:30am London game either.
+SLATES = {
+    "all": "Every game in the file (Thursday through Monday)",
+    "main": "Sunday main — the 1pm and 4pm windows only",
+    "sunday": "Every Sunday game, including the early London game and Sunday night",
+    "primetime": "Thursday, Sunday night and Monday night",
+}
+
+
+def _slate_teams(db, season: int, week: int, slate: str):
+    """``(teams, games)`` for a slate, or ``(None, [])`` to mean no filtering."""
+    if slate == "all":
+        return None, []
+    games = db.query(Schedule).filter(
+        Schedule.season == season, Schedule.week == week,
+        Schedule.game_type == "REG").all()
+    if not games:
+        return None, []
+
+    def minutes(game):
+        try:
+            hh, mm = str(game.gametime).split(":")[:2]
+            return int(hh) * 60 + int(mm)
+        except (ValueError, AttributeError):
+            return None
+
+    def weekday(game):
+        try:
+            return datetime.strptime(str(game.gameday)[:10], "%Y-%m-%d").strftime("%A")
+        except ValueError:
+            return ""
+
+    keep, listed = set(), []
+    for game in games:
+        day, kick = weekday(game), minutes(game)
+        if kick is None:
+            continue
+        if slate == "main":
+            wanted = day == "Sunday" and 13 * 60 <= kick < 18 * 60
+        elif slate == "sunday":
+            wanted = day == "Sunday"
+        elif slate == "primetime":
+            wanted = (day in ("Thursday", "Monday")) or (day == "Sunday" and kick >= 18 * 60)
+        else:
+            wanted = True
+        if wanted:
+            keep.update({game.home_team, game.away_team})
+            listed.append({"game": f"{game.away_team}@{game.home_team}",
+                           "day": day, "kickoff_et": game.gametime})
+    return keep, sorted(listed, key=lambda g: (g["day"], g["kickoff_et"]))
+
 
 # Our stored column names -> what nfl_projections.optimizer expects to find.
 PROJECTION_COLUMNS = {
@@ -88,6 +146,7 @@ async def build_lineups(
     salary_cap: int = Form(60000),
     max_usage_percentage: int = Form(50),
     exclude: str = Form(""),
+    slate: str = Form("all"),
     db: Session = Depends(get_db),
 ):
     """Build lineups from a FanDuel slate CSV and the week's published projections.
@@ -120,7 +179,23 @@ async def build_lineups(
             status_code=404,
             detail=f"No projections stored for {season} week {week}; run the projections job.")
 
+    if slate not in SLATES:
+        raise HTTPException(status_code=400,
+                            detail=f"slate must be one of {', '.join(SLATES)}.")
+
     salaries = await _read_csv(file)
+    slate_size = len(salaries)
+    # The export is always the full Thursday-Monday list, so a narrower contest
+    # means dropping the games it does not include.
+    teams, games = _slate_teams(db, season, week, slate)
+    if teams is not None and "Team" in salaries.columns:
+        salaries = salaries[salaries["Team"].astype(str).str.upper().isin(teams)]
+        if salaries.empty:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"No players from the {slate} slate are in that file. Either the CSV "
+                        f"is for a different week, or its team codes do not match ours."))
+
     merged = opt.merge_fanduel_salaries(salaries, projections)
     matched = int(merged["fanduel_fantasy_points"].notna().sum())
 
@@ -134,10 +209,21 @@ async def build_lineups(
         logger.exception("Lineup optimisation failed")
         raise HTTPException(status_code=422, detail=f"Could not build lineups: {exc}")
     if not lineups:
-        raise HTTPException(
-            status_code=422,
-            detail=("No valid lineup fits those constraints. A slate missing a position, "
-                    "too low a salary cap, or too many exclusions will all do this."))
+        # Say WHICH slot could not be filled. The first real slate upload failed
+        # with a generic version of this message and the cause — bare "RB" roster
+        # positions where flex-qualified ones were expected — was invisible.
+        counts = opt.slot_counts(merged)
+        short = {slot: counts.get(slot, 0) for slot, need in opt.ROSTER_SLOTS.items()
+                 if counts.get(slot, 0) < need}
+        if short:
+            detail = ("No lineup fits: the slate is short at "
+                      + ", ".join(f"{slot} ({have} eligible)" for slot, have in short.items())
+                      + ". If every slot reads 0, the CSV's Roster Position column is in a "
+                      "format we do not recognise — send it over.")
+        else:
+            detail = (f"Every slot has players, so the salary cap (${salary_cap:,}) or the "
+                      f"exclusions are what nothing fits under.")
+        raise HTTPException(status_code=422, detail=detail)
 
     out = []
     for i, lineup in enumerate(lineups, start=1):
@@ -164,6 +250,9 @@ async def build_lineups(
         "objective": objective,
         "salary_cap": salary_cap,
         "requested": num_lineups,
+        "slate": slate,
+        "slate_description": SLATES[slate],
+        "games": games,
         # Fewer than requested is normal rather than an error: the exposure cap
         # limits how often a player may repeat, so a thin slate (or a short
         # one) runs out of distinct lineups. Saying so beats silently returning
@@ -173,6 +262,7 @@ async def build_lineups(
                  f"{max_usage_percentage}% exposure cap on this slate; raise the cap "
                  f"or ask for fewer."),
         "slate_players": len(salaries),
+        "players_in_file": slate_size,
         # How much of the slate our board actually covers. A low number means the
         # name join missed, or the CSV is for a week we have not projected.
         "matched_to_projections": matched,

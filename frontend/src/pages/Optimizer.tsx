@@ -7,6 +7,12 @@ import ErrorCard from '../components/ui/ErrorCard'
 
 const SEASONS = getAvailableSeasons()
 const WEEKS = Array.from({ length: 18 }, (_, i) => i + 1)
+const SLATES = [
+  { value: 'all', label: 'Thu–Mon (every game)' },
+  { value: 'main', label: 'Sunday main (1pm & 4pm)' },
+  { value: 'sunday', label: 'Sunday (all, incl. London & SNF)' },
+  { value: 'primetime', label: 'Primetime (TNF, SNF, MNF)' },
+]
 const OBJECTIVES = [
   { value: 'mean', label: 'Mean — expected points' },
   { value: 'median', label: 'Median' },
@@ -20,6 +26,7 @@ export default function Optimizer() {
   const [file, setFile] = useState<File | null>(null)
   const [numLineups, setNumLineups] = useState(5)
   const [objective, setObjective] = useState('mean')
+  const [slate, setSlate] = useState('all')
   const [salaryCap, setSalaryCap] = useState(60000)
   const [maxUsage, setMaxUsage] = useState(50)
   const [exclude, setExclude] = useState('')
@@ -49,6 +56,11 @@ export default function Optimizer() {
             FanDuel publishes salaries only in the slate's own player list, so download that
             CSV from the contest page and drop it here. Everything else — the projections, the
             floor and ceiling — comes from the board.
+          </p>
+          <p>
+            Take the <span className="text-slate-200 font-medium">Thu–Mon</span> export to get
+            every player, then pick the slate you are actually entering. The file carries no
+            kickoff times, so the windows come from our schedule.
           </p>
           <p>
             Defenses use FanDuel's <span className="text-slate-200 font-medium">FPPG</span> from
@@ -82,6 +94,16 @@ export default function Optimizer() {
             className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-1.5 text-sm"
           >
             {WEEKS.map((w) => <option key={w} value={w}>Week {w}</option>)}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          Slate
+          <select
+            value={slate}
+            onChange={(e) => setSlate(e.target.value)}
+            className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-1.5 text-sm"
+          >
+            {SLATES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
           </select>
         </label>
         <label className="flex flex-col gap-1 text-xs text-slate-400">
@@ -142,7 +164,7 @@ export default function Optimizer() {
         <button
           onClick={() => file && build.mutate({
             file, season, week, num_lineups: numLineups, objective,
-            salary_cap: salaryCap, max_usage_percentage: maxUsage, exclude,
+            salary_cap: salaryCap, max_usage_percentage: maxUsage, exclude, slate,
           })}
           disabled={!file || build.isPending}
           className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
@@ -172,6 +194,12 @@ export default function Optimizer() {
           <p className="text-slate-400 text-sm mb-1">
             {result.count} lineup{result.count === 1 ? '' : 's'} · {season} week {result.week} ·{' '}
             {result.objective} objective ·{' '}
+            {result.slate !== 'all' && (
+              <>
+                {result.games.length} game{result.games.length === 1 ? '' : 's'} in the{' '}
+                {result.slate} slate ({result.slate_players} of {result.players_in_file} players) ·{' '}
+              </>
+            )}
             <span className={matchRate !== null && matchRate < 60 ? 'text-amber-400' : ''}>
               {result.matched_to_projections} of {result.slate_players} slate players matched to
               the board

@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pytest
 
-from database.models import PlayerProjection
+from database.models import PlayerProjection, Schedule
 
 pytest.importorskip("nfl_projections.optimizer",
                     reason="optimizer comes from nfl_projections (installed --no-deps in the image)")
@@ -20,7 +20,10 @@ pytest.importorskip("nfl_projections.optimizer",
 
 @pytest.fixture(autouse=True)
 def _clean(db_session):
+    """The engine is session-scoped and these tests commit, so both tables have
+    to be cleared or the second schedule insert collides on its primary key."""
     db_session.query(PlayerProjection).delete()
+    db_session.query(Schedule).delete()
     db_session.commit()
     yield
 
@@ -28,9 +31,10 @@ def _clean(db_session):
 # A FanDuel slate export, trimmed to the columns the optimizer reads. Enough
 # bodies to fill QB/2RB/3WR/TE/FLEX/DEF with alternatives at each spot.
 #
-# "Roster Position" carries FanDuel's own flex-eligibility strings — RB/FLEX,
-# not RB — which is what nfl_projections.optimizer matches its slots against,
-# and what a real export contains.
+# "Roster Position" here carries BARE positions — RB, not RB/FLEX — because
+# that is what the first real slate upload contained, and matching the
+# flex-qualified spelling exactly produced zero lineups with nothing to say why.
+# TestBothRosterFormats covers the other spelling.
 #
 # Salaries are deliberately well under the $60k cap in aggregate. Priced near
 # the cap, only one legal lineup fits and any test about lineup DIVERSITY is
@@ -38,20 +42,20 @@ def _clean(db_session):
 SLATE_ROWS = [
     ("Josh Allen", "QB", "QB", 4500, 22.0, "BUF", ""),
     ("Jared Goff", "QB", "QB", 3750, 18.0, "DET", ""),
-    ("Bijan Robinson", "RB", "RB/FLEX", 4250, 18.5, "ATL", ""),
-    ("Jahmyr Gibbs", "RB", "RB/FLEX", 4100, 18.0, "DET", ""),
-    ("Derrick Henry", "RB", "RB/FLEX", 3900, 17.0, "BAL", ""),
-    ("Kyren Williams", "RB", "RB/FLEX", 3250, 13.0, "LA", ""),
-    ("Puka Nacua", "WR", "WR/FLEX", 4000, 17.0, "LA", ""),
-    ("Amon-Ra St. Brown", "WR", "WR/FLEX", 3950, 16.5, "DET", ""),
-    ("Ja'Marr Chase", "WR", "WR/FLEX", 3850, 16.0, "CIN", ""),
-    ("Chris Olave", "WR", "WR/FLEX", 3400, 14.0, "NO", ""),
-    ("Davante Adams", "WR", "WR/FLEX", 3300, 13.5, "LA", ""),
-    ("Trey McBride", "TE", "TE/FLEX", 3000, 13.0, "ARI", ""),
-    ("Dallas Goedert", "TE", "TE/FLEX", 2600, 11.0, "PHI", ""),
-    ("Hurt Guy", "WR", "WR/FLEX", 2000, 9.0, "NYJ", "O"),
-    ("Ravens", "D", "DEF", 2100, 8.5, "BAL", ""),
-    ("Broncos", "D", "DEF", 1950, 8.0, "DEN", ""),
+    ("Bijan Robinson", "RB", "RB", 4250, 18.5, "ATL", ""),
+    ("Jahmyr Gibbs", "RB", "RB", 4100, 18.0, "DET", ""),
+    ("Derrick Henry", "RB", "RB", 3900, 17.0, "BAL", ""),
+    ("Kyren Williams", "RB", "RB", 3250, 13.0, "LA", ""),
+    ("Puka Nacua", "WR", "WR", 4000, 17.0, "LA", ""),
+    ("Amon-Ra St. Brown", "WR", "WR", 3950, 16.5, "DET", ""),
+    ("Ja'Marr Chase", "WR", "WR", 3850, 16.0, "CIN", ""),
+    ("Chris Olave", "WR", "WR", 3400, 14.0, "NO", ""),
+    ("Davante Adams", "WR", "WR", 3300, 13.5, "LA", ""),
+    ("Trey McBride", "TE", "TE", 3000, 13.0, "ARI", ""),
+    ("Dallas Goedert", "TE", "TE", 2600, 11.0, "PHI", ""),
+    ("Hurt Guy", "WR", "WR", 2000, 9.0, "NYJ", "O"),
+    ("Ravens", "D", "D", 2100, 8.5, "BAL", ""),
+    ("Broncos", "D", "D", 1950, 8.0, "DEN", ""),
 ]
 
 
@@ -76,8 +80,8 @@ def _project(db, names_points, season=2026, week=5):
 
 
 def _board():
-    return [(name, fppg + 2) for name, _, roster_pos, _, fppg, _, _ in SLATE_ROWS
-            if roster_pos != "DEF"]
+    return [(name, fppg + 2) for name, pos, _, _, fppg, _, _ in SLATE_ROWS
+            if pos != "D"]
 
 
 def _post(client, csv=None, **form):
@@ -97,7 +101,7 @@ class TestLineups:
         assert len(lineup["players"]) == 9        # QB, 2RB, 3WR, TE, FLEX, DEF
         assert lineup["salary"] <= 60000
         slots = [p["roster_position"] for p in lineup["players"]]
-        assert slots.count("QB") == 1 and slots.count("DEF") == 1
+        assert slots.count("QB") == 1 and slots.count("D") == 1
 
     def test_reports_how_much_of_the_slate_it_matched(self, client, db_session):
         _project(db_session, _board())
@@ -111,7 +115,7 @@ class TestLineups:
         _project(db_session, _board())
         body = _post(client, num_lineups=1).json()
         defense = next(p for p in body["data"][0]["players"]
-                       if p["roster_position"] == "DEF")
+                       if p["roster_position"] == "D")
         assert defense["from_model"] is False
         assert defense["projected"] in (8.5, 8.0)
 
@@ -194,3 +198,88 @@ class TestSlateCoverage:
     def test_no_projections_says_so(self, client):
         assert client.get("/optimizer/slate-coverage?season=2026&week=5").json()["status"] == (
             "no_data")
+
+
+class TestBothRosterFormats:
+    """Either spelling of Roster Position has to work — the export has used both."""
+
+    def test_flex_qualified_spelling_also_builds(self, client, db_session):
+        rows = [(name, pos,
+                 {"RB": "RB/FLEX", "WR": "WR/FLEX", "TE": "TE/FLEX", "D": "DEF"}.get(pos, pos),
+                 salary, fppg, team, inj)
+                for name, pos, _, salary, fppg, team, inj in SLATE_ROWS]
+        _project(db_session, _board())
+        body = _post(client, csv=_slate_csv(rows), num_lineups=1).json()
+        assert len(body["data"][0]["players"]) == 9
+
+    def test_an_unrecognised_format_says_which_slots_are_empty(self, client, db_session):
+        # Garbage in the roster column: every slot is 0 eligible, and the error
+        # should say so rather than blame the salary cap.
+        rows = [(name, "ZZ", "ZZ", salary, fppg, team, inj)
+                for name, _, _, salary, fppg, team, inj in SLATE_ROWS]
+        _project(db_session, _board())
+        resp = _post(client, csv=_slate_csv(rows), num_lineups=1)
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert "QB (0 eligible)" in detail
+        assert "format we do not recognise" in detail
+
+
+class TestSlates:
+    """The export is always the whole Thursday-Monday list; the contest may not be."""
+
+    @staticmethod
+    def _schedule(db):
+        from database.models import Schedule
+
+        games = [
+            ("2026_05_SEA_DEN", "2026-10-15", "20:15", "SEA", "DEN"),    # Thursday
+            ("2026_05_HOU_JAX", "2026-10-18", "09:30", "HOU", "JAX"),    # London
+            ("2026_05_CHI_ATL", "2026-10-18", "13:00", "CHI", "ATL"),    # main
+            ("2026_05_BUF_LV", "2026-10-18", "16:25", "BUF", "LV"),      # main
+            ("2026_05_DAL_GB", "2026-10-18", "20:20", "DAL", "GB"),      # Sunday night
+            ("2026_05_WAS_SF", "2026-10-19", "20:15", "WAS", "SF"),      # Monday
+        ]
+        for gid, day, time, away, home in games:
+            db.add(Schedule(game_id=gid, season=2026, week=5, game_type="REG",
+                            gameday=day, gametime=time, away_team=away, home_team=home))
+        db.commit()
+
+    def _teams(self, db, slate):
+        from api.optimizer import _slate_teams
+
+        self._schedule(db)
+        teams, games = _slate_teams(db, 2026, 5, slate)
+        return teams, games
+
+    def test_main_is_the_one_and_four_oclock_windows(self, db_session):
+        teams, games = self._teams(db_session, "main")
+        assert teams == {"CHI", "ATL", "BUF", "LV"}
+        assert len(games) == 2        # no London, no Sunday night, no Thu/Mon
+
+    def test_sunday_includes_london_and_sunday_night(self, db_session):
+        teams, _ = self._teams(db_session, "sunday")
+        assert teams == {"HOU", "JAX", "CHI", "ATL", "BUF", "LV", "DAL", "GB"}
+
+    def test_primetime_is_thursday_sunday_night_and_monday(self, db_session):
+        teams, _ = self._teams(db_session, "primetime")
+        assert teams == {"SEA", "DEN", "DAL", "GB", "WAS", "SF"}
+
+    def test_all_means_no_filtering(self, db_session):
+        teams, games = self._teams(db_session, "all")
+        assert teams is None and games == []
+
+    def test_filtering_drops_the_other_games_players(self, client, db_session):
+        self._schedule(db_session)
+        _project(db_session, _board())
+        # Fixture teams are BUF/DET/ATL/BAL/LA/CIN/NO/ARI/PHI/NYJ/DEN — of those,
+        # only ATL and BUF are in the main slate, so a lineup cannot be filled.
+        resp = _post(client, num_lineups=1, slate="main")
+        assert resp.status_code == 422
+
+    def test_the_response_names_the_games(self, client, db_session):
+        self._schedule(db_session)
+        _project(db_session, _board())
+        body = _post(client, num_lineups=1, slate="all").json()
+        assert body["slate"] == "all"
+        assert body["players_in_file"] == len(SLATE_ROWS)

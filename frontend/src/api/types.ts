@@ -814,7 +814,13 @@ export interface LineupResponse {
   requested: number
   /** Set when fewer lineups were built than asked for — usually the exposure cap. */
   note: string | null
+  slate: string
+  slate_description: string
+  /** Games the chosen slate covers, from our schedule (the CSV has no times). */
+  games: { game: string; day: string; kickoff_et: string }[]
   slate_players: number
+  /** Rows in the uploaded file before the slate filter. */
+  players_in_file: number
   matched_to_projections: number
   count: number
   data: Lineup[]

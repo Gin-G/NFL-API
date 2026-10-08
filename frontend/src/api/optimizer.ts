@@ -25,6 +25,8 @@ export interface LineupRequest {
   salary_cap: number
   max_usage_percentage: number
   exclude: string
+  /** all | main | sunday | primetime — the export is always Thu-Mon. */
+  slate: string
 }
 
 /** Upload a FanDuel slate CSV and get lineups back. */
