@@ -9,6 +9,7 @@ import {
   Award,
   TrendingUp,
   ListOrdered,
+  Shield,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -30,6 +31,7 @@ export const navItems: NavItem[] = [
   { to: '/player-grades', label: 'Player Grades', short: 'Grades', icon: Award },
   { to: '/projections', label: 'Season Projections', short: 'Proj', icon: TrendingUp },
   { to: '/optimizer', label: 'Lineup Optimizer', short: 'Lineups', icon: ListOrdered },
+  { to: '/trenches', label: 'Trench Report', short: 'Trench', icon: Shield },
   { to: '/coaches', label: 'Coaches', short: 'Coaches', icon: Briefcase },
   { to: '/chat', label: 'Chat', short: 'Chat', icon: MessageCircle },
 ]

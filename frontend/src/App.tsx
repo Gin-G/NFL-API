@@ -9,6 +9,7 @@ import Ratings from './pages/Ratings'
 import PlayerGrades from './pages/PlayerGrades'
 import SeasonProjections from './pages/SeasonProjections'
 import Optimizer from './pages/Optimizer'
+import TrenchReport from './pages/TrenchReport'
 import Coaches from './pages/Coaches'
 import Chat from './pages/Chat'
 
@@ -25,6 +26,7 @@ export default function App() {
         <Route path="/player-grades" element={<PlayerGrades />} />
         <Route path="/projections" element={<SeasonProjections />} />
         <Route path="/optimizer" element={<Optimizer />} />
+        <Route path="/trenches" element={<TrenchReport />} />
         <Route path="/coaches" element={<Coaches />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="*" element={<Navigate to="/" replace />} />

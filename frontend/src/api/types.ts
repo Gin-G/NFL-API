@@ -836,3 +836,74 @@ export interface SlateCoverage {
   note?: string
   message?: string
 }
+
+/* ── Trench report: line-of-scrimmage ratings ─────────────────────────────── */
+
+export interface LineUnitRating {
+  team: string
+  run_block: number | null
+  run_stop: number | null
+  pass_block: number | null
+  pass_rush: number | null
+  /** "in-season", "prior-regressed", or "blend w=0.xx" — what the grade rests on. */
+  basis?: string
+  games?: number
+}
+
+export interface LineUnitsResponse {
+  season: number
+  through_week: number | null
+  scale: string
+  units: LineUnitRating[]
+}
+
+export interface LineMatchup {
+  season: number
+  week: number
+  team: string
+  opponent: string
+  home: boolean
+  /** 0–100, 50 = even matchup. 80+ is a large edge, not merely a good offense. */
+  run_matchup: number | null
+  pass_matchup: number | null
+  run_block: number | null
+  run_stop: number | null
+  pass_block: number | null
+  pass_rush: number | null
+}
+
+export interface LineMatchupsResponse {
+  season: number
+  week: number
+  basis: string
+  bands: { from: number; to: number; label: string }[]
+  matchups: LineMatchup[]
+}
+
+export interface LineBand {
+  band: string
+  team_games: number
+  mean_rating: number
+  ypc: number
+  /** Yards per carry minus that team's own season average — team quality removed. */
+  ypc_vs_own: number
+  rush_yards: number
+  stuff_rate: number
+}
+
+export interface LineBacktestResponse {
+  seasons: number[]
+  first_week: number
+  team_games: number
+  matchup_bands: LineBand[]
+  /** The opponent's front graded alone — the half that is new information. */
+  opponent_bands: LineBand[]
+  correlations: {
+    ypc_vs_own: number | null
+    game_ypc: number | null
+    rush_yards: number | null
+    game_aly: number | null
+    own_vs_opp?: Record<string, { game_ypc: number; ypc_vs_own: number }>
+    per_season_ypc_vs_own: Record<string, number>
+  }
+}
