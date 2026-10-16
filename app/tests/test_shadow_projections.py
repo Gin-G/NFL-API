@@ -61,6 +61,19 @@ def fake_package(monkeypatch):
     mod.ProjectionService = FakeService
     mod.built = built
     monkeypatch.setitem(sys.modules, "nfl_projections", mod)
+
+    # Stubbing the parent does not stub its submodules: `from nfl_projections
+    # import ratings` inside run() falls back to sys.modules for the submodule,
+    # so one left behind by an earlier test module is reachable through this
+    # stub and the optional layers go fetch live data. These tests assert on
+    # which model was built and in what order, so the layers would not fail
+    # them -- they would just quietly put the network in the suite.
+    from scripts import compute_projections as cp
+    monkeypatch.setattr(cp, "_game_environments", lambda season: None)
+    monkeypatch.setattr(cp, "_position_budgets", lambda history: None)
+    monkeypatch.setattr(cp, "_predict_shares", lambda history, depth, season: None)
+    monkeypatch.setattr(cp, "_fit_games", lambda history, season: (None, None))
+    monkeypatch.setattr(cp, "_apply_simulator", lambda frame, history, week: None)
     return mod
 
 
@@ -292,6 +305,13 @@ class TestPackageWindowFallback:
         from scripts import compute_projections as cp
 
         monkeypatch.setitem(sys.modules, "nfl_projections", types.ModuleType("nfl_projections"))
+        # An empty parent is not enough to make the package unreadable:
+        # `from nfl_projections import config` resolves out of sys.modules if
+        # anything imported the real submodule first, and then this reads the
+        # package's actual window. It currently equals FALLBACK_MIN_SEASON, so
+        # the test would keep passing for the wrong reason right up until the
+        # package moved its window.
+        monkeypatch.delitem(sys.modules, "nfl_projections.config", raising=False)
         assert cp._package_min_season() == cp.FALLBACK_MIN_SEASON == 2020
 
 

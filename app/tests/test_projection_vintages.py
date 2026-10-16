@@ -204,6 +204,31 @@ class TestComputeRunWritesBothTables:
         # No network in tests: nothing has kicked off unless a test says so.
         from scripts import compute_projections as cp
         monkeypatch.setattr(cp, "_kicked_off_teams", lambda season, week: set())
+
+        # Stubbing the PARENT module does not stub its submodules. `run()`
+        # reaches the optional layers as `from nfl_projections import ratings`,
+        # and CPython's IMPORT_FROM falls back to sys.modules["nfl_projections.
+        # ratings"] when the parent has no such attribute -- so an earlier test
+        # module that imported the real package leaves those submodules
+        # resolvable THROUGH the stub. Both test_coverage.py and test_trenches.py
+        # register `.ratings` that way (`from .ratings import to_grade`), and
+        # test_coverage.py is the one that sorts before this file. The layers
+        # then run for real against live data, the published mean comes back
+        # multiplier-adjusted, and these tests fail or pass on collection ORDER
+        # rather than on anything they assert.
+        #
+        # So neutralise the layers here, at the four places that fetch and the
+        # one that rewrites the quantiles. Each already has a documented
+        # "unavailable -> skip" path, which is the behaviour being pinned: these
+        # tests are about the vintage archive, and a test that wants a layer
+        # switches it back on itself (see the environment/simulator test).
+        monkeypatch.setattr(cp, "_game_environments", lambda season: None)
+        monkeypatch.setattr(cp, "_position_budgets", lambda history: None)
+        monkeypatch.setattr(cp, "_predict_shares",
+                            lambda history, depth, season: None)
+        monkeypatch.setattr(cp, "_fit_games", lambda history, season: (None, None))
+        monkeypatch.setattr(cp, "_apply_simulator",
+                            lambda frame, history, week: None)
         return base
 
     def test_projects_remaining_weeks_into_both_tables(
@@ -459,6 +484,73 @@ class TestComputeRunWritesBothTables:
         phi = db_session.query(PlayerProjection).filter(
             PlayerProjection.player_id == "00-0000002").one()
         assert phi.projected_points == 12.0
+
+    def test_a_resolvable_submodule_cannot_reach_through_the_stub(
+            self, db_session, stub_nfl_projections, monkeypatch):
+        """The stub must hold even when the real package is installed.
+
+        `from nfl_projections import ratings` does not stop at the stubbed
+        parent: IMPORT_FROM falls back to sys.modules["nfl_projections.ratings"],
+        so a submodule another test module left behind is reachable from inside
+        `run()`. That is not hypothetical -- importing `nfl_projections.coverage`
+        or `.trenches` registers `.ratings` as a side effect, which made three
+        tests in this class pass only while the package was MISSING, and only in
+        the order that put them first.
+
+        Every layer below is poisoned to a value nothing could mistake for the
+        stub. The published mean must still be the stub's own 15.0 and 12.0.
+        """
+        import sys
+        import types
+
+        import pandas as pd
+
+        from database.models import AnalyticsJobStatus
+        from scripts import compute_projections as cp
+
+        ratings = types.ModuleType("nfl_projections.ratings")
+        ratings.game_environments = lambda season: pd.DataFrame({
+            "week": [5, 5, 6, 6], "team": ["DAL", "PHI", "DAL", "PHI"],
+            "env_mult": [9.0] * 4})
+        roles = types.ModuleType("nfl_projections.roles")
+        roles.position_budgets = lambda history: {("DAL", "RB"): 0.0}
+        roles.play_weight = lambda pos, rank: 0.0
+        roles.apply_team_budget = lambda frame, *a, **k: None
+        games = types.ModuleType("nfl_projections.games")
+        games.fit_games_model = lambda history, max_season=None: object()
+        games.prev_games_map = lambda history, season: {}
+        games.expected_games = lambda pos, rank, pg, model: 0.0
+        shares = types.ModuleType("nfl_projections.shares")
+        shares.project_shares = lambda roster, history, season: pd.DataFrame({
+            "player_id": ["00-0000001", "00-0000002"], "team": ["DAL", "PHI"],
+            "carry_share": [1.0, 0.0], "target_share": [0.0, 1.0]})
+        simulate = types.ModuleType("nfl_projections.simulate")
+        simulate.project_distributions = lambda frame, history, **k: (
+            pd.DataFrame({"player_id": ["00-0000001", "00-0000002"],
+                          "floor": [0.0, 0.0], "median": [0.0, 0.0],
+                          "ceiling": [0.0, 0.0]}), None)
+        for name, module in (("ratings", ratings), ("roles", roles),
+                             ("games", games), ("shares", shares),
+                             ("simulate", simulate)):
+            monkeypatch.setitem(sys.modules, "nfl_projections." + name, module)
+
+        monkeypatch.setattr(cp, "_completed_weeks", lambda season, when=None: 4)
+        monkeypatch.setattr(cp, "_final_week", lambda season: 5)
+        job = AnalyticsJobStatus(job_type="projections", status="pending")
+        db_session.add(job)
+        db_session.commit()
+
+        cp.run(db_session, 2025, 5, epochs=1, job=job)
+
+        live = {r.player_id: r.projected_points for r in db_session.query(
+            PlayerProjection).filter(PlayerProjection.season == 2025,
+                                     PlayerProjection.week == 5)}
+        assert live == {"00-0000001": 15.0, "00-0000002": 12.0}
+        arch = {v.player_id: v.projected_points for v in db_session.query(
+            PlayerProjectionVintage).filter(
+            PlayerProjectionVintage.week == 5,
+            PlayerProjectionVintage.as_of_week == 4)}
+        assert arch == {"00-0000001": 15.0, "00-0000002": 12.0}
 
 
 class TestKickedOffTeams:
