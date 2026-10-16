@@ -19,6 +19,15 @@ pytest.importorskip("nfl_projections.optimizer",
 
 
 @pytest.fixture(autouse=True)
+def _no_opportunity_fetch(monkeypatch):
+    """The volume context fetches from nflverse. Off by default here so these
+    tests stay hermetic and fast; the tests that are ABOUT it inject a frame."""
+    from api import optimizer as api_opt
+
+    monkeypatch.setattr(api_opt, "_opportunity", lambda season, week: None)
+
+
+@pytest.fixture(autouse=True)
 def _clean(db_session):
     """The engine is session-scoped and these tests commit, so both tables have
     to be cleared or the second schedule insert collides on its primary key."""
@@ -353,3 +362,89 @@ class TestShowdownRouting:
     def test_classic_is_unaffected_by_it(self, client, db_session):
         _project(db_session, _board())
         assert _post(client, num_lineups=1).json()["position_limits"] is None
+
+
+class TestOpportunityContext:
+    """Volume rides along beside the lineup and never inside it.
+
+    `EXPERIMENTS.md`, "Opportunity share: the premise is right, the board
+    already has it": opportunity per game correlates 0.974 with itself across
+    odd and even weeks and touchdowns per opportunity manage 0.178, so the
+    reasoning behind the request is sound. But the board carries volume as input
+    features already, and held out of its own season the one residual term buys
+    0.2 points of top-24 overlap in 4 weeks of 83. So it is shown, not scored.
+    """
+
+    @staticmethod
+    def _context(names):
+        import pandas as pd
+
+        return pd.DataFrame({
+            "player_id": [f"00-{i:08d}" for i in range(len(names))],
+            "opp_per_game": [12.0] * len(names),
+            "opp_share": [0.22] * len(names),
+            "xfp_per_game": [15.0] * len(names),
+            "volume_td_gap": [4.0] * len(names),
+            "share_jump": [0.05] * len(names),
+            "prior_games": [5] * len(names),
+        })
+
+    def test_the_response_carries_the_volume_columns(self, client, db_session,
+                                                     monkeypatch):
+        from api import optimizer as api_opt
+
+        _project(db_session, _board())
+        rows = db_session.query(PlayerProjection).all()
+        ctx = self._context([r.player_name for r in rows])
+        ctx["player_id"] = [r.player_id for r in rows]
+        monkeypatch.setattr(api_opt, "_opportunity", lambda season, week: ctx)
+
+        body = _post(client).json()
+        assert body["status"] == "success"
+        assert body["opportunity_is_context_only"] is True
+        player = body["data"][0]["players"][0]
+        assert player["opportunities"] == pytest.approx(12.0)
+        assert player["opportunity_share"] == pytest.approx(0.22)
+        assert player["volume_td_gap"] == pytest.approx(4.0)
+
+    def test_an_unreachable_context_does_not_fail_the_build(self, client,
+                                                            db_session, monkeypatch):
+        """nflverse being slow must not cost somebody their lineups."""
+        from api import optimizer as api_opt
+
+        def boom(season, week):
+            raise RuntimeError("nflverse timeout")
+
+        monkeypatch.setattr(api_opt, "_opportunity", boom)
+        _project(db_session, _board())
+        body = _post(client).json()
+        assert body["status"] == "success"
+        assert body["data"]
+
+    def test_volume_does_not_change_which_players_are_picked(self, client,
+                                                             db_session, monkeypatch):
+        """The measured decision, end to end: identical lineups either way."""
+        from api import optimizer as api_opt
+
+        _project(db_session, _board())
+        rows = db_session.query(PlayerProjection).all()
+        # A context that would wreck the board if it ever reached the objective:
+        # every number inverted against the projection.
+        import pandas as pd
+
+        ctx = pd.DataFrame({
+            "player_id": [r.player_id for r in rows],
+            "opp_per_game": [99.0 - (r.projected_points or 0) for r in rows],
+            "opp_share": [0.9] * len(rows),
+            "xfp_per_game": [99.0] * len(rows),
+            "volume_td_gap": [50.0] * len(rows),
+            "share_jump": [0.5] * len(rows),
+            "prior_games": [5] * len(rows),
+        })
+        without = _post(client).json()
+        monkeypatch.setattr(api_opt, "_opportunity", lambda season, week: ctx)
+        withctx = _post(client).json()
+        for a, b in zip(without["data"], withctx["data"]):
+            assert [p["player_name"] for p in a["players"]] \
+                == [p["player_name"] for p in b["players"]]
+            assert a["projected"] == pytest.approx(b["projected"])

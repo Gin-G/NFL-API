@@ -115,6 +115,66 @@ def _projection_frame(db, season: int, week: int) -> pd.DataFrame:
     return frame
 
 
+# Named here rather than imported from the package, so a version skew cannot
+# turn a missing constant into a failed lineup build.
+_OPPORTUNITY_COLUMNS = ("opp_per_game", "opp_share", "xfp_per_game",
+                        "volume_td_gap", "share_jump", "prior_games")
+
+
+def _attach_opportunity(pool: pd.DataFrame, season: int, week: int) -> pd.DataFrame:
+    """Join the volume context on here rather than inside the package call.
+
+    Deliberately NOT routed through `merge_fanduel_salaries`, which grew an
+    optional third argument for this: the image installs nfl_projections from
+    the main branch at build time, so an image built while the package was
+    older would raise `TypeError: takes 2 positional arguments but 3 were
+    given` at request time and every lineup build would 422. A plain merge
+    here needs nothing from the package but the context frame itself, which
+    `_opportunity` already soft-fails.
+    """
+    try:
+        context = _opportunity(season, week)
+        if context is None or getattr(context, "empty", True):
+            return pool
+        cols = [c for c in _OPPORTUNITY_COLUMNS if c in context.columns]
+        if "player_id" not in pool.columns or not cols:
+            return pool
+        return pool.merge(
+            context[["player_id"] + cols].drop_duplicates("player_id"),
+            on="player_id", how="left")
+    except Exception as exc:
+        # The whole path, not just the fetch inside `_opportunity`: the join can
+        # fail too (a duplicated column, a dtype that will not merge), and none
+        # of it is worth somebody's lineups. Optional context that can break the
+        # build is not optional.
+        logger.warning("opportunity context not attached (%s); omitting", exc)
+        return pool
+
+
+def _opportunity(season: int, week: int):
+    """Volume context for the pool, or None if it cannot be had.
+
+    Context only, and the boundary is measured rather than careful: the board
+    already carries targets, carries, target_share, air_yards_share, wopr and
+    an opportunity_score as input features, so against its own error on five
+    seasons of backtests both opportunity share and volume-implied points come
+    in null. The one residual -- volume-implied points minus points actually
+    scored -- is real but buys 0.2 points of top-24 overlap in 4 weeks out of
+    83, and the optimizer reads nothing but the order. So these columns are
+    shown beside the lineup and never enter the objective.
+
+    Soft-failing on purpose: a lineup build must not die because nflverse is
+    slow. The columns simply come back empty.
+    """
+    try:
+        from nfl_projections import opportunity
+
+        return opportunity.opportunity_context(season, week)
+    except Exception as exc:
+        logger.warning("opportunity context unavailable (%s); omitting", exc)
+        return None
+
+
 async def _read_csv(upload: UploadFile) -> pd.DataFrame:
     raw = await upload.read()
     if not raw:
@@ -207,6 +267,7 @@ async def build_lineups(
 
     merged = opt.merge_fanduel_salaries(salaries, projections)
     matched = int(merged["fanduel_fantasy_points"].notna().sum())
+    merged = _attach_opportunity(merged, season, week)
 
     excludes = [n.strip() for n in exclude.split(",") if n.strip()]
     extra = {}
@@ -258,6 +319,18 @@ async def build_lineups(
             "projected": round(float(r["lineup_points"]), 2) if pd.notna(
                 r.get("lineup_points")) else None,
             "from_model": bool(pd.notna(r.get("fanduel_fantasy_points"))),
+            # Volume context. `opportunities` is targets + carries per game
+            # (pass attempts for a quarterback), `opportunity_share` his cut of
+            # the team's, and `volume_td_gap` what his volume says he should
+            # have scored minus what he did -- positive is the receiver who gets
+            # the ball and has not found the end zone.
+            **{key: (round(float(r[col]), 3) if pd.notna(r.get(col)) else None)
+               for key, col in (("opportunities", "opp_per_game"),
+                                ("opportunity_share", "opp_share"),
+                                ("volume_points", "xfp_per_game"),
+                                ("volume_td_gap", "volume_td_gap"),
+                                ("share_jump", "share_jump"))
+               if col in lineup.columns},
         } for _, r in lineup.iterrows()]
         out.append({
             "lineup": i,
@@ -278,6 +351,16 @@ async def build_lineups(
         "slate": "single_game" if showdown else slate,
         "slate_description": ("Showdown — one game, five players, one MVP at 1.5x"
                               if showdown else SLATES[slate]),
+        "opportunity_is_context_only": True,
+        "opportunity_note": (
+            "Volume is shown, not scored. Opportunity per game correlates 0.974 "
+            "with itself across odd and even weeks; touchdowns per opportunity "
+            "manage 0.178. But the board already carries volume as input "
+            "features, so against its own error opportunity share and "
+            "volume-implied points are both null, and the one residual "
+            "(volume_td_gap) is worth 0.2 points of top-24 overlap in 4 weeks "
+            "of 83. A positive share_jump is a FADE, not a buy: on the clearest "
+            "cases receivers scored 3.688 against a 4.470 projection."),
         "games": games,
         # Fewer than requested is normal rather than an error: the exposure cap
         # limits how often a player may repeat, so a thin slate (or a short
