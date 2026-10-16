@@ -44,6 +44,36 @@ jobs:
         working-directory: app
         run: pip install --quiet -r requirements.txt
 
+      # app/Dockerfile installs this into the image, so leaving it out here
+      # meant CI tested a configuration production does not have. Two ways it
+      # mattered: the four modules behind `pytest.importorskip` never ran at
+      # all, and the tests that STUB the package got a different stub from the
+      # one the image produces -- `from nfl_projections import ratings` reaches
+      # a real submodule through a stubbed parent, which had three tests in
+      # test_projection_vintages.py passing only while the package was absent.
+      #
+      # --no-deps for the same reason the image does it: the package declares
+      # TensorFlow for training code that neither the image nor these tests
+      # run. It floats on nfl-data-py's main branch, again like the image, so a
+      # push there can fail this job without an NFL-API change -- which is the
+      # honest signal, because the image build would take the same break.
+      - name: Install nfl_projections (the way the image does)
+        run: |
+          pip install --quiet --no-deps \
+            "nfl-projections @ https://github.com/Gin-G/nfl-data-py/archive/refs/heads/main.tar.gz"
+
+      # A missing transitive dependency would send those four modules quietly
+      # back to being skipped, which is the state the step above exists to end.
+      # Fail loudly instead of passing a suite that tested less than it looks.
+      - name: Check the skippable modules do not skip
+        run: |
+          python - <<'PY'
+          import importlib
+          for name in ("coverage", "trenches", "optimizer", "scarcity"):
+              importlib.import_module("nfl_projections." + name)
+              print("ok  nfl_projections." + name)
+          PY
+
       - name: Run tests
         working-directory: app
         run: python -m pytest tests/ -v --tb=short
