@@ -115,6 +115,11 @@ def _projection_frame(db, season: int, week: int) -> pd.DataFrame:
     return frame
 
 
+# Distinguishes "the slate cannot field a lineup" (None) from "this package
+# version cannot tell us" when explaining why nothing fit.
+_UNKNOWN = object()
+
+
 # Named here rather than imported from the package, so a version skew cannot
 # turn a missing constant into a failed lineup build.
 _OPPORTUNITY_COLUMNS = ("opp_per_game", "opp_share", "xfp_per_game",
@@ -305,8 +310,38 @@ async def build_lineups(
                       + ". If every slot reads 0, the CSV's Roster Position column is in a "
                       "format we do not recognise — send it over.")
         else:
-            detail = (f"Every slot has players, so the salary cap (${salary_cap:,}) or the "
-                      f"exclusions are what nothing fits under.")
+            # Say by HOW MUCH. The old wording named the cap and the exclusions
+            # and left the user to guess which, on a slate where a lineup
+            # plainly fitted -- the builder was greedy and simply could not
+            # find it. Now that the solve is exact this message only fires when
+            # nothing fits, so it can afford to be specific.
+            # Three outcomes, not two: `None` means the slate genuinely cannot
+            # field a lineup at any price, while "could not work it out" means
+            # an older nfl_projections in the image has no such function.
+            # Collapsing them blamed overlapping candidates for what was
+            # actually the cap.
+            cheapest = _UNKNOWN
+            try:
+                cheapest = opt.cheapest_lineup_cost(merged)
+            except AttributeError:
+                pass        # older nfl_projections in the image
+            if cheapest is _UNKNOWN:
+                detail = (f"No lineup fits under ${salary_cap:,}: the cap, the "
+                          f"exclusions, or the exposure cap "
+                          f"({max_usage_percentage}%) is what nothing fits under.")
+            elif cheapest is None:
+                detail = ("Every slot has players, but no legal lineup can be assembled "
+                          "from them — some slot's only candidates are already used by "
+                          "another slot.")
+            elif cheapest > salary_cap:
+                detail = (f"The cheapest legal lineup on this slate costs ${cheapest:,}, "
+                          f"which is over the ${salary_cap:,} cap. Raise the cap or drop "
+                          f"an exclusion.")
+            else:
+                detail = (f"No lineup fits under ${salary_cap:,}. The cheapest legal "
+                          f"lineup costs ${cheapest:,}, so the exclusions or the "
+                          f"exposure cap ({max_usage_percentage}%) are what nothing "
+                          f"fits under.")
         raise HTTPException(status_code=422, detail=detail)
 
     out = []

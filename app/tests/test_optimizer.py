@@ -186,10 +186,32 @@ class TestBadInput:
         assert "week 9" in resp.json()["detail"]
 
     def test_constraints_nothing_can_satisfy(self, client, db_session):
+        """And it says by how much.
+
+        The old message named the cap and the exclusions and left the user to
+        work out which — on a slate where a lineup plainly fitted and the
+        greedy builder simply could not find it. The solve is exact now, so
+        this fires only when nothing really fits, and it reports the number
+        that makes it actionable.
+        """
         _project(db_session, _board())
         resp = _post(client, num_lineups=1, salary_cap=1000)
         assert resp.status_code == 422
-        assert "salary cap" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "$1,000" in detail           # the cap they asked for
+        # The shortfall comes from the package, which the image installs from a
+        # branch -- so an older one degrades to an honest generic message
+        # rather than breaking the response. Both are correct; assert whichever
+        # this configuration can actually produce.
+        from nfl_projections import optimizer as opt
+
+        if hasattr(opt, "cheapest_lineup_cost"):
+            assert "cheapest legal lineup" in detail
+            assert "$27,150" in detail      # the real number, not a guess
+        else:
+            # Without it the message still names the cap; it just cannot say
+            # by how much.
+            assert "exposure cap" in detail
 
     def test_absurd_lineup_counts_are_refused(self, client, db_session):
         _project(db_session, _board())
