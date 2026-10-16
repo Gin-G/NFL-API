@@ -29,6 +29,7 @@ from api.ratings import router as ratings_router
 from api.player_grades import router as player_grades_router
 from api.optimizer import router as optimizer_router
 from api.rosters import router as rosters_router
+from api.coverage import router as coverage_router
 from api.trenches import router as trenches_router
 from api.scarcity import router as scarcity_router
 
@@ -104,6 +105,7 @@ app.include_router(player_grades_router, prefix="/player-grades", tags=["player-
 app.include_router(optimizer_router, prefix="/optimizer", tags=["optimizer"])
 app.include_router(rosters_router, prefix="/rosters", tags=["rosters"])
 app.include_router(trenches_router, prefix="/trenches", tags=["trenches"])
+app.include_router(coverage_router, prefix="/coverage", tags=["coverage"])
 app.include_router(scarcity_router, prefix="/scarcity", tags=["scarcity"])
 
 @app.get("/")

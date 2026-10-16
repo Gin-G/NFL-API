@@ -907,3 +907,108 @@ export interface LineBacktestResponse {
     per_season_ypc_vs_own: Record<string, number>
   }
 }
+
+// ---------------------------------------------------------------- coverage
+
+/**
+ * One cornerback's coverage grade. 0–100, 50 = league average, high = GOOD
+ * coverage, so the corners to attack are the low ones.
+ *
+ * `yards_per_target` is present for reference and should not be ranked on: it
+ * does not persist (a corner against himself, career odd/even weeks, r =
+ * 0.188), while completion rate allowed does (0.519). A corner sees a median
+ * of 26 targets a season and yards per completion rides on a few long plays.
+ */
+export interface CoverageCorner {
+  pfr_player_id: string
+  player_name: string | null
+  team: string | null
+  position: string | null
+  /** THIS season's charted targets — the sample behind the raw rate. */
+  targets: number
+  games: number
+  /** Targets including last season's carry-over, which drives the shrinkage. */
+  targets_weighted: number
+  targets_per_game: number | null
+  /** How deep he is tested. A role trait (r = 0.733), not a quality measure. */
+  adot: number | null
+  cmp_pct_allowed: number | null
+  shrunk_cmp_allowed: number | null
+  /** Reference only. Not a trait — see the interface note. */
+  yards_per_target: number | null
+  cover_grade: number
+  band: string
+}
+
+export interface CoverageCornersResponse {
+  season: number
+  through_week: number | null
+  scale: string
+  shrinkage_targets: number
+  not_a_trait: string
+  bands: { from: number; to: number; label: string }[]
+  corners: CoverageCorner[]
+}
+
+export interface CoverageSecondary {
+  team: string
+  corners: number
+  cover_rate: number | null
+  /**
+   * Completion-rate gap between the best and worst regular corner. Read it
+   * next to the grade: a secondary can average out fine and still have one
+   * side worth attacking, and the average cannot see that.
+   */
+  cover_spread: number | null
+  adot: number | null
+  weakest_corner: string | null
+  weakest_grade: number | null
+  cover_grade: number
+  band: string
+}
+
+export interface CoverageSecondariesResponse {
+  season: number
+  through_week: number | null
+  scale: string
+  bands: { from: number; to: number; label: string }[]
+  secondaries: CoverageSecondary[]
+}
+
+/**
+ * A receiver and the secondary he faces. `coverage_lean` is advisory text, not
+ * a multiplier — `projected_points` is the board's own number and is never
+ * adjusted by a coverage grade. For WR the lean is always `context only`,
+ * because the WR coverage matchup has failed three independent tests.
+ */
+export interface CoverageReceiver {
+  player_id: string
+  player_name: string | null
+  position: string
+  projected_points: number | null
+  ceiling: number | null
+  coverage_lean: string
+}
+
+export interface CoverageMatchup {
+  season: number
+  week: number
+  team: string
+  opponent: string
+  home: boolean
+  opp_cover_grade: number
+  opp_cover_band: string
+  opp_cover_spread: number | null
+  opp_weakest_corner: string | null
+  opp_weakest_grade: number | null
+  receivers: CoverageReceiver[]
+  opp_corners?: Partial<CoverageCorner>[]
+}
+
+export interface CoverageMatchupsResponse {
+  season: number
+  week: number
+  bands: { from: number; to: number; label: string }[]
+  lean_is_advisory: boolean
+  matchups: CoverageMatchup[]
+}

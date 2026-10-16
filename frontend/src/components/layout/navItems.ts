@@ -1,15 +1,16 @@
 import {
-  LayoutDashboard,
-  Users,
-  Calendar,
-  UserRound,
-  Briefcase,
-  MessageCircle,
-  Gauge,
   Award,
-  TrendingUp,
+  Briefcase,
+  Calendar,
+  Gauge,
+  LayoutDashboard,
   ListOrdered,
+  MessageCircle,
+  Radar,
   Shield,
+  TrendingUp,
+  UserRound,
+  Users,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -32,6 +33,7 @@ export const navItems: NavItem[] = [
   { to: '/projections', label: 'Season Projections', short: 'Proj', icon: TrendingUp },
   { to: '/optimizer', label: 'Lineup Optimizer', short: 'Lineups', icon: ListOrdered },
   { to: '/trenches', label: 'Trench Report', short: 'Trench', icon: Shield },
+  { to: '/coverage', label: 'Coverage Report', short: 'Coverage', icon: Radar },
   { to: '/coaches', label: 'Coaches', short: 'Coaches', icon: Briefcase },
   { to: '/chat', label: 'Chat', short: 'Chat', icon: MessageCircle },
 ]
