@@ -131,9 +131,23 @@ def _grades(db: Session, season: int, through_week: Optional[int]):
     return _cached(("grades", season, through_week), build)
 
 
+def _rows(frame: pd.DataFrame):
+    """Rows as JSON-safe dicts, for a frame whose columns are already right.
+
+    `.where(notna, None)` alone is not enough: on a float64 column pandas puts
+    the NaN straight back, and json refuses it with "Out of range float values
+    are not JSON compliant". Going through object dtype is what makes the null
+    stick. `trenches.matchup` returns nan for a team missing from the grades
+    frame, so this path does reach nulls.
+    """
+    if frame is None or frame.empty:
+        return []
+    return frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
+
+
 def _records(grades: pd.DataFrame):
-    out = grades.reset_index().rename(columns={"index": "team"})
-    return out.where(pd.notna(out), None).to_dict(orient="records")
+    """The same, for a frame that carries the team in its index."""
+    return _rows(grades.reset_index().rename(columns={"index": "team"}))
 
 
 @router.get("/ratings")
@@ -184,7 +198,7 @@ def weekly_matchups(season: int = Query(..., ge=1999),
         "basis": str(grades.get("basis", pd.Series(["in-season"])).iloc[0]),
         "bands": [{"from": lo, "to": hi, "label": label}
                   for lo, hi, label in trenches.BANDS],
-        "matchups": rows.where(pd.notna(rows), None).to_dict(orient="records"),
+        "matchups": _rows(rows.reset_index(drop=True)),
     }
 
 

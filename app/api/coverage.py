@@ -40,6 +40,7 @@ import logging
 import time
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -112,9 +113,18 @@ def _grades(season: int, through_week: Optional[int]):
 
 
 def _records(frame: pd.DataFrame):
+    """Rows as JSON-safe dicts.
+
+    `.where(notna, None)` alone is not enough: on a float64 column pandas
+    coerces the None straight back to NaN, which json refuses with "Out of
+    range float values are not JSON compliant". Going through object dtype is
+    what makes the null stick, and a corner with no targets this season has
+    real nulls to carry.
+    """
     if frame is None or frame.empty:
         return []
-    return frame.where(pd.notna(frame), None).to_dict(orient="records")
+    out = frame.replace([np.inf, -np.inf], np.nan)
+    return out.astype(object).where(pd.notna(out), None).to_dict(orient="records")
 
 
 def _bands(coverage):
