@@ -10,7 +10,15 @@ python-multipart==0.0.6
 # NFL Data and Analysis
 nflreadpy
 polars[rtcompat]  # CPU-compatible build (gingmachine lacks AVX2/AVX)
-pyarrow>=7.0.0  # required by nflreadpy (Polars .to_pandas() conversion)
+# required by nflreadpy (Polars .to_pandas()) and by pandas.read_parquet.
+# Capped at <18 because numpy is pinned to 1.24.3 below and pyarrow 18+ declares
+# NO numpy requirement at all, so pip happily installed 26.0.0 and the import
+# then failed at runtime: "pyarrow requires NumPy 2.0 or newer, found 1.24.3".
+# Nothing surfaced that -- the build passed, the pod came up healthy, and every
+# parquet read in the image raised ImportError instead. Lifting the cap means
+# moving numpy to 2.x, which means pandas>=2.2.2 as well (2.1.4 does not support
+# it), so it is a deliberate upgrade rather than a loosened pin.
+pyarrow>=7.0.0,<18
 pandas==2.1.4
 numpy==1.24.3
 scipy==1.11.4
