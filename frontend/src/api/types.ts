@@ -805,11 +805,42 @@ export interface Lineup {
   players: LineupPlayer[]
 }
 
+/** A slate CSV on file. Uploaded once; every later build reuses it. */
+export interface SavedSlate {
+  slate_id: number
+  season: number
+  week: number
+  contest: string
+  slate_key: string
+  filename: string
+  players: number
+  teams: string[]
+  uploaded_at: string | null
+  used_at: string | null
+  content_hash: string
+}
+
+export interface SlateList {
+  status: string
+  season: number
+  week: number | null
+  count: number
+  data: SavedSlate[]
+  note: string
+}
+
 export interface LineupResponse {
   status: string
   season: number
   week: number
   objective: string
+  /** "upload" when a file was sent, "stored" when the saved slate was used. */
+  slate_source: string
+  slate_saved: boolean
+  saved_slate?: SavedSlate
+  /** The row these lineups were recorded to, scored once the week is played. */
+  build_id: number | null
+  tracked: boolean
   salary_cap: number
   requested: number
   /** Set when fewer lineups were built than asked for — usually the exposure cap. */
@@ -824,6 +855,46 @@ export interface LineupResponse {
   matched_to_projections: number
   count: number
   data: Lineup[]
+}
+
+/** One week of the optimizer's own record. */
+export interface LineupWeekPerformance {
+  week: number
+  builds: number
+  lineups: number
+  scored_lineups: number
+  projected: number | null
+  actual: number | null
+  error: number | null
+  best_lineup_actual: number | null
+  /** What FanDuel's own FPPG would have built from the same pool, scored. */
+  fppg_baseline: number | null
+  /** The best lineup the slate held, in hindsight. */
+  best_possible: number | null
+  beat_fppg: number
+  compared_to_fppg: number
+}
+
+export interface LineupPerformance {
+  status: string
+  season: number
+  week: number | null
+  message?: string
+  weeks: LineupWeekPerformance[]
+  totals: {
+    builds: number
+    lineups: number
+    scored_lineups: number
+    weeks_scored: number
+    projected: number | null
+    actual: number | null
+    fppg_baseline: number | null
+    best_possible: number | null
+    beat_fppg: number
+    compared_to_fppg: number
+    beat_fppg_rate: number | null
+  }
+  note: string
 }
 
 export interface SlateCoverage {

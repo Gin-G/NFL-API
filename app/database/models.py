@@ -490,6 +490,127 @@ class CurrentRoster(Base):
     __table_args__ = (Index("ix_current_roster_team_pos", "team", "position"),)
 
 
+class FanduelSlate(Base):
+    """A FanDuel slate CSV, kept so it is uploaded once instead of every build.
+
+    FanDuel publishes salaries nowhere fetchable (see api/optimizer.py for the
+    search), so the contest's own player list is the input -- and
+    re-downloading it for every lineup build is the only manual step left in
+    the whole chain. The file is stored verbatim rather than shredded into
+    rows: it is ~100 KB, the optimizer reads it with ``read_csv`` either way,
+    and keeping the bytes means FanDuel changing a column later is something to
+    re-read rather than something already lost to today's schema.
+
+    Keyed (season, week, slate_key) so a re-upload REPLACES: prices move during
+    the week and the newest download is the one that matches the contest.
+    `slate_key` is "classic" or "showdown:AWAY@HOME", because Showdown is a
+    different contest with its own file -- one per game, so a week can hold
+    several.
+    """
+    __tablename__ = "fanduel_slates"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    season       = Column(Integer, index=True)
+    week         = Column(Integer, index=True)
+    contest      = Column(String)        # classic | showdown
+    slate_key    = Column(String)        # classic | showdown:AWAY@HOME
+    filename     = Column(String)
+    content      = Column(Text)          # the CSV as uploaded
+    content_hash = Column(String)        # sha256: shows whether a re-upload changed anything
+    row_count    = Column(Integer)
+    teams        = Column(String)        # comma-joined, to show what the file covers
+    uploaded_at  = Column(DateTime, default=datetime.utcnow)
+    used_at      = Column(DateTime)      # the last build that read it
+
+    __table_args__ = (
+        UniqueConstraint("season", "week", "slate_key", name="uq_fanduel_slate"),
+        Index("ix_fanduel_slate_week", "season", "week"),
+    )
+
+
+class LineupBuild(Base):
+    """One lineup-build request, with the settings that produced it.
+
+    The settings are stored and not just the lineups, because the honest
+    baselines can only be rebuilt from the same pool: what FanDuel's own FPPG
+    would have picked under that cap, and what the best lineup on the slate
+    turned out to be. Both are computed after the games by
+    scripts.score_lineups, which needs the cap, the slate window and the
+    exclusions to reconstruct what the optimizer was choosing from.
+    """
+    __tablename__ = "lineup_builds"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    season               = Column(Integer, index=True)
+    week                 = Column(Integer, index=True)
+    # fanduel_slates.id, deliberately without a foreign key: a slate can be
+    # deleted and the record of what was built from it should survive that.
+    slate_id             = Column(Integer, index=True)
+    contest              = Column(String)   # classic | showdown
+    slate                = Column(String)   # all | main | sunday | primetime | single_game
+    objective            = Column(String)   # mean | median | floor | ceiling
+    salary_cap           = Column(Integer)
+    max_usage_percentage = Column(Integer)
+    exclude_players      = Column(Text)     # comma-joined, as sent
+    num_requested        = Column(Integer)
+    num_built            = Column(Integer)
+    built_at             = Column(DateTime, default=datetime.utcnow)
+
+    # Filled in once the week has actuals, by scripts.score_lineups.
+    fppg_points          = Column(Float)    # FanDuel's own FPPG lineup, actually scored
+    fppg_projected       = Column(Float)    # ... and what FPPG said it would score
+    best_points          = Column(Float)    # the best lineup the slate held, in hindsight
+    scored_at            = Column(DateTime)
+
+    __table_args__ = (Index("ix_lineup_build_week", "season", "week"),)
+
+
+class LineupEntry(Base):
+    """One built lineup, and what it went on to score.
+
+    `actual_points` is the sum over the players that could be scored, with
+    `unscored_players` saying how many could not be -- a defense on a week
+    nflverse team stats were unavailable, or a player who did not play. A
+    lineup with anything unscored is not comparable to a contest result, so the
+    count is stored beside the total rather than folded into it.
+    """
+    __tablename__ = "lineup_entries"
+
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    build_id         = Column(Integer, index=True)
+    lineup_index     = Column(Integer)     # 1 = the most expensive, as returned
+    salary           = Column(Integer)
+    projected_points = Column(Float)
+    actual_points    = Column(Float)
+    scored_players   = Column(Integer)
+    unscored_players = Column(Integer)
+    scored_at        = Column(DateTime)
+
+    __table_args__ = (Index("ix_lineup_entry_build", "build_id", "lineup_index"),)
+
+
+class LineupPlayer(Base):
+    """A player in a built lineup, with his projection frozen at build time."""
+    __tablename__ = "lineup_players"
+
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    lineup_id        = Column(Integer, index=True)
+    slot             = Column(String)      # the CSV's Roster Position
+    # The CSV's Position. Kept because it is what identifies a DEFENSE at
+    # scoring time: defenses have no player_id and no stat line, and in a
+    # Showdown lineup the slot is "MVP"/"AnyFLEX" and names no position at all.
+    position         = Column(String)
+    player_id        = Column(String, index=True)  # null for DEF, and when the name join missed
+    player_name      = Column(String)
+    team             = Column(String)
+    salary           = Column(Integer)
+    projected_points = Column(Float)
+    from_model       = Column(Integer)     # 0 = FanDuel's FPPG (defenses, join misses)
+    actual_points    = Column(Float)
+
+    __table_args__ = (Index("ix_lineup_player_lineup", "lineup_id"),)
+
+
 def apply_light_migrations(engine) -> None:
     """Idempotent additive schema fixups for columns added after a table already
     exists (no Alembic here; ``create_all`` only creates missing tables, never alters

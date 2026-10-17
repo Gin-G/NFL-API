@@ -13,6 +13,7 @@ model does not project at all.
 The optimizer itself lives in nfl_projections.optimizer, imported here without
 TensorFlow (the package defers its model imports), so the web image stays small.
 """
+import hashlib
 import io
 import logging
 from datetime import datetime
@@ -22,7 +23,8 @@ import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
-from database.models import PlayerProjection, Schedule
+from database.models import (FanduelSlate, LineupBuild, LineupEntry, LineupPlayer,
+                             PlayerProjection, Schedule)
 from database.session import get_db
 
 from .utils import get_current_nfl_season
@@ -180,7 +182,27 @@ def _opportunity(season: int, week: int):
         return None
 
 
-async def _read_csv(upload: UploadFile) -> pd.DataFrame:
+def _csv_frame(text: str, source: str = "That file") -> pd.DataFrame:
+    """Parse and validate a slate CSV. Shared by the upload and the saved copy,
+    so a slate that was readable on upload cannot become unreadable later
+    without saying so."""
+    try:
+        frame = pd.read_csv(io.StringIO(text))
+    except Exception as exc:
+        raise HTTPException(status_code=400,
+                            detail=f"{source} could not be read as CSV: {exc}")
+    missing = [c for c in REQUIRED_COLUMNS if c not in frame.columns]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{source} does not look like a FanDuel slate export — no "
+                    f"{', '.join(missing)} column. Download the player list from the "
+                    f"contest page."))
+    return frame
+
+
+async def _read_csv(upload: UploadFile):
+    """``(frame, text)`` for an upload. The text goes to the database verbatim."""
     raw = await upload.read()
     if not raw:
         raise HTTPException(status_code=400, detail="That file is empty.")
@@ -188,22 +210,187 @@ async def _read_csv(upload: UploadFile) -> pd.DataFrame:
         raise HTTPException(
             status_code=413,
             detail=f"That file is {len(raw) // 1024} KB; a FanDuel slate export is ~100 KB.")
+    # utf-8-sig, not utf-8: FanDuel's export has carried a byte-order mark, and
+    # left in the stored text it would reappear in the first column's NAME on
+    # every later read.
+    text = raw.decode("utf-8-sig", "replace")
+    return _csv_frame(text), text
+
+
+# ---------------------------------------------------------------------------
+# The saved slate
+#
+# Uploading the contest CSV is the one thing in this chain a person has to do by
+# hand, so it is done once per slate and reused: every build stores what it was
+# given, and a build with no file reaches for the stored copy.
+# ---------------------------------------------------------------------------
+
+def _slate_teams_listed(frame: pd.DataFrame):
+    if "Team" not in frame.columns:
+        return []
+    return sorted({str(t).upper() for t in frame["Team"].dropna().unique() if str(t).strip()})
+
+
+def _slate_key(frame: pd.DataFrame, contest: str) -> str:
+    """What makes two uploads the same slate.
+
+    A week has exactly one classic player list, but a Showdown file per game —
+    so the game's teams are part of the key, and re-uploading Chiefs-Bills
+    replaces Chiefs-Bills rather than last week's other Showdown.
+    """
+    if contest != "showdown":
+        return "classic"
+    teams = _slate_teams_listed(frame)
+    return "showdown:" + "@".join(teams) if teams else "showdown"
+
+
+def _save_slate(db, season: int, week: int, contest: str, filename: Optional[str],
+                text: str, frame: pd.DataFrame) -> Optional[FanduelSlate]:
+    """Store (or replace) the slate for this week. Never raises: a failed save
+    costs the convenience, not the lineups the caller asked for."""
     try:
-        frame = pd.read_csv(io.BytesIO(raw))
+        key = _slate_key(frame, contest)
+        row = db.query(FanduelSlate).filter(
+            FanduelSlate.season == season, FanduelSlate.week == week,
+            FanduelSlate.slate_key == key).one_or_none()
+        if row is None:
+            row = FanduelSlate(season=season, week=week, slate_key=key)
+            db.add(row)
+        row.contest = contest
+        row.filename = (filename or "slate.csv")[:255]
+        row.content = text
+        row.content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        row.row_count = int(len(frame))
+        row.teams = ",".join(_slate_teams_listed(frame))
+        row.uploaded_at = datetime.utcnow()
+        db.commit()
+        return row
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not read that as CSV: {exc}")
-    missing = [c for c in REQUIRED_COLUMNS if c not in frame.columns]
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=(f"That does not look like a FanDuel slate export — no {', '.join(missing)} "
-                    f"column. Download the player list from the contest page."))
-    return frame
+        logger.warning("Could not save the slate CSV (%s); this build still runs", exc)
+        db.rollback()
+        return None
+
+
+def _stored_slate(db, season: int, week: int,
+                  slate_id: Optional[int] = None) -> Optional[FanduelSlate]:
+    """The slate to use when no file was uploaded.
+
+    Classic first when a week holds both: it is the contest the optimizer is
+    normally asked about, and a Showdown file is one game. `slate_id` picks a
+    specific one, which is how a Showdown slate gets chosen at all.
+    """
+    if slate_id is not None:
+        return db.query(FanduelSlate).filter(FanduelSlate.id == slate_id).one_or_none()
+    rows = db.query(FanduelSlate).filter(
+        FanduelSlate.season == season, FanduelSlate.week == week).all()
+    if not rows:
+        return None
+    classic = [r for r in rows if r.contest == "classic"]
+    return max(classic or rows, key=lambda r: r.uploaded_at or datetime.min)
+
+
+def _slate_summary(row: FanduelSlate) -> dict:
+    return {
+        "slate_id": row.id,
+        "season": row.season,
+        "week": row.week,
+        "contest": row.contest,
+        "slate_key": row.slate_key,
+        "filename": row.filename,
+        "players": row.row_count,
+        "teams": [t for t in (row.teams or "").split(",") if t],
+        "uploaded_at": row.uploaded_at,
+        "used_at": row.used_at,
+        "content_hash": (row.content_hash or "")[:12],
+    }
+
+
+# ---------------------------------------------------------------------------
+# The record of what was built
+#
+# Stored so the optimizer can be scored the way the projections are: what it
+# said before kickoff, against what happened. scripts.score_lineups fills in
+# the actuals, and GET /optimizer/performance reads them back.
+# ---------------------------------------------------------------------------
+
+def _text_or_none(value):
+    if value is None or value != value:        # None or NaN
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _float_or_none(value):
+    try:
+        if value is None or value != value:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_build(db, lineups, *, season: int, week: int, slate_id: Optional[int],
+                  contest: str, slate: str, objective: str, salary_cap: int,
+                  max_usage_percentage: int, excludes, num_requested: int):
+    """Write the build and its lineups; return the build id, or None.
+
+    Wrapped whole in try/except on purpose, the same way the volume context is:
+    bookkeeping that can fail somebody's lineups is worse than no bookkeeping.
+    """
+    try:
+        build = LineupBuild(
+            season=season, week=week, slate_id=slate_id, contest=contest, slate=slate,
+            objective=objective, salary_cap=int(salary_cap),
+            max_usage_percentage=int(max_usage_percentage),
+            exclude_players=",".join(excludes) if excludes else None,
+            num_requested=int(num_requested), num_built=len(lineups),
+            built_at=datetime.utcnow())
+        db.add(build)
+        db.flush()
+        for index, lineup in enumerate(lineups, start=1):
+            def column(name):
+                # `lineup.get(missing)` is None, and pd.to_numeric(None) is a
+                # scalar NaN rather than a Series -- so .fillna on it raises.
+                if name not in lineup.columns:
+                    return pd.Series(0.0, index=lineup.index)
+                return pd.to_numeric(lineup[name], errors="coerce")
+
+            salaries, points = column("Salary"), column("lineup_points")
+            entry = LineupEntry(
+                build_id=build.id, lineup_index=index,
+                salary=int(salaries.fillna(0).sum()),
+                projected_points=round(float(points.fillna(0).sum()), 2))
+            db.add(entry)
+            db.flush()
+            for _, row in lineup.iterrows():
+                db.add(LineupPlayer(
+                    lineup_id=entry.id,
+                    slot=_text_or_none(row.get("Roster Position")),
+                    position=_text_or_none(row.get("Position")),
+                    player_id=_text_or_none(row.get("player_id")),
+                    player_name=_text_or_none(row.get("Nickname")),
+                    team=_text_or_none(row.get("Team")),
+                    salary=int(row["Salary"]) if pd.notna(row.get("Salary")) else None,
+                    projected_points=_float_or_none(row.get("lineup_points")),
+                    from_model=int(pd.notna(row.get("fanduel_fantasy_points"))),
+                    actual_points=None))
+        if slate_id is not None:
+            row = db.query(FanduelSlate).filter(FanduelSlate.id == slate_id).one_or_none()
+            if row is not None:
+                row.used_at = datetime.utcnow()
+        db.commit()
+        return build.id
+    except Exception as exc:
+        logger.warning("Could not record this build for scoring (%s)", exc)
+        db.rollback()
+        return None
 
 
 @router.post("/lineups")
 async def build_lineups(
-    file: UploadFile = File(..., description="FanDuel slate CSV (the contest player list)"),
+    file: Optional[UploadFile] = File(
+        None, description="FanDuel slate CSV. Optional: the week's saved slate is used "
+                          "when no file is sent."),
     season: Optional[int] = Form(None),
     week: Optional[int] = Form(None),
     num_lineups: int = Form(5),
@@ -213,9 +400,21 @@ async def build_lineups(
     exclude: str = Form(""),
     slate: str = Form("all"),
     one_kicker: bool = Form(True),
+    slate_id: Optional[int] = Form(None),
+    save_slate: bool = Form(True),
+    track: bool = Form(True),
     db: Session = Depends(get_db),
 ):
     """Build lineups from a FanDuel slate CSV and the week's published projections.
+
+    The CSV is uploaded ONCE. Every upload is stored against (season, week,
+    contest) and a request with no file reuses it, so changing the objective or
+    the cap does not mean going back to FanDuel for the same download. A later
+    upload for the same week replaces it, which is what you want when prices
+    move midweek. `slate_id` picks a specific saved slate (how a Showdown file
+    gets chosen when a classic list is also stored), `save_slate=false` builds
+    from a file without keeping it, and `track=false` builds without recording
+    it for scoring.
 
     `objective` is mean / median / floor / ceiling. Mean is the default because
     it is the one that was measured: EXPERIMENTS #13 built mean- and
@@ -249,7 +448,19 @@ async def build_lineups(
         raise HTTPException(status_code=400,
                             detail=f"slate must be one of {', '.join(SLATES)}.")
 
-    salaries = await _read_csv(file)
+    uploaded = file is not None and bool((getattr(file, "filename", "") or "").strip())
+    slate_row = None
+    if uploaded:
+        salaries, csv_text = await _read_csv(file)
+    else:
+        slate_row = _stored_slate(db, season, week, slate_id)
+        if slate_row is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"No slate CSV saved for {season} week {week}. Upload the "
+                        f"contest player list once — every build after that reuses it."))
+        csv_text = slate_row.content or ""
+        salaries = _csv_frame(csv_text, "The saved slate")
     slate_size = len(salaries)
 
     # Showdown is its own contest, not a classic slate with fewer games: five
@@ -257,6 +468,13 @@ async def build_lineups(
     # the classic optimizer it yields nothing, since no row names a classic slot
     # — which is exactly what the first real upload here did.
     showdown = opt.is_showdown(salaries)
+
+    # Save before building, not after: an upload that turns out to fit no lineup
+    # is still the file for this week, and re-downloading it to try a different
+    # cap is the work this is here to remove.
+    if uploaded and save_slate:
+        slate_row = _save_slate(db, season, week, "showdown" if showdown else "classic",
+                                getattr(file, "filename", None), csv_text, salaries)
     teams, games = (None, [])
     if not showdown:
         # The export is always the full Thursday-Monday list, so a narrower
@@ -344,6 +562,16 @@ async def build_lineups(
                           f"fits under.")
         raise HTTPException(status_code=422, detail=detail)
 
+    build_id = None
+    if track:
+        build_id = _record_build(
+            db, lineups, season=season, week=week,
+            slate_id=slate_row.id if slate_row is not None else None,
+            contest="showdown" if showdown else "classic",
+            slate="single_game" if showdown else slate, objective=objective,
+            salary_cap=salary_cap, max_usage_percentage=max_usage_percentage,
+            excludes=excludes, num_requested=num_lineups)
+
     out = []
     for i, lineup in enumerate(lineups, start=1):
         players = [{
@@ -379,6 +607,15 @@ async def build_lineups(
         "season": season,
         "week": week,
         "objective": objective,
+        # Where the salaries came from, and the row they are kept in. "stored"
+        # means no file was sent and the saved slate was used.
+        "slate_source": "upload" if uploaded else "stored",
+        "slate_saved": slate_row is not None,
+        **({"saved_slate": _slate_summary(slate_row)} if slate_row is not None else {}),
+        # The row in `lineup_builds` these lineups were written to, which is
+        # what GET /optimizer/performance scores once the week is played.
+        "build_id": build_id,
+        "tracked": build_id is not None,
         "salary_cap": salary_cap,
         "requested": num_lineups,
         "contest": "showdown" if showdown else "classic",
@@ -443,4 +680,202 @@ def slate_coverage(
         "computed_at": max((r.computed_at for r in rows if r.computed_at), default=None),
         "note": ("DEF is not projected by the model; those slots use FanDuel's own "
                  "FPPG from the uploaded CSV."),
+    }
+
+
+@router.get("/slates")
+def list_slates(
+    season: Optional[int] = Query(None),
+    week: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """The slate CSVs on file. A build with no upload uses the newest classic one
+    for its week."""
+    season = season or get_current_nfl_season()
+    q = db.query(FanduelSlate).filter(FanduelSlate.season == season)
+    if week is not None:
+        q = q.filter(FanduelSlate.week == week)
+    rows = sorted(q.all(), key=lambda r: (r.week or 0, r.slate_key or ""), reverse=True)
+    return {
+        "status": "success",
+        "season": season,
+        "week": week,
+        "count": len(rows),
+        "data": [_slate_summary(r) for r in rows],
+        "note": ("A build with no file uploaded uses the newest classic slate for the "
+                 "week; pass slate_id to use a specific one (a Showdown file, say)."),
+    }
+
+
+@router.delete("/slates/{slate_id}")
+def delete_slate(slate_id: int, db: Session = Depends(get_db)):
+    """Forget a saved slate. The builds made from it keep their record."""
+    row = db.query(FanduelSlate).filter(FanduelSlate.id == slate_id).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No saved slate {slate_id}.")
+    summary = _slate_summary(row)
+    db.delete(row)
+    db.commit()
+    return {"status": "deleted", "slate": summary}
+
+
+def _mean(values):
+    values = [v for v in values if v is not None]
+    return round(sum(values) / len(values), 2) if values else None
+
+
+@router.get("/performance")
+def lineup_performance(
+    season: Optional[int] = Query(None),
+    week: Optional[int] = Query(None, description="Include the lineups themselves for one week"),
+    db: Session = Depends(get_db),
+):
+    """How the lineups this optimizer built actually scored.
+
+    The same discipline as the projection accuracy record: the lineups were
+    built before kickoff and are scored afterwards, never rewritten. Two
+    baselines come with them, because a lineup's raw score says nothing on its
+    own — a 110-point week is good or bad depending on the slate.
+
+      * `fppg_points` — what FanDuel's own season-average FPPG would have built
+        from the same pool under the same cap, actually scored. This is the
+        honest denominator: beating it is the whole claim the board makes.
+      * `best_points` — the best lineup the slate held, in hindsight. Nobody
+        hits it; it says how much was on the table.
+
+    `complete` counts only lineups where every slot could be scored. A defense
+    on a week team stats were unavailable, or a player who did not play, leaves
+    a lineup partial and out of the averages.
+    """
+    season = season or get_current_nfl_season()
+    builds = db.query(LineupBuild).filter(LineupBuild.season == season)
+    if week is not None:
+        builds = builds.filter(LineupBuild.week == week)
+    builds = sorted(builds.all(), key=lambda b: (b.week or 0, b.id))
+    if not builds:
+        return {"status": "no_data", "season": season, "week": week,
+                "message": ("No lineups have been built for that season yet. Builds are "
+                            "recorded automatically; scoring runs once the week's "
+                            "actuals land.")}
+
+    entries = {}
+    if builds:
+        ids = [b.id for b in builds]
+        for entry in db.query(LineupEntry).filter(LineupEntry.build_id.in_(ids)).all():
+            entries.setdefault(entry.build_id, []).append(entry)
+    for rows in entries.values():
+        rows.sort(key=lambda e: e.lineup_index or 0)
+
+    by_week: dict = {}
+    for build in builds:
+        rows = entries.get(build.id, [])
+        complete = [e for e in rows
+                    if e.actual_points is not None and not (e.unscored_players or 0)]
+        bucket = by_week.setdefault(build.week, {
+            "week": build.week, "builds": 0, "lineups": 0, "complete": 0,
+            "projected": [], "actual": [], "best_actual": None,
+            "fppg_points": [], "best_points": [], "beat_fppg": 0, "compared": 0,
+        })
+        bucket["builds"] += 1
+        bucket["lineups"] += len(rows)
+        bucket["complete"] += len(complete)
+        bucket["projected"].extend(e.projected_points for e in complete)
+        bucket["actual"].extend(e.actual_points for e in complete)
+        for entry in complete:
+            if bucket["best_actual"] is None or entry.actual_points > bucket["best_actual"]:
+                bucket["best_actual"] = entry.actual_points
+        if build.fppg_points is not None:
+            bucket["fppg_points"].append(build.fppg_points)
+            for entry in complete:
+                bucket["compared"] += 1
+                bucket["beat_fppg"] += int(entry.actual_points > build.fppg_points)
+        if build.best_points is not None:
+            bucket["best_points"].append(build.best_points)
+
+    weeks = []
+    for bucket in sorted(by_week.values(), key=lambda b: b["week"] or 0):
+        projected, actual = _mean(bucket["projected"]), _mean(bucket["actual"])
+        weeks.append({
+            "week": bucket["week"],
+            "builds": bucket["builds"],
+            "lineups": bucket["lineups"],
+            "scored_lineups": bucket["complete"],
+            "projected": projected,
+            "actual": actual,
+            "error": (round(projected - actual, 2)
+                      if projected is not None and actual is not None else None),
+            "best_lineup_actual": bucket["best_actual"],
+            "fppg_baseline": _mean(bucket["fppg_points"]),
+            "best_possible": _mean(bucket["best_points"]),
+            "beat_fppg": bucket["beat_fppg"],
+            "compared_to_fppg": bucket["compared"],
+        })
+
+    scored = [w for w in weeks if w["scored_lineups"]]
+    compared = sum(w["compared_to_fppg"] for w in weeks)
+    beat = sum(w["beat_fppg"] for w in weeks)
+    totals = {
+        "builds": sum(w["builds"] for w in weeks),
+        "lineups": sum(w["lineups"] for w in weeks),
+        "scored_lineups": sum(w["scored_lineups"] for w in weeks),
+        "weeks_scored": len(scored),
+        "projected": _mean([w["projected"] for w in scored]),
+        "actual": _mean([w["actual"] for w in scored]),
+        "fppg_baseline": _mean([w["fppg_baseline"] for w in scored]),
+        "best_possible": _mean([w["best_possible"] for w in scored]),
+        "beat_fppg": beat,
+        "compared_to_fppg": compared,
+        "beat_fppg_rate": round(beat / compared, 3) if compared else None,
+    }
+
+    detail = []
+    if week is not None:
+        lineup_ids = [e.id for rows in entries.values() for e in rows]
+        players: dict = {}
+        if lineup_ids:
+            for player in db.query(LineupPlayer).filter(
+                    LineupPlayer.lineup_id.in_(lineup_ids)).all():
+                players.setdefault(player.lineup_id, []).append(player)
+        for build in builds:
+            detail.append({
+                "build_id": build.id,
+                "built_at": build.built_at,
+                "objective": build.objective,
+                "contest": build.contest,
+                "slate": build.slate,
+                "salary_cap": build.salary_cap,
+                "exclude_players": build.exclude_players,
+                "fppg_baseline": build.fppg_points,
+                "fppg_projected": build.fppg_projected,
+                "best_possible": build.best_points,
+                "scored_at": build.scored_at,
+                "lineups": [{
+                    "lineup": entry.lineup_index,
+                    "salary": entry.salary,
+                    "projected": entry.projected_points,
+                    "actual": entry.actual_points,
+                    "unscored_players": entry.unscored_players,
+                    "players": [{
+                        "slot": p.slot,
+                        "player_name": p.player_name,
+                        "team": p.team,
+                        "salary": p.salary,
+                        "projected": p.projected_points,
+                        "actual": p.actual_points,
+                        "from_model": bool(p.from_model),
+                    } for p in sorted(players.get(entry.id, []), key=lambda p: p.id)],
+                } for entry in entries.get(build.id, [])],
+            })
+
+    return {
+        "status": "success",
+        "season": season,
+        "week": week,
+        "weeks": weeks,
+        "totals": totals,
+        **({"builds": detail} if week is not None else {}),
+        "note": ("fppg_baseline is the lineup FanDuel's own FPPG would have built from "
+                 "the same pool under the same cap, scored on what happened — the "
+                 "honest denominator. best_possible is the slate's best lineup in "
+                 "hindsight. Only lineups whose every slot could be scored are averaged."),
     }

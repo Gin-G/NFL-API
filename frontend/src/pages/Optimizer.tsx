@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Info, Upload } from 'lucide-react'
-import { useBuildLineups, useSlateCoverage } from '../api/optimizer'
+import { Info, Trash2, Upload } from 'lucide-react'
+import {
+  useBuildLineups, useForgetSlate, useLineupPerformance, useSavedSlates, useSlateCoverage,
+} from '../api/optimizer'
 import { getAvailableSeasons, getDefaultSeason, getCurrentNFLWeek } from '../utils/nflDate'
 import PageHeader from '../components/ui/PageHeader'
 import ErrorCard from '../components/ui/ErrorCard'
@@ -32,10 +34,22 @@ export default function Optimizer() {
   const [exclude, setExclude] = useState('')
 
   const coverage = useSlateCoverage(season, week)
+  const slates = useSavedSlates(season, week)
+  const performance = useLineupPerformance(season)
+  const forget = useForgetSlate()
   const build = useBuildLineups()
   const result = build.data
   const error = build.error as { response?: { data?: { detail?: string } } } | null
   const detail = error?.response?.data?.detail
+
+  // The slate on file for this week. A build with no new file uses it, which is
+  // the whole point: FanDuel's CSV is downloaded once, not once per question.
+  const saved = useMemo(() => {
+    const rows = slates.data?.data?.filter((s) => s.week === week) ?? []
+    const classic = rows.filter((s) => s.contest === 'classic')
+    return (classic.length ? classic : rows)[0] ?? null
+  }, [slates.data, week])
+  const canBuild = Boolean(file || saved)
 
   const matchRate = useMemo(() => {
     if (!result || !result.slate_players) return null
@@ -155,20 +169,24 @@ export default function Optimizer() {
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <label className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm cursor-pointer transition-colors">
           <Upload size={14} />
-          {file ? file.name : 'Choose FanDuel slate CSV'}
+          {file ? file.name : saved ? 'Replace slate CSV' : 'Choose FanDuel slate CSV'}
           <input
             type="file" accept=".csv,text/csv" className="hidden"
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
           />
         </label>
         <button
-          onClick={() => file && build.mutate({
+          onClick={() => canBuild && build.mutate({
             file, season, week, num_lineups: numLineups, objective,
             salary_cap: salaryCap, max_usage_percentage: maxUsage, exclude, slate,
+          }, {
+            // The file has been saved server-side now, so later builds should
+            // use the stored copy rather than re-uploading the same bytes.
+            onSuccess: () => setFile(null),
           })}
-          disabled={!file || build.isPending}
+          disabled={!canBuild || build.isPending}
           className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
-            !file || build.isPending
+            !canBuild || build.isPending
               ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
               : 'bg-brand-green text-white hover:brightness-110'
           }`}
@@ -186,6 +204,38 @@ export default function Optimizer() {
           </span>
         )}
       </div>
+
+      {saved && !file && (
+        <div className="bg-slate-800 border border-slate-700 rounded-xl p-3 mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+          <span className="text-slate-200 font-medium">Slate on file</span>
+          <span>
+            {saved.filename} · {saved.players} players
+            {saved.contest === 'showdown' ? ' · Showdown' : ''}
+            {saved.teams.length ? ` · ${saved.teams.length} teams` : ''}
+            {saved.uploaded_at
+              ? ` · uploaded ${new Date(saved.uploaded_at + 'Z').toLocaleString()}`
+              : ''}
+          </span>
+          <span className="text-slate-500">
+            Build as often as you like — no re-upload. A new file replaces it.
+          </span>
+          <button
+            onClick={() => forget.mutate(saved.slate_id)}
+            disabled={forget.isPending}
+            className="ml-auto flex items-center gap-1 text-slate-500 hover:text-red-400 transition-colors"
+            title="Forget this slate"
+          >
+            <Trash2 size={12} /> Forget
+          </button>
+        </div>
+      )}
+
+      {!saved && !file && (
+        <p className="text-xs text-slate-500 mb-4">
+          Nothing saved for week {week} yet. Upload the contest player list once; every
+          build after that reuses it.
+        </p>
+      )}
 
       {detail && <ErrorCard message={detail} />}
 
@@ -255,8 +305,120 @@ export default function Optimizer() {
             * FanDuel's own FPPG rather than a model projection — defenses, and anyone the name
             join missed.
           </p>
+          {result.build_id !== null && (
+            <p className="text-slate-500 text-xs mt-1">
+              Recorded as build {result.build_id}; it gets scored once the week is played.
+            </p>
+          )}
         </>
       )}
+
+      {/* The optimizer's own record. Built before kickoff, scored afterwards. */}
+      <div className="mt-10">
+        <h2 className="text-white font-medium text-sm mb-1">Track record</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          Every build is recorded and scored once the week is played. The baseline is the
+          lineup FanDuel's own <span className="text-slate-300">FPPG</span> would have built
+          from the same players under the same cap — beating it is the whole claim the
+          board makes. <span className="text-slate-300">Best possible</span> is the slate's
+          best lineup in hindsight; nobody hits it.
+        </p>
+
+        {performance.data?.status === 'no_data' && (
+          <p className="text-xs text-slate-500">{performance.data.message}</p>
+        )}
+
+        {performance.data?.status === 'success' && (
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-500 text-left">
+                  <th className="pb-2 pr-3 font-medium">Week</th>
+                  <th className="pb-2 pr-3 font-medium text-right">Lineups</th>
+                  <th className="pb-2 pr-3 font-medium text-right">Scored</th>
+                  <th className="pb-2 pr-3 font-medium text-right">Projected</th>
+                  <th className="pb-2 pr-3 font-medium text-right">Actual</th>
+                  <th className="pb-2 pr-3 font-medium text-right">FPPG baseline</th>
+                  <th className="pb-2 pr-3 font-medium text-right">Best possible</th>
+                  <th className="pb-2 font-medium text-right">Beat baseline</th>
+                </tr>
+              </thead>
+              <tbody>
+                {performance.data.weeks.map((w) => {
+                  const edge = w.actual !== null && w.fppg_baseline !== null
+                    ? w.actual - w.fppg_baseline
+                    : null
+                  return (
+                    <tr key={w.week} className="border-t border-slate-700/60">
+                      <td className="py-1.5 pr-3 text-slate-200">Week {w.week}</td>
+                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                        {w.lineups}
+                      </td>
+                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                        {w.scored_lineups || '—'}
+                      </td>
+                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                        {w.projected ?? '—'}
+                      </td>
+                      <td className={`py-1.5 pr-3 text-right tabular-nums ${
+                        edge === null ? 'text-slate-400'
+                          : edge > 0 ? 'text-brand-green' : 'text-amber-400'
+                      }`}>
+                        {w.actual ?? '—'}
+                      </td>
+                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                        {w.fppg_baseline ?? '—'}
+                      </td>
+                      <td className="py-1.5 pr-3 text-right text-slate-500 tabular-nums">
+                        {w.best_possible ?? '—'}
+                      </td>
+                      <td className="py-1.5 text-right text-slate-400 tabular-nums">
+                        {w.compared_to_fppg ? `${w.beat_fppg} of ${w.compared_to_fppg}` : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+                {performance.data.totals.weeks_scored > 0 && (
+                  <tr className="border-t border-slate-600 text-slate-200">
+                    <td className="py-2 pr-3 font-medium">
+                      {performance.data.totals.weeks_scored} week
+                      {performance.data.totals.weeks_scored === 1 ? '' : 's'}
+                    </td>
+                    <td className="py-2 pr-3 text-right tabular-nums">
+                      {performance.data.totals.lineups}
+                    </td>
+                    <td className="py-2 pr-3 text-right tabular-nums">
+                      {performance.data.totals.scored_lineups}
+                    </td>
+                    <td className="py-2 pr-3 text-right tabular-nums">
+                      {performance.data.totals.projected ?? '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-right tabular-nums">
+                      {performance.data.totals.actual ?? '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-right tabular-nums">
+                      {performance.data.totals.fppg_baseline ?? '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-slate-500 tabular-nums">
+                      {performance.data.totals.best_possible ?? '—'}
+                    </td>
+                    <td className="py-2 text-right tabular-nums">
+                      {performance.data.totals.beat_fppg_rate !== null
+                        ? `${Math.round(performance.data.totals.beat_fppg_rate * 100)}%`
+                        : '—'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+            <p className="text-slate-500 text-xs mt-3">
+              Only lineups where every slot could be scored are averaged — a player who did
+              not play is a real zero, but a defense on a week team stats were unavailable
+              leaves a lineup out of the numbers until the next scoring run.
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
