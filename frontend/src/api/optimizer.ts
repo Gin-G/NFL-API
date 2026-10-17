@@ -89,10 +89,10 @@ export function useBuildLineups() {
       })
       return data
     },
-    onSuccess: () => {
-      // The upload was saved and the build recorded, so both lists moved.
-      queryClient.invalidateQueries({ queryKey: ['savedSlates'] })
-      queryClient.invalidateQueries({ queryKey: ['lineupPerformance'] })
-    },
+    // The slate is saved BEFORE the solve, so a build that fits nothing still
+    // leaves the file on file — hence onSettled, not onSuccess. Nothing is
+    // recorded for a failed build, so the record only moves on success.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['savedSlates'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['lineupPerformance'] }),
   })
 }
