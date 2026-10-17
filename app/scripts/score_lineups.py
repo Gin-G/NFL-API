@@ -254,11 +254,17 @@ def _pool(db, build, slate):
         if teams and "Team" in frame.columns:
             frame = frame[frame["Team"].astype(str).str.upper().isin(teams)]
 
-    # The same two filters the builder applies before it solves, so the
-    # baseline is choosing from the same players and not a kinder pool.
+    # The same filters the builder applies before it solves, so the baseline is
+    # choosing from the same players and not a kinder pool. The injury statuses
+    # come from the package rather than a copy of the list, so the two cannot
+    # drift apart silently.
+    try:
+        from nfl_projections.optimizer import EXCLUDED_INJURY_STATUSES as excluded_status
+    except Exception:
+        excluded_status = ["IR", "O", "D"]
     if "Injury Indicator" in frame.columns:
         flags = frame["Injury Indicator"].fillna("").astype(str).str.upper()
-        frame = frame[~flags.isin(["IR", "O", "D"])]
+        frame = frame[~flags.isin(list(excluded_status))]
     if build.exclude_players:
         excluded = {n.strip() for n in build.exclude_players.split(",") if n.strip()}
         frame = frame[~frame["Nickname"].isin(excluded)]
@@ -286,8 +292,13 @@ def _baselines(db, build, slate, actuals) -> dict:
         logger.warning("build %s: no optimizer available for baselines (%s)", build.id, exc)
         return out
 
-    frame = frame.dropna(subset=["Salary", "Roster Position", "Nickname"]).copy()
-    if "FPPG" not in frame.columns or frame.empty:
+    if "FPPG" not in frame.columns:
+        return out
+    # FPPG among them: the builder drops those rows too, so leaving them in
+    # would let the hindsight-best lineup roster someone it could never have
+    # picked.
+    frame = frame.dropna(subset=["Salary", "FPPG", "Roster Position", "Nickname"]).copy()
+    if frame.empty:
         return out
 
     scored, scorable = [], True
