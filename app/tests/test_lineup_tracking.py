@@ -202,6 +202,16 @@ class TestTheSlateIsUploadedOnce:
         body = _post(client, csv=None, slate_id=slate_id).json()
         assert body["saved_slate"]["slate_id"] == slate_id
 
+    def test_a_slate_id_from_another_week_is_refused(self, client, db_session):
+        _project(db_session, week=6)
+        _post(client)
+        slate_id = db_session.query(FanduelSlate).one().id
+        _project(db_session, week=7)
+
+        resp = _post(client, csv=None, week=7, slate_id=slate_id)
+        assert resp.status_code == 400
+        assert "week 6" in resp.json()["detail"]
+
     def test_listing_and_forgetting(self, client, db_session):
         _project(db_session)
         _post(client)
@@ -258,6 +268,43 @@ class TestTheBuildIsRecorded:
         skill = [p for p in players if p.position != "D"]
         assert all(p.player_id and p.from_model == 1 for p in skill)
         assert all(p.projected_points and p.salary for p in players)
+
+    def test_pressing_build_twice_is_not_two_samples(self, client, db_session):
+        _project(db_session)
+        first = _post(client).json()["build_id"]
+        second = _post(client).json()["build_id"]
+
+        assert second != first
+        (build,) = db_session.query(LineupBuild).all()
+        assert build.id == second
+        # ... and the superseded build's lineups went with it.
+        assert db_session.query(LineupEntry).count() == 1
+        assert db_session.query(LineupPlayer).count() == 9
+
+    def test_different_settings_are_different_builds(self, client, db_session):
+        _project(db_session)
+        _post(client, objective="mean")
+        _post(client, objective="ceiling")
+        _post(client, objective="ceiling", salary_cap=55000)
+
+        objectives = [(b.objective, b.salary_cap)
+                      for b in db_session.query(LineupBuild).all()]
+        assert sorted(objectives) == [("ceiling", 55000), ("ceiling", 60000),
+                                      ("mean", 60000)]
+
+    def test_a_scored_build_is_never_superseded(self, client, db_session):
+        """Once it is history it stays history, however much is rebuilt after."""
+        _project(db_session)
+        _post(client)
+        scored = db_session.query(LineupBuild).one()
+        scored.scored_at = datetime.utcnow()
+        scored.fppg_points = 101.5
+        db_session.commit()
+
+        _post(client)
+        builds = db_session.query(LineupBuild).all()
+        assert len(builds) == 2
+        assert any(b.id == scored.id and b.fppg_points == 101.5 for b in builds)
 
     def test_track_false_records_nothing(self, client, db_session):
         _project(db_session)

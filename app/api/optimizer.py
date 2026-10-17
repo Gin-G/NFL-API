@@ -329,6 +329,24 @@ def _float_or_none(value):
         return None
 
 
+def _drop_superseded(db, settings: dict) -> None:
+    """Forget an earlier UNSCORED build with exactly these settings.
+
+    Pressing Build twice is not two samples. The same slate, cap, objective,
+    exposure and exclusions produce the same lineups — or, if the board has
+    been recomputed in between, the newer ones are the ones that matter — so
+    the record keeps the latest rather than averaging a click count. A build
+    that has already been scored is history and is never touched.
+    """
+    stale = db.query(LineupBuild).filter_by(scored_at=None, **settings).all()
+    for build in stale:
+        entries = db.query(LineupEntry).filter(LineupEntry.build_id == build.id).all()
+        for entry in entries:
+            db.query(LineupPlayer).filter(LineupPlayer.lineup_id == entry.id).delete()
+            db.delete(entry)
+        db.delete(build)
+
+
 def _record_build(db, lineups, *, season: int, week: int, slate_id: Optional[int],
                   contest: str, slate: str, objective: str, salary_cap: int,
                   max_usage_percentage: int, excludes, num_requested: int):
@@ -338,13 +356,15 @@ def _record_build(db, lineups, *, season: int, week: int, slate_id: Optional[int
     bookkeeping that can fail somebody's lineups is worse than no bookkeeping.
     """
     try:
-        build = LineupBuild(
+        settings = dict(
             season=season, week=week, slate_id=slate_id, contest=contest, slate=slate,
             objective=objective, salary_cap=int(salary_cap),
             max_usage_percentage=int(max_usage_percentage),
             exclude_players=",".join(excludes) if excludes else None,
-            num_requested=int(num_requested), num_built=len(lineups),
-            built_at=datetime.utcnow())
+            num_requested=int(num_requested))
+        _drop_superseded(db, settings)
+        build = LineupBuild(**settings, num_built=len(lineups),
+                            built_at=datetime.utcnow())
         db.add(build)
         db.flush()
         for index, lineup in enumerate(lineups, start=1):
@@ -459,6 +479,13 @@ async def build_lineups(
                 status_code=400,
                 detail=(f"No slate CSV saved for {season} week {week}. Upload the "
                         f"contest player list once — every build after that reuses it."))
+        if slate_row.season != season or slate_row.week != week:
+            # Only reachable via an explicit slate_id, and worth saying rather
+            # than quietly pricing one week's players off another week's slate.
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Saved slate {slate_row.id} is for {slate_row.season} week "
+                        f"{slate_row.week}, not {season} week {week}."))
         csv_text = slate_row.content or ""
         salaries = _csv_frame(csv_text, "The saved slate")
     slate_size = len(salaries)
