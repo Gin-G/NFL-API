@@ -111,9 +111,37 @@ def latest_depth_ranks(season: int) -> dict:
     return ranks
 
 
+def latest_per_team(rosters):
+    """One row per player, every team held at its own newest published week.
+
+    nflverse publishes a weekly roster only for the teams that played, so the
+    league's newest week is missing whoever was on bye. A bye team still has a
+    roster, so it is carried at the week before rather than dropped. The cost of
+    mixing weeks is that a player who moved during someone's bye shows up under
+    both clubs; his newest row is the true one and wins outright.
+    """
+    import pandas as pd
+
+    latest = rosters.groupby("team")["week"].transform("max")
+    current = rosters[rosters["week"] == latest].sort_values("week")
+    if "gsis_id" not in current.columns:
+        return current
+    ids = current["gsis_id"]
+    ided = current[ids.notna() & (ids.astype(str).str.strip() != "")]
+    # Null ids must not be deduplicated together -- pandas treats NaN == NaN
+    # here, which would collapse every unidentified player into one row.
+    rest = current.drop(index=ided.index)
+    ided = ided.drop_duplicates(subset=["gsis_id"], keep="last")
+    keys = [c for c in ("full_name", "position") if c in rest.columns]
+    if keys:
+        rest = rest.drop_duplicates(subset=keys, keep="last")
+    return pd.concat([ided, rest]) if len(rest) else ided
+
+
 def rows_from_nflverse(season: int):
-    """Roster rows for the latest published week of `season`, or [] if there are
-    none yet (the preseason case the ESPN fallback exists for)."""
+    """Roster rows for `season`, each team at its own latest published week, or
+    [] if there are none yet (the preseason case the ESPN fallback exists for).
+    """
     import nflreadpy as nfl
 
     from database.models import CurrentRoster
@@ -126,10 +154,13 @@ def rows_from_nflverse(season: int):
     if rosters.empty or "week" not in rosters.columns:
         return []
 
-    week = int(rosters["week"].max())
-    current = rosters[rosters["week"] == week]
+    newest = int(rosters["week"].max())
+    current = latest_per_team(rosters)
     ranks = latest_depth_ranks(season)
-    logger.info("nflverse rosters: %d rows at week %d", len(current), week)
+    held = sorted(str(t) for t in current.loc[current["week"] < newest, "team"].dropna().unique())
+    logger.info("nflverse rosters: %d rows, %d teams, newest week %d%s",
+                len(current), current["team"].nunique(), newest,
+                " (on bye, held at their last week: %s)" % ", ".join(held) if held else "")
 
     rows, now = [], datetime.utcnow()
     for r in current.itertuples(index=False):
@@ -148,7 +179,7 @@ def rows_from_nflverse(season: int):
             experience=_int(getattr(r, "years_exp", None)),
             depth_rank=ranks.get(gsis),
             source="nflverse",
-            week=week,
+            week=_int(getattr(r, "week", None)),
             updated_at=now,
         ))
     return rows

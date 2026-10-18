@@ -22,11 +22,18 @@ def _clean(db_session):
 
 
 def _rosters():
-    """Two weeks of rosters; a player who changed teams between them."""
+    """Two weeks of rosters; a player who changed teams between them.
+
+    NYJ appear only in week 2 -- the bye-week shape, since nflverse publishes no
+    row for a team that did not play.
+    """
     return pd.DataFrame([
         {"week": 2, "gsis_id": "00-1", "espn_id": "8439", "full_name": "Traded Guy",
          "position": "WR", "team": "NYJ", "status": "ACT", "jersey_number": 11.0,
          "years_exp": 4, "birth_date": "1999-03-01"},
+        {"week": 2, "gsis_id": "00-5", "espn_id": "3", "full_name": "Jet On Bye",
+         "position": "WR", "team": "NYJ", "status": "ACT", "jersey_number": 17.0,
+         "years_exp": 3, "birth_date": None},
         {"week": 3, "gsis_id": "00-1", "espn_id": "8439", "full_name": "Traded Guy",
          "position": "WR", "team": "WAS", "status": "ACT", "jersey_number": 11.0,
          "years_exp": 4, "birth_date": "1999-03-01"},
@@ -69,6 +76,47 @@ class TestNflverseRows:
         assert len(traded) == 1
         assert traded[0].team == "WAS"          # not last week's team
         assert traded[0].week == 3
+
+    def test_a_team_on_bye_keeps_its_roster(self, nflverse):
+        """nflverse skips a team that did not play; it still has a roster.
+
+        Taking the league's newest week alone emptied four teams out of the
+        table every week until they played again.
+        """
+        from scripts import sync_rosters
+
+        rows = sync_rosters.rows_from_nflverse(2026)
+        jets = [r for r in rows if r.team == "NYJ"]
+        assert [r.full_name for r in jets] == ["Jet On Bye"]
+        assert jets[0].week == 2                # held at his last published week
+
+    def test_a_player_who_moved_during_the_bye_is_not_on_both_teams(self, nflverse):
+        """The price of mixing weeks, and the rule that settles it."""
+        from scripts import sync_rosters
+
+        rows = sync_rosters.rows_from_nflverse(2026)
+        assert [r.team for r in rows if r.gsis_id == "00-1"] == ["WAS"]
+        assert "00-1" not in {r.gsis_id for r in rows if r.team == "NYJ"}
+
+    def test_players_without_an_id_are_not_collapsed_together(self, monkeypatch):
+        """NaN == NaN inside drop_duplicates would leave one nameless player."""
+        import sys
+        import types
+
+        from scripts import sync_rosters
+
+        fake = types.ModuleType("nflreadpy")
+        fake.load_rosters_weekly = lambda seasons: pd.DataFrame([
+            {"week": 3, "gsis_id": None, "full_name": "Rookie One", "position": "WR",
+             "team": "SF", "status": "ACT"},
+            {"week": 3, "gsis_id": None, "full_name": "Rookie Two", "position": "WR",
+             "team": "SF", "status": "ACT"},
+        ])
+        fake.load_depth_charts = lambda seasons: pd.DataFrame()
+        monkeypatch.setitem(sys.modules, "nflreadpy", fake)
+
+        rows = sync_rosters.rows_from_nflverse(2026)
+        assert sorted(r.full_name for r in rows) == ["Rookie One", "Rookie Two"]
 
     def test_status_mapping(self, nflverse):
         from scripts import sync_rosters
@@ -140,7 +188,7 @@ class TestSourceSelection:
             raise AssertionError("ESPN should not be touched when nflverse has rosters")
 
         monkeypatch.setattr(sync_rosters, "rows_from_espn", no)
-        assert sync_rosters.sync(db_session, season=2026) == 4
+        assert sync_rosters.sync(db_session, season=2026) == 5
         assert {r.source for r in db_session.query(CurrentRoster).all()} == {"nflverse"}
 
     def test_each_run_replaces_the_table(self, nflverse, db_session):
