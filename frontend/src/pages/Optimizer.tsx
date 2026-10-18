@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import { Info, Trash2, Upload } from 'lucide-react'
 import {
-  useBuildLineups, useForgetSlate, useLineupPerformance, useSavedSlates, useSlateCoverage,
+  useBuildLineups, useForgetSlate, useLineupExposure, useLineupPerformance, useSavedSlates,
+  useSlateCoverage,
 } from '../api/optimizer'
 import { getAvailableSeasons, getDefaultSeason, getCurrentNFLWeek } from '../utils/nflDate'
 import PageHeader from '../components/ui/PageHeader'
@@ -33,9 +34,12 @@ export default function Optimizer() {
   const [maxUsage, setMaxUsage] = useState(50)
   const [exclude, setExclude] = useState('')
 
+  const [exposureScope, setExposureScope] = useState<'build' | 'week'>('build')
+
   const coverage = useSlateCoverage(season, week)
   const slates = useSavedSlates(season, week)
   const performance = useLineupPerformance(season)
+  const exposure = useLineupExposure(season, week)
   const forget = useForgetSlate()
   const build = useBuildLineups()
   const result = build.data
@@ -50,6 +54,15 @@ export default function Optimizer() {
     return (classic.length ? classic : rows)[0] ?? null
   }, [slates.data, week])
   const canBuild = Boolean(file || saved)
+
+  // Exposure, either of the lineups just built or of every build of the week.
+  // The cap is a promise about one build; pooled is where concentration shows.
+  const pooledExposure = exposure.data?.status === 'success' ? exposure.data : null
+  const scope = result ? exposureScope : 'week'
+  const exposureRows = scope === 'build' ? result?.exposure ?? [] : pooledExposure?.data ?? []
+  const exposureLineups = scope === 'build' ? result?.count ?? 0 : pooledExposure?.lineups ?? 0
+  const overCap = new Set(scope === 'week' ? pooledExposure?.over_cap ?? [] : [])
+  const showsActual = exposureRows.some((r) => r.actual !== null)
 
   const matchRate = useMemo(() => {
     if (!result || !result.slate_players) return null
@@ -311,6 +324,160 @@ export default function Optimizer() {
             </p>
           )}
         </>
+      )}
+
+      {/* Who the lineups actually lean on. The cap bounds this within one build;
+          pooled across the week nothing bounds it, which is the number worth seeing. */}
+      {exposureRows.length > 0 && (
+        <div className="mt-10">
+          <div className="flex items-baseline justify-between gap-4 mb-1">
+            <h2 className="text-white font-medium text-sm">Player exposure</h2>
+            {result && pooledExposure && (
+              <div className="flex text-xs rounded-lg overflow-hidden border border-slate-700">
+                {([
+                  ['build', 'This build'],
+                  ['week', `All builds · week ${week}`],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setExposureScope(value)}
+                    className={
+                      scope === value
+                        ? 'px-3 py-1 bg-slate-700 text-white'
+                        : 'px-3 py-1 text-slate-400 hover:text-slate-200'
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-slate-500 mb-3">
+            {scope === 'build' ? (
+              <>
+                Share of the {exposureLineups} lineup{exposureLineups === 1 ? '' : 's'} just
+                built, capped at {result?.exposure_cap}% per player.
+              </>
+            ) : (
+              <>
+                Share of all {exposureLineups} lineup{exposureLineups === 1 ? '' : 's'} across{' '}
+                {pooledExposure?.builds} build{pooledExposure?.builds === 1 ? '' : 's'} this
+                week, from {pooledExposure?.players_used} different players. The per-player cap
+                binds inside a build only — pooled, nothing stops the same name appearing in
+                every one of them.
+              </>
+            )}
+          </p>
+
+          {overCap.size > 0 && (
+            <div className="bg-slate-800 border border-amber-700/40 rounded-xl p-3 mb-3 flex gap-2 text-xs text-amber-200/80">
+              <Info size={14} className="shrink-0 mt-0.5" />
+              <span>
+                {Array.from(overCap).join(', ')}{' '}
+                {overCap.size === 1 ? 'is' : 'are'} in more of the week than any single build
+                allowed ({pooledExposure?.exposure_caps.map((c) => `${c}%`).join(', ')}). No
+                build broke its cap; this is the concentration the caps cannot see.
+              </span>
+            </div>
+          )}
+
+          <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-400 border-b border-slate-700">
+                  <th className="text-left py-2 px-3 font-medium">Player</th>
+                  <th className="text-left py-2 px-2 font-medium">Pos</th>
+                  <th className="text-left py-2 px-2 font-medium">Team</th>
+                  <th className="text-right py-2 px-2 font-medium">Salary</th>
+                  <th className="text-right py-2 px-2 font-medium">Lineups</th>
+                  {scope === 'week' && (
+                    <th className="text-right py-2 px-2 font-medium">Builds</th>
+                  )}
+                  <th className="text-left py-2 px-3 font-medium w-40">Exposure</th>
+                  <th className="text-right py-2 px-2 font-medium">Proj</th>
+                  {showsActual && <th className="text-right py-2 px-3 font-medium">Actual</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {exposureRows.map((r) => {
+                  const flagged = overCap.has(r.player_name)
+                  const slots = r.slots ? Object.entries(r.slots) : []
+                  return (
+                    <tr
+                      key={`${r.player_name}-${r.team}`}
+                      className="border-b border-slate-700/40 last:border-0"
+                    >
+                      <td className={`py-1.5 px-3 ${flagged ? 'text-amber-300' : 'text-slate-200'}`}>
+                        {r.player_name}
+                        {!r.from_model && (
+                          <span
+                            className="text-slate-500"
+                            title="FanDuel's FPPG, not a model projection"
+                          >
+                            {' '}*
+                          </span>
+                        )}
+                      </td>
+                      <td
+                        className="py-1.5 px-2 text-slate-500"
+                        title={slots.length > 1
+                          ? slots.map(([slot, n]) => `${slot}: ${n}`).join(', ')
+                          : undefined}
+                      >
+                        {r.position}
+                        {slots.length > 1 && <span className="text-slate-600"> †</span>}
+                      </td>
+                      <td className="py-1.5 px-2 text-slate-400">{r.team}</td>
+                      <td className="py-1.5 px-2 text-right text-slate-400 tabular-nums">
+                        {r.salary === null ? '—' : `$${r.salary.toLocaleString()}`}
+                      </td>
+                      <td className="py-1.5 px-2 text-right text-slate-300 tabular-nums">
+                        {r.lineups}
+                      </td>
+                      {scope === 'week' && (
+                        <td className="py-1.5 px-2 text-right text-slate-400 tabular-nums">
+                          {r.builds ?? '—'}
+                        </td>
+                      )}
+                      <td className="py-1.5 px-3">
+                        <div className="flex items-center gap-2">
+                          <div className="h-1.5 flex-1 min-w-[3rem] bg-slate-700 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full ${flagged ? 'bg-amber-400' : 'bg-brand-green'}`}
+                              style={{ width: `${Math.min(r.exposure ?? 0, 100)}%` }}
+                            />
+                          </div>
+                          <span
+                            className={`tabular-nums w-11 text-right ${
+                              flagged ? 'text-amber-300' : 'text-slate-300'
+                            }`}
+                          >
+                            {r.exposure === null ? '—' : `${r.exposure}%`}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-1.5 px-2 text-right text-slate-300 tabular-nums">
+                        {r.projected ?? '—'}
+                      </td>
+                      {showsActual && (
+                        <td className="py-1.5 px-3 text-right text-slate-200 tabular-nums">
+                          {r.actual ?? '—'}
+                        </td>
+                      )}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-slate-500 text-xs mt-2">
+            * FanDuel's own FPPG rather than a model projection.
+            {exposureRows.some((r) => (r.slots ? Object.keys(r.slots).length > 1 : false)) &&
+              ' † filled more than one slot — hover for the split.'}
+          </p>
+        </div>
       )}
 
       {/* The optimizer's own record. Built before kickoff, scored afterwards. */}

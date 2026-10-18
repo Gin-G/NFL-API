@@ -675,6 +675,19 @@ async def build_lineups(
         # name join missed, or the CSV is for a week we have not projected.
         "matched_to_projections": matched,
         "count": len(out),
+        # Who these lineups actually lean on. The cap bounds this within the
+        # build; GET /optimizer/exposure is the same table across every build
+        # of the week, where nothing bounds it.
+        "exposure": _exposure_rows([{
+            "player_name": p["player_name"],
+            "team": p["team"],
+            "position": p["roster_position"],
+            "slot": p["roster_position"],
+            "salary": p["salary"],
+            "projected": p["projected"],
+            "from_model": p["from_model"],
+        } for lineup in out for p in lineup["players"]], len(out)),
+        "exposure_cap": max_usage_percentage,
         "data": out,
     }
 
@@ -749,6 +762,158 @@ def delete_slate(slate_id: int, db: Session = Depends(get_db)):
 def _mean(values):
     values = [v for v in values if v is not None]
     return round(sum(values) / len(values), 2) if values else None
+
+
+def _exposure_rows(records, lineups_counted: int):
+    """Each player's share of the lineups counted, most-used first.
+
+    Exposure is the readback of the only knob the builder has for diversity:
+    `max_usage_percentage` caps how much of ONE build a player may occupy. It
+    says nothing across builds, so the same chalk can sit in every lineup of
+    every build of the week and no constraint ever notices. That is what this
+    table is for -- the cap is a promise about one build, exposure is what
+    actually happened across all of them.
+
+    `records` is one dict per filled slot: player_name, team, position, slot,
+    salary, projected, actual, from_model, build_id. A player is keyed by name
+    and team, which is also what makes a defense a single row.
+    """
+    bucket: dict = {}
+    for rec in records:
+        name = (rec.get("player_name") or "").strip()
+        if not name:
+            continue
+        team = (rec.get("team") or "").strip().upper() or None
+        row = bucket.setdefault((name.lower(), team or ""), {
+            "player_name": name,
+            "team": team,
+            "position": rec.get("position"),
+            "salary": rec.get("salary"),
+            "lineups": 0,
+            "slots": {},
+            "projected": [],
+            "actual": [],
+            "builds": set(),
+            "from_model": False,
+        })
+        row["lineups"] += 1
+        slot = (rec.get("slot") or "").strip()
+        if slot:
+            row["slots"][slot] = row["slots"].get(slot, 0) + 1
+        for key in ("projected", "actual"):
+            if rec.get(key) is not None:
+                row[key].append(float(rec[key]))
+        if rec.get("build_id") is not None:
+            row["builds"].add(rec["build_id"])
+        # Salary and position are properties of the slate, identical on every
+        # repeat; the first non-null wins so a sparse record cannot blank them.
+        for key in ("salary", "position"):
+            if row[key] is None and rec.get(key) is not None:
+                row[key] = rec[key]
+        row["from_model"] = row["from_model"] or bool(rec.get("from_model"))
+
+    out = []
+    for row in bucket.values():
+        out.append({
+            "player_name": row["player_name"],
+            "position": row["position"],
+            "team": row["team"],
+            "salary": row["salary"],
+            "lineups": row["lineups"],
+            "exposure": (round(100.0 * row["lineups"] / lineups_counted, 1)
+                         if lineups_counted else None),
+            "builds": len(row["builds"]) or None,
+            # Showdown pays the MVP 1.5x, so which slot he filled is part of
+            # the exposure, not a detail: 4 lineups as MVP is a different bet
+            # from 4 as a flex.
+            "slots": row["slots"] or None,
+            "projected": _mean(row["projected"]),
+            "actual": _mean(row["actual"]),
+            "from_model": row["from_model"],
+        })
+    # Most-used first, and a tie goes to the more expensive player: that is the
+    # one whose exposure costs the most to be wrong about.
+    out.sort(key=lambda r: (-r["lineups"], -(r["salary"] or 0), r["player_name"]))
+    return out
+
+
+@router.get("/exposure")
+def lineup_exposure(
+    season: Optional[int] = Query(None),
+    week: Optional[int] = Query(None, description="One week; omit for the whole season"),
+    build_id: Optional[int] = Query(None, description="One build instead of all of them"),
+    db: Session = Depends(get_db),
+):
+    """Which players the lineups are built on, and at what percentage.
+
+    Every recorded build is pooled, so this answers the question the per-build
+    exposure cap cannot: across everything entered this week, how much of the
+    slate is really one player? A 30% cap on five separate builds still permits
+    a man in all of them.
+
+    Exposure is a share of LINEUPS, not of builds -- 6 of 20 lineups is 30%
+    whether those 20 came from one build or four.
+    """
+    season = season or get_current_nfl_season()
+    builds = db.query(LineupBuild).filter(LineupBuild.season == season)
+    if week is not None:
+        builds = builds.filter(LineupBuild.week == week)
+    if build_id is not None:
+        builds = builds.filter(LineupBuild.id == build_id)
+    builds = sorted(builds.all(), key=lambda b: (b.week or 0, b.id))
+    if not builds:
+        return {"status": "no_data", "season": season, "week": week,
+                "build_id": build_id,
+                "message": ("No lineups have been built for that season yet. Exposure is "
+                            "recorded with every build.")}
+
+    by_id = {b.id: b for b in builds}
+    entries = db.query(LineupEntry).filter(
+        LineupEntry.build_id.in_(list(by_id))).all()
+    records = []
+    if entries:
+        build_of = {e.id: e.build_id for e in entries}
+        for player in db.query(LineupPlayer).filter(
+                LineupPlayer.lineup_id.in_([e.id for e in entries])).all():
+            records.append({
+                "player_name": player.player_name,
+                "team": player.team,
+                "position": player.position,
+                "slot": player.slot,
+                "salary": player.salary,
+                "projected": player.projected_points,
+                "actual": player.actual_points,
+                "from_model": bool(player.from_model),
+                "build_id": build_of.get(player.lineup_id),
+            })
+
+    rows = _exposure_rows(records, len(entries))
+    caps = sorted({b.max_usage_percentage for b in builds
+                   if b.max_usage_percentage is not None})
+    # A player over every cap in force is the headline: no single build broke
+    # its promise, and he is still in more of the week than any of them allowed.
+    tightest = caps[0] if caps else None
+    over_cap = [r for r in rows if tightest is not None
+                and (r["exposure"] or 0) > tightest] if len(builds) > 1 else []
+    return {
+        "status": "success",
+        "season": season,
+        "week": week,
+        "build_id": build_id,
+        "builds": len(builds),
+        "lineups": len(entries),
+        "players_used": len(rows),
+        "exposure_caps": caps,
+        "weeks": sorted({b.week for b in builds if b.week is not None}),
+        "over_cap": [r["player_name"] for r in over_cap],
+        "data": rows,
+        "note": ("exposure is the share of all %d lineups, pooled across %d build(s). "
+                 "The per-build cap (%s) binds inside a build only, so a name in "
+                 "over_cap broke no constraint -- it is the concentration the caps "
+                 "cannot see. `actual` fills in once the week is scored."
+                 % (len(entries), len(builds),
+                    ", ".join(f"{c}%" for c in caps) or "none recorded")),
+    }
 
 
 @router.get("/performance")

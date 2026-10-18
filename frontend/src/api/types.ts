@@ -854,7 +854,49 @@ export interface LineupResponse {
   players_in_file: number
   matched_to_projections: number
   count: number
+  /** Who these lineups lean on, bounded by exposure_cap within this build. */
+  exposure: PlayerExposure[]
+  exposure_cap: number
   data: Lineup[]
+}
+
+/** One player's share of the lineups counted. */
+export interface PlayerExposure {
+  player_name: string
+  position: string | null
+  team: string | null
+  salary: number | null
+  /** How many lineups he is in. */
+  lineups: number
+  /** That as a percentage of the lineups counted. */
+  exposure: number | null
+  /** How many separate builds he appears in — null for a single build. */
+  builds: number | null
+  /** Which slots he filled, e.g. { MVP: 2, AnyFLEX: 3 } on a Showdown. */
+  slots: Record<string, number> | null
+  projected: number | null
+  /** Fills in once the week is scored. */
+  actual: number | null
+  from_model: boolean
+}
+
+/** Exposure pooled across every recorded build — what the per-build cap cannot see. */
+export interface ExposureResponse {
+  status: string
+  season: number
+  week: number | null
+  build_id: number | null
+  message?: string
+  builds: number
+  lineups: number
+  players_used: number
+  /** Every cap in force across the pooled builds. */
+  exposure_caps: number[]
+  weeks: number[]
+  /** Players above the tightest cap once the builds are pooled. */
+  over_cap: string[]
+  data: PlayerExposure[]
+  note: string
 }
 
 /** One week of the optimizer's own record. */

@@ -1,6 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from './client'
-import type { LineupPerformance, LineupResponse, SlateCoverage, SlateList } from './types'
+import type {
+  ExposureResponse,
+  LineupPerformance,
+  LineupResponse,
+  SlateCoverage,
+  SlateList,
+} from './types'
 
 /** What the board holds for a week, before any CSV is uploaded. */
 export function useSlateCoverage(season: number, week?: number) {
@@ -56,6 +62,21 @@ export function useLineupPerformance(season: number, week?: number) {
   })
 }
 
+/** Player exposure pooled across every recorded build. The per-build cap binds
+ *  inside one build only, so this is the only place concentration shows up. */
+export function useLineupExposure(season: number, week?: number) {
+  return useQuery({
+    queryKey: ['lineupExposure', season, week],
+    queryFn: async () => {
+      const params: Record<string, number> = { season }
+      if (week !== undefined) params.week = week
+      const { data } = await apiClient.get<ExposureResponse>('/optimizer/exposure', { params })
+      return data
+    },
+    staleTime: 1000 * 60 * 5,
+  })
+}
+
 export interface LineupRequest {
   /** Omitted to build from the week's saved slate. */
   file?: File | null
@@ -93,6 +114,9 @@ export function useBuildLineups() {
     // leaves the file on file — hence onSettled, not onSuccess. Nothing is
     // recorded for a failed build, so the record only moves on success.
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['savedSlates'] }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['lineupPerformance'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['lineupPerformance'] })
+      queryClient.invalidateQueries({ queryKey: ['lineupExposure'] })
+    },
   })
 }

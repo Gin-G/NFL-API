@@ -337,3 +337,136 @@ class TestPerformanceBeforeTheGames:
         assert week["scored_lineups"] == 0
         assert week["actual"] is None and week["fppg_baseline"] is None
         assert body["totals"]["beat_fppg_rate"] is None
+
+
+class TestPlayerExposure:
+    """Who the lineups actually lean on.
+
+    The exposure cap is a promise about one build; nothing holds across builds,
+    so a man can be in every lineup of every build of the week. The table is
+    how that becomes visible.
+    """
+
+    def test_a_single_lineup_puts_everyone_at_100_percent(self, client, db_session):
+        _project(db_session)
+        body = _post(client).json()
+
+        exposure = body["exposure"]
+        assert len(exposure) == 9                      # the nine slots, nine men
+        assert {r["exposure"] for r in exposure} == {100.0}
+        assert all(r["lineups"] == 1 for r in exposure)
+        assert body["exposure_cap"] == 50          # the default
+
+    def test_the_cap_is_what_the_percentages_respect(self, client, db_session):
+        """A 50% cap over four lineups means nobody above two of them."""
+        _project(db_session)
+        body = _post(client, num_lineups=4, max_usage_percentage=50).json()
+
+        built = body["count"]
+        assert built > 1, "need more than one lineup for exposure to mean anything"
+        for row in body["exposure"]:
+            assert row["lineups"] <= round(built * 0.5) + 1
+            assert row["exposure"] <= 100.0
+        # And the table accounts for every slot filled, nothing double-counted.
+        assert sum(r["lineups"] for r in body["exposure"]) == built * 9
+
+    def test_most_used_comes_first(self, client, db_session):
+        _project(db_session)
+        body = _post(client, num_lineups=3, max_usage_percentage=100).json()
+
+        counts = [r["lineups"] for r in body["exposure"]]
+        assert counts == sorted(counts, reverse=True)
+
+    def test_exposure_pools_every_build_of_the_week(self, client, db_session):
+        """The question the per-build cap cannot answer."""
+        _project(db_session)
+        _post(client, num_lineups=2, max_usage_percentage=100)
+        _post(client, csv=None, num_lineups=2, max_usage_percentage=100,
+              objective="ceiling")
+
+        body = client.get("/optimizer/exposure", params={"season": 2026}).json()
+        assert body["status"] == "success"
+        assert body["builds"] == 2
+        assert body["lineups"] == db_session.query(LineupEntry).count()
+        # Exposure is a share of lineups, not of builds.
+        for row in body["data"]:
+            assert row["exposure"] == pytest.approx(
+                100.0 * row["lineups"] / body["lineups"], abs=0.05)
+        assert body["players_used"] == len(body["data"])
+
+    def test_a_player_in_everything_is_flagged_over_the_cap(self, client, db_session):
+        """Two builds that each honoured 50% can still leave a man in 100%.
+
+        One lineup per build, so the cap never binds inside either; pooled, the
+        men picked twice are in the whole week. No constraint was broken, which
+        is exactly the point -- the caps cannot see this.
+        """
+        _project(db_session)
+        _post(client, num_lineups=1, max_usage_percentage=50)
+        # A different objective, or the identical build would supersede the first.
+        _post(client, csv=None, num_lineups=1, max_usage_percentage=50,
+              objective="ceiling")
+
+        body = client.get("/optimizer/exposure", params={"season": 2026}).json()
+        assert body["builds"] == 2 and body["lineups"] == 2
+        assert body["exposure_caps"] == [50]
+
+        flagged = body["over_cap"]
+        assert flagged, "men picked by both builds are over the pooled cap"
+        everyone = {r["player_name"]: r for r in body["data"]}
+        for name in flagged:
+            assert everyone[name]["exposure"] > 50
+            assert everyone[name]["lineups"] == 2
+            assert everyone[name]["builds"] == 2
+        # And nobody under the cap crept into the list.
+        assert all(r["player_name"] in flagged
+                   for r in body["data"] if (r["exposure"] or 0) > 50)
+
+    def test_one_build_is_not_judged_against_its_own_cap(self, client, db_session):
+        """With a single build the cap did its job by construction.
+
+        One lineup at a 50% cap puts all nine men at 100% of the pool, so the
+        arithmetic would flag every one of them; the guard is what stops it.
+        """
+        _project(db_session)
+        _post(client, num_lineups=1, max_usage_percentage=50)
+
+        body = client.get("/optimizer/exposure", params={"season": 2026}).json()
+        assert body["builds"] == 1
+        assert {r["exposure"] for r in body["data"]} == {100.0}
+        assert body["over_cap"] == []
+
+    def test_a_defense_is_one_row(self, client, db_session):
+        """No player id and no stat line; name and team are what identify it."""
+        _project(db_session)
+        _post(client, num_lineups=2, max_usage_percentage=100)
+
+        body = client.get("/optimizer/exposure", params={"season": 2026}).json()
+        defenses = [r for r in body["data"] if r["position"] in ("D", "DEF")]
+        assert defenses, "a classic lineup has a defense"
+        assert len(defenses) == len({(r["player_name"], r["team"]) for r in defenses})
+        assert all(r["from_model"] is False for r in defenses)   # FPPG fills the slot
+
+    def test_a_single_build_can_be_asked_for(self, client, db_session):
+        _project(db_session)
+        first = _post(client, num_lineups=2, max_usage_percentage=100).json()
+        _post(client, csv=None, num_lineups=2, max_usage_percentage=100,
+              objective="ceiling")
+
+        body = client.get("/optimizer/exposure",
+                          params={"season": 2026, "build_id": first["build_id"]}).json()
+        assert body["builds"] == 1
+        assert body["lineups"] == first["count"]
+
+    def test_nothing_built_says_so(self, client, db_session):
+        body = client.get("/optimizer/exposure", params={"season": 2026}).json()
+        assert body["status"] == "no_data"
+
+    def test_an_untracked_build_leaves_no_exposure_behind(self, client, db_session):
+        """`track=false` means the build is not recorded -- including here."""
+        _project(db_session)
+        body = _post(client, track="false").json()
+
+        assert body["exposure"], "the response still reports its own lineups"
+        assert client.get("/optimizer/exposure",
+                          params={"season": 2026}).json()["status"] == "no_data"
