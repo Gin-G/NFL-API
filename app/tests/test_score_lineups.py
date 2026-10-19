@@ -391,3 +391,143 @@ class TestThePerformanceRecord:
         assert week["lineups"] == 1
         assert week["scored_lineups"] == 0
         assert week["actual"] is None
+
+
+def _divided_board(db, season=SEASON, week=WEEK):
+    """A board whose MEAN and CEILING rank the slate differently.
+
+    The default board scales floor/median/ceiling from the mean, so every
+    objective picks the same nine men and comparing them is vacuous. Here the
+    mean prefers the cheap players and the ceiling prefers the expensive ones,
+    which is the disagreement the comparison is supposed to measure.
+    """
+    for i, (name, pos, _, _, fppg, team) in enumerate(SLATE_ROWS):
+        if pos == "D":
+            continue
+        mean = 30.0 - fppg
+        db.add(PlayerProjection(
+            season=season, week=week, player_id=f"00-{i:04d}", player_name=name,
+            position=pos, team=team, projected_points=mean, floor=mean * 0.4,
+            median=mean * 0.95, ceiling=fppg * 2.0,     # the other way round
+            prediction_type="veteran_ml", model_version="1.5.0",
+            computed_at=datetime.utcnow()))
+    db.commit()
+
+
+class TestWhichObjectiveWon:
+    """The record is only useful if it can say which setting to use next week."""
+
+    def _two_objectives(self, client, db):
+        _divided_board(db)
+        _schedule(db)
+        assert _post(client, num_lineups=1, objective="mean").json()["status"] == "success"
+        assert _post(client, csv=None, num_lineups=1,
+                     objective="ceiling").json()["status"] == "success"
+        _stats(db)
+        score_lineups.run(db, SEASON, week=WEEK)
+
+    def test_the_objectives_are_ranked_by_what_they_scored(self, client, db_session):
+        self._two_objectives(client, db_session)
+
+        body = client.get("/optimizer/performance", params={"season": SEASON}).json()
+        objectives = {o["objective"]: o for o in body["by_objective"]}
+        assert set(objectives) == {"mean", "ceiling"}
+        assert all(o["scored_lineups"] == 1 for o in objectives.values())
+
+        # Ranked best-first by what the lineups actually scored.
+        actuals = [o["actual"] for o in body["by_objective"]]
+        assert actuals == sorted(actuals, reverse=True)
+
+        verdict = body["objective_verdict"]
+        assert verdict["comparable"] is True
+        assert verdict["objectives_scored"] == 2
+        assert verdict["best"] == body["by_objective"][0]["objective"]
+        assert verdict["worst"] == body["by_objective"][-1]["objective"]
+        assert verdict["spread"] == pytest.approx(
+            body["by_objective"][0]["actual"] - body["by_objective"][-1]["actual"], abs=0.02)
+
+    def test_the_two_objectives_really_built_different_lineups(self, client, db_session):
+        """Otherwise the ranking above would be comparing a lineup with itself."""
+        self._two_objectives(client, db_session)
+
+        body = client.get("/optimizer/performance",
+                          params={"season": SEASON, "week": WEEK}).json()
+        rosters = [{p["player_name"] for p in lineup["players"]}
+                   for build in body["builds"] for lineup in build["lineups"]]
+        assert len(rosters) == 2
+        assert rosters[0] != rosters[1]
+
+    def test_one_objective_is_not_a_comparison(self, client, db_session):
+        _build(client, db_session, objective="mean")
+        _stats(db_session)
+        score_lineups.run(db_session, SEASON, week=WEEK)
+
+        verdict = client.get("/optimizer/performance",
+                             params={"season": SEASON}).json()["objective_verdict"]
+        assert verdict["comparable"] is False
+        assert verdict["objectives_scored"] == 1
+        assert verdict["worst"] is None and verdict["spread"] is None
+
+    def test_a_week_that_has_not_been_scored_cannot_rank_anything(self, client, db_session):
+        _divided_board(db_session)
+        _schedule(db_session)
+        _post(client, num_lineups=1, objective="mean")
+        _post(client, csv=None, num_lineups=1, objective="ceiling")
+
+        body = client.get("/optimizer/performance", params={"season": SEASON}).json()
+        assert [o["actual"] for o in body["by_objective"]] == [None, None]
+        verdict = body["objective_verdict"]
+        assert verdict["comparable"] is False
+        assert verdict["best"] is None
+
+    def test_an_unscored_objective_sorts_last_rather_than_losing(self, client,
+                                                                 db_session):
+        """A missing number is not a bad number."""
+        self._two_objectives(client, db_session)
+        # A third build made after the scoring run, so it has no actuals yet --
+        # which is what happens whenever you build again mid-week.
+        assert _post(client, csv=None, num_lineups=1,
+                     objective="floor").json()["status"] == "success"
+
+        body = client.get("/optimizer/performance", params={"season": SEASON}).json()
+        assert body["by_objective"][-1]["objective"] == "floor"
+        assert body["by_objective"][-1]["actual"] is None
+        assert body["objective_verdict"]["best"] != "floor"
+        assert body["objective_verdict"]["objectives_scored"] == 2
+
+    def test_a_single_week_says_so(self, client, db_session):
+        """One slate cannot separate objectives; the flag is what stops the UI
+        claiming it did."""
+        self._two_objectives(client, db_session)
+
+        verdict = client.get("/optimizer/performance",
+                             params={"season": SEASON}).json()["objective_verdict"]
+        assert verdict["one_week_only"] is True
+        assert verdict["weeks_scored"] == 1
+
+    def test_a_showdown_is_not_ranked_against_a_classic(self, client, db_session):
+        """Five players against nine: the contest would decide the comparison.
+
+        The real record hit this -- a scored Showdown pooled with an unscored
+        classic week put "ceiling" top on 25 five-man lineups.
+        """
+        _divided_board(db_session)
+        _schedule(db_session)
+        # A classic build and a Showdown build, both on the ceiling objective.
+        assert _post(client, num_lineups=1, objective="ceiling"
+                     ).json()["contest"] == "classic"
+        assert _post(client, csv=_csv(TestShowdown.SLATE), num_lineups=1,
+                     objective="mean").json()["contest"] == "showdown"
+        _stats(db_session)
+        score_lineups.run(db_session, SEASON, week=WEEK)
+
+        body = client.get("/optimizer/performance", params={"season": SEASON}).json()
+        rows = {(o["objective"], o["contest"]): o for o in body["by_objective"]}
+        assert ("ceiling", "classic") in rows
+        assert ("mean", "showdown") in rows
+
+        # One contest only, so the two cannot be declared a winner and a loser.
+        verdict = body["objective_verdict"]
+        assert verdict["comparable"] is False
+        assert verdict["objectives_scored"] == 1
+        assert verdict["contest"] in ("classic", "showdown")

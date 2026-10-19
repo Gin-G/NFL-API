@@ -764,6 +764,60 @@ def _mean(values):
     return round(sum(values) / len(values), 2) if values else None
 
 
+def _perf_bucket(**fields) -> dict:
+    return {**fields, "builds": 0, "lineups": 0, "complete": 0,
+            "projected": [], "actual": [], "best_actual": None, "worst_actual": None,
+            "fppg_points": [], "best_points": [], "beat_fppg": 0, "compared": 0}
+
+
+def _perf_add(bucket: dict, build, rows) -> None:
+    """Fold one build's lineups into a bucket.
+
+    Only lineups whose every slot could be scored are averaged: a partial
+    lineup is not a low score, it is an unknown one.
+    """
+    complete = [e for e in rows
+                if e.actual_points is not None and not (e.unscored_players or 0)]
+    bucket["builds"] += 1
+    bucket["lineups"] += len(rows)
+    bucket["complete"] += len(complete)
+    bucket["projected"].extend(e.projected_points for e in complete)
+    bucket["actual"].extend(e.actual_points for e in complete)
+    for entry in complete:
+        if bucket["best_actual"] is None or entry.actual_points > bucket["best_actual"]:
+            bucket["best_actual"] = entry.actual_points
+        if bucket["worst_actual"] is None or entry.actual_points < bucket["worst_actual"]:
+            bucket["worst_actual"] = entry.actual_points
+    if build.fppg_points is not None:
+        bucket["fppg_points"].append(build.fppg_points)
+        for entry in complete:
+            bucket["compared"] += 1
+            bucket["beat_fppg"] += int(entry.actual_points > build.fppg_points)
+    if build.best_points is not None:
+        bucket["best_points"].append(build.best_points)
+
+
+def _perf_summary(bucket: dict) -> dict:
+    projected, actual = _mean(bucket["projected"]), _mean(bucket["actual"])
+    return {
+        "builds": bucket["builds"],
+        "lineups": bucket["lineups"],
+        "scored_lineups": bucket["complete"],
+        "projected": projected,
+        "actual": actual,
+        "error": (round(projected - actual, 2)
+                  if projected is not None and actual is not None else None),
+        "best_lineup_actual": bucket["best_actual"],
+        "worst_lineup_actual": bucket["worst_actual"],
+        "fppg_baseline": _mean(bucket["fppg_points"]),
+        "best_possible": _mean(bucket["best_points"]),
+        "beat_fppg": bucket["beat_fppg"],
+        "compared_to_fppg": bucket["compared"],
+        "beat_fppg_rate": (round(bucket["beat_fppg"] / bucket["compared"], 3)
+                           if bucket["compared"] else None),
+    }
+
+
 def _exposure_rows(records, lineups_counted: int):
     """Each player's share of the lineups counted, most-used first.
 
@@ -959,49 +1013,21 @@ def lineup_performance(
         rows.sort(key=lambda e: e.lineup_index or 0)
 
     by_week: dict = {}
+    by_objective: dict = {}
     for build in builds:
         rows = entries.get(build.id, [])
-        complete = [e for e in rows
-                    if e.actual_points is not None and not (e.unscored_players or 0)]
-        bucket = by_week.setdefault(build.week, {
-            "week": build.week, "builds": 0, "lineups": 0, "complete": 0,
-            "projected": [], "actual": [], "best_actual": None,
-            "fppg_points": [], "best_points": [], "beat_fppg": 0, "compared": 0,
-        })
-        bucket["builds"] += 1
-        bucket["lineups"] += len(rows)
-        bucket["complete"] += len(complete)
-        bucket["projected"].extend(e.projected_points for e in complete)
-        bucket["actual"].extend(e.actual_points for e in complete)
-        for entry in complete:
-            if bucket["best_actual"] is None or entry.actual_points > bucket["best_actual"]:
-                bucket["best_actual"] = entry.actual_points
-        if build.fppg_points is not None:
-            bucket["fppg_points"].append(build.fppg_points)
-            for entry in complete:
-                bucket["compared"] += 1
-                bucket["beat_fppg"] += int(entry.actual_points > build.fppg_points)
-        if build.best_points is not None:
-            bucket["best_points"].append(build.best_points)
+        _perf_add(by_week.setdefault(build.week, _perf_bucket(week=build.week)),
+                  build, rows)
+        # The same lineups cut the other way: which objective actually won.
+        # Keyed by contest as well, because a Showdown lineup is five players
+        # and a classic one is nine -- their raw points are not the same scale,
+        # and pooling them would have the contest deciding the comparison.
+        key = (build.objective or "unknown", build.contest or "unknown")
+        _perf_add(by_objective.setdefault(key, _perf_bucket(
+            objective=key[0], contest=key[1])), build, rows)
 
-    weeks = []
-    for bucket in sorted(by_week.values(), key=lambda b: b["week"] or 0):
-        projected, actual = _mean(bucket["projected"]), _mean(bucket["actual"])
-        weeks.append({
-            "week": bucket["week"],
-            "builds": bucket["builds"],
-            "lineups": bucket["lineups"],
-            "scored_lineups": bucket["complete"],
-            "projected": projected,
-            "actual": actual,
-            "error": (round(projected - actual, 2)
-                      if projected is not None and actual is not None else None),
-            "best_lineup_actual": bucket["best_actual"],
-            "fppg_baseline": _mean(bucket["fppg_points"]),
-            "best_possible": _mean(bucket["best_points"]),
-            "beat_fppg": bucket["beat_fppg"],
-            "compared_to_fppg": bucket["compared"],
-        })
+    weeks = [{"week": b["week"], **_perf_summary(b)}
+             for b in sorted(by_week.values(), key=lambda b: b["week"] or 0)]
 
     scored = [w for w in weeks if w["scored_lineups"]]
     compared = sum(w["compared_to_fppg"] for w in weeks)
@@ -1018,6 +1044,42 @@ def lineup_performance(
         "beat_fppg": beat,
         "compared_to_fppg": compared,
         "beat_fppg_rate": round(beat / compared, 3) if compared else None,
+    }
+
+    # Which objective actually won, ranked by what the lineups scored. Ordered
+    # best-first among those with scored lineups; an unscored objective sorts
+    # last rather than appearing to have lost.
+    objectives = [{"objective": b["objective"], "contest": b["contest"],
+                   **_perf_summary(b)} for b in by_objective.values()]
+    objectives.sort(key=lambda o: (o["actual"] is None, -(o["actual"] or 0)))
+    # A verdict is only drawn inside ONE contest, whichever has the most scored
+    # lineups: ranking a Showdown against a classic would measure the contest.
+    ranked = [o for o in objectives if o["scored_lineups"]]
+    contest = None
+    if ranked:
+        totals_by_contest: dict = {}
+        for row in ranked:
+            totals_by_contest[row["contest"]] = (
+                totals_by_contest.get(row["contest"], 0) + row["scored_lineups"])
+        contest = max(totals_by_contest, key=lambda c: totals_by_contest[c])
+    judged = [o for o in ranked if o["contest"] == contest]
+    # Two objectives have to have scored lineups before one can be said to have
+    # beaten the other, and a handful of lineups from one slate is a sample of
+    # one week, not evidence about an objective. The flags say which it is; the
+    # caller decides whether to phrase a verdict.
+    verdict = {
+        "comparable": len(judged) >= 2,
+        "contest": contest,
+        "objectives_scored": len(judged),
+        "scored_lineups": sum(o["scored_lineups"] for o in judged),
+        "weeks_scored": len(scored),
+        "best": judged[0]["objective"] if judged else None,
+        "worst": judged[-1]["objective"] if len(judged) >= 2 else None,
+        "spread": (round(judged[0]["actual"] - judged[-1]["actual"], 2)
+                   if len(judged) >= 2 else None),
+        # One week cannot separate objectives that differ by a point or two:
+        # the same slate, the same pool, largely the same players.
+        "one_week_only": len(scored) <= 1,
     }
 
     detail = []
@@ -1065,6 +1127,8 @@ def lineup_performance(
         "week": week,
         "weeks": weeks,
         "totals": totals,
+        "by_objective": objectives,
+        "objective_verdict": verdict,
         **({"builds": detail} if week is not None else {}),
         "note": ("fppg_baseline is the lineup FanDuel's own FPPG would have built from "
                  "the same pool under the same cap, scored on what happened — the "

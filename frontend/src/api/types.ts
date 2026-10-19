@@ -915,6 +915,50 @@ export interface LineupWeekPerformance {
   best_possible: number | null
   beat_fppg: number
   compared_to_fppg: number
+  beat_fppg_rate: number | null
+  worst_lineup_actual: number | null
+}
+
+/** The same lineups cut by objective instead of by week. */
+export interface LineupObjectivePerformance extends LineupWeekPerformance {
+  objective: string
+  /** Showdown lineups are five players and classic nine, so they are kept apart. */
+  contest: string
+}
+
+/** One lineup as it was built, and how it ended up. */
+export interface LineupRecordPlayer {
+  slot: string
+  player_name: string
+  team: string | null
+  salary: number | null
+  projected: number | null
+  actual: number | null
+  from_model: boolean
+}
+
+export interface LineupRecord {
+  lineup: number
+  salary: number | null
+  projected: number | null
+  actual: number | null
+  unscored_players: number | null
+  players: LineupRecordPlayer[]
+}
+
+export interface LineupBuildRecord {
+  build_id: number
+  built_at: string | null
+  objective: string
+  contest: string
+  slate: string
+  salary_cap: number | null
+  exclude_players: string | null
+  fppg_baseline: number | null
+  fppg_projected: number | null
+  best_possible: number | null
+  scored_at: string | null
+  lineups: LineupRecord[]
 }
 
 export interface LineupPerformance {
@@ -936,6 +980,22 @@ export interface LineupPerformance {
     compared_to_fppg: number
     beat_fppg_rate: number | null
   }
+  by_objective: LineupObjectivePerformance[]
+  /** Whether the record can yet say one objective beat another, and which. */
+  objective_verdict: {
+    comparable: boolean
+    /** The contest the verdict was drawn inside. */
+    contest: string | null
+    objectives_scored: number
+    scored_lineups: number
+    weeks_scored: number
+    best: string | null
+    worst: string | null
+    spread: number | null
+    one_week_only: boolean
+  }
+  /** Present only when a single week was asked for. */
+  builds?: LineupBuildRecord[]
   note: string
 }
 

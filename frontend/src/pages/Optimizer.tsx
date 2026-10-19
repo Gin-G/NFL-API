@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Info, Trash2, Upload } from 'lucide-react'
+import { Fragment, useMemo, useState } from 'react'
+import { ChevronDown, ChevronRight, Info, Trash2, Upload } from 'lucide-react'
 import {
   useBuildLineups, useForgetSlate, useLineupExposure, useLineupPerformance, useSavedSlates,
   useSlateCoverage,
@@ -35,10 +35,14 @@ export default function Optimizer() {
   const [exclude, setExclude] = useState('')
 
   const [exposureScope, setExposureScope] = useState<'build' | 'week'>('build')
+  const [openLineups, setOpenLineups] = useState<Set<string>>(new Set())
 
   const coverage = useSlateCoverage(season, week)
   const slates = useSavedSlates(season, week)
   const performance = useLineupPerformance(season)
+  // The same record scoped to the chosen week, which is the only call that
+  // returns the lineups themselves rather than the averages.
+  const weekRecord = useLineupPerformance(season, week)
   const exposure = useLineupExposure(season, week)
   const forget = useForgetSlate()
   const build = useBuildLineups()
@@ -63,6 +67,20 @@ export default function Optimizer() {
   const exposureLineups = scope === 'build' ? result?.count ?? 0 : pooledExposure?.lineups ?? 0
   const overCap = new Set(scope === 'week' ? pooledExposure?.over_cap ?? [] : [])
   const showsActual = exposureRows.some((r) => r.actual !== null)
+
+  // The chosen week's own numbers: its objectives, and how much of it is scored.
+  const weekObjectives = weekRecord.data?.by_objective ?? []
+  const weekContests = new Set(weekObjectives.map((o) => o.contest))
+  const weekVerdict = weekRecord.data?.objective_verdict ?? null
+  const weekLineupCount = weekRecord.data?.totals?.lineups ?? 0
+  const weekScored = weekRecord.data?.totals?.scored_lineups ?? 0
+
+  const toggleLineup = (key: string) =>
+    setOpenLineups((open) => {
+      const next = new Set(open)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
 
   const matchRate = useMemo(() => {
     if (!result || !result.slate_players) return null
@@ -584,6 +602,289 @@ export default function Optimizer() {
               leaves a lineup out of the numbers until the next scoring run.
             </p>
           </div>
+        )}
+      </div>
+
+      {/* Week N itself: which objective won, then every lineup and how it ended up. */}
+      <div className="mt-10">
+        <h2 className="text-white font-medium text-sm mb-1">Week {week} lineups</h2>
+
+        {weekRecord.data?.status === 'no_data' && (
+          <p className="text-xs text-slate-500">
+            Nothing built for week {week} yet.
+          </p>
+        )}
+
+        {weekRecord.data?.status === 'success' && (
+          <>
+            {weekScored === 0 ? (
+              <p className="text-xs text-slate-500 mb-3">
+                {weekLineupCount} lineup{weekLineupCount === 1 ? '' : 's'} recorded, none
+                scored yet. Scoring needs the week's stats loaded, which happens after the
+                last game.
+              </p>
+            ) : (
+              <p className="text-xs text-slate-500 mb-3">
+                {weekScored} of {weekLineupCount} lineup
+                {weekLineupCount === 1 ? '' : 's'} scored.
+              </p>
+            )}
+
+            {/* The insight: which objective actually won. */}
+            {weekObjectives.length > 0 && (
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
+                <h3 className="text-white font-medium text-xs mb-2">Objectives</h3>
+                {weekVerdict?.comparable && weekVerdict.best ? (
+                  <p className="text-xs text-slate-300 mb-3">
+                    <span className="text-brand-green font-medium">{weekVerdict.best}</span>{' '}
+                    beat <span className="text-slate-200">{weekVerdict.worst}</span> by{' '}
+                    <span className="tabular-nums">{weekVerdict.spread}</span> points a
+                    lineup this week
+                    {weekContests.size > 1 && ` (${weekVerdict.contest} only)`}.
+                    <span className="text-slate-500">
+                      {' '}One slate of {weekVerdict.scored_lineups} lineups, though —
+                      largely the same players in each, so this is a single observation,
+                      not a reason to change the setting.
+                    </span>
+                  </p>
+                ) : (
+                  <p className="text-xs text-slate-500 mb-3">
+                    {weekVerdict && weekVerdict.objectives_scored < 2
+                      ? 'Two objectives have to have scored lineups before one can be said to have beaten the other.'
+                      : 'No scored lineups yet this week.'}
+                  </p>
+                )}
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-slate-500 text-left">
+                      <th className="pb-2 pr-3 font-medium">Objective</th>
+                      {weekContests.size > 1 && (
+                        <th className="pb-2 pr-3 font-medium">Contest</th>
+                      )}
+                      <th className="pb-2 pr-3 font-medium text-right">Lineups</th>
+                      <th className="pb-2 pr-3 font-medium text-right">Scored</th>
+                      <th className="pb-2 pr-3 font-medium text-right">Projected</th>
+                      <th className="pb-2 pr-3 font-medium text-right">Actual</th>
+                      <th className="pb-2 pr-3 font-medium text-right">Best</th>
+                      <th className="pb-2 pr-3 font-medium text-right">Worst</th>
+                      <th className="pb-2 font-medium text-right">vs baseline</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {weekObjectives.map((o) => {
+                      const edge = o.actual !== null && o.fppg_baseline !== null
+                        ? o.actual - o.fppg_baseline
+                        : null
+                      return (
+                        <tr
+                          key={`${o.objective}-${o.contest}`}
+                          className="border-t border-slate-700/60"
+                        >
+                          <td className="py-1.5 pr-3 text-slate-200">{o.objective}</td>
+                          {weekContests.size > 1 && (
+                            <td className="py-1.5 pr-3 text-slate-500">{o.contest}</td>
+                          )}
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                            {o.lineups}
+                          </td>
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                            {o.scored_lineups}
+                          </td>
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                            {o.projected ?? '—'}
+                          </td>
+                          <td className="py-1.5 pr-3 text-right text-slate-100 tabular-nums">
+                            {o.actual ?? '—'}
+                          </td>
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                            {o.best_lineup_actual ?? '—'}
+                          </td>
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                            {o.worst_lineup_actual ?? '—'}
+                          </td>
+                          <td
+                            className={`py-1.5 text-right tabular-nums ${
+                              edge === null
+                                ? 'text-slate-500'
+                                : edge > 0
+                                  ? 'text-brand-green'
+                                  : 'text-red-400'
+                            }`}
+                          >
+                            {edge === null ? '—' : `${edge > 0 ? '+' : ''}${edge.toFixed(1)}`}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Every build, and inside it every lineup. */}
+            <div className="space-y-4">
+              {(weekRecord.data.builds ?? []).map((b) => (
+                <div
+                  key={b.build_id}
+                  className="bg-slate-800 border border-slate-700 rounded-xl p-4 overflow-x-auto"
+                >
+                  <div className="flex items-baseline justify-between gap-3 mb-3 flex-wrap">
+                    <h3 className="text-white font-medium text-xs">
+                      {b.objective} · {b.contest} · {b.slate}
+                      <span className="text-slate-500 font-normal">
+                        {' '}· build {b.build_id} · {b.lineups.length} lineup
+                        {b.lineups.length === 1 ? '' : 's'}
+                      </span>
+                    </h3>
+                    <span className="text-xs text-slate-400">
+                      {b.fppg_baseline !== null ? (
+                        <>
+                          FPPG baseline{' '}
+                          <span className="text-slate-200 tabular-nums">{b.fppg_baseline}</span>
+                        </>
+                      ) : (
+                        <span className="text-slate-500">no baseline</span>
+                      )}
+                      {b.best_possible !== null && (
+                        <>
+                          {' '}· best possible{' '}
+                          <span className="text-slate-200 tabular-nums">{b.best_possible}</span>
+                        </>
+                      )}
+                      {b.scored_at === null && (
+                        <span className="text-amber-400/80"> · not scored</span>
+                      )}
+                    </span>
+                  </div>
+
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-slate-500 text-left">
+                        <th className="pb-2 pr-3 font-medium">Lineup</th>
+                        <th className="pb-2 pr-3 font-medium text-right">Salary</th>
+                        <th className="pb-2 pr-3 font-medium text-right">Projected</th>
+                        <th className="pb-2 pr-3 font-medium text-right">Actual</th>
+                        <th className="pb-2 pr-3 font-medium text-right">vs baseline</th>
+                        <th className="pb-2 font-medium" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {b.lineups.map((l) => {
+                        const key = `${b.build_id}-${l.lineup}`
+                        const open = openLineups.has(key)
+                        const edge = l.actual !== null && b.fppg_baseline !== null
+                          ? l.actual - b.fppg_baseline
+                          : null
+                        return (
+                          <Fragment key={key}>
+                            <tr
+                              className="border-t border-slate-700/60 cursor-pointer hover:bg-slate-700/20"
+                              onClick={() => toggleLineup(key)}
+                            >
+                              <td className="py-1.5 pr-3 text-slate-200">
+                                Lineup {l.lineup}
+                                {(l.unscored_players ?? 0) > 0 && (
+                                  <span
+                                    className="text-amber-400/80"
+                                    title={`${l.unscored_players} slot(s) could not be scored`}
+                                  >
+                                    {' '}· {l.unscored_players} unscored
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                                {l.salary === null ? '—' : `$${l.salary.toLocaleString()}`}
+                              </td>
+                              <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                                {l.projected ?? '—'}
+                              </td>
+                              <td className="py-1.5 pr-3 text-right text-slate-100 font-medium tabular-nums">
+                                {l.actual ?? '—'}
+                              </td>
+                              <td
+                                className={`py-1.5 pr-3 text-right tabular-nums ${
+                                  edge === null
+                                    ? 'text-slate-500'
+                                    : edge > 0
+                                      ? 'text-brand-green'
+                                      : 'text-red-400'
+                                }`}
+                              >
+                                {edge === null
+                                  ? '—'
+                                  : `${edge > 0 ? '+' : ''}${edge.toFixed(1)}`}
+                              </td>
+                              <td className="py-1.5 text-right text-slate-500">
+                                {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                              </td>
+                            </tr>
+                            {open && (
+                              <tr className="border-t border-slate-700/40 bg-slate-900/40">
+                                <td colSpan={6} className="px-3 py-2">
+                                  <table className="w-full text-xs">
+                                    <tbody>
+                                      {l.players.map((p, i) => {
+                                        const diff = p.actual !== null && p.projected !== null
+                                          ? p.actual - p.projected
+                                          : null
+                                        return (
+                                          <tr key={`${p.player_name}-${i}`}>
+                                            <td className="py-1 pr-2 text-slate-500 w-16">
+                                              {p.slot}
+                                            </td>
+                                            <td className="py-1 pr-2 text-slate-200">
+                                              {p.player_name}
+                                              {!p.from_model && (
+                                                <span
+                                                  className="text-slate-500"
+                                                  title="FanDuel's FPPG, not a model projection"
+                                                >
+                                                  {' '}*
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="py-1 pr-2 text-slate-500">{p.team}</td>
+                                            <td className="py-1 pr-2 text-right text-slate-400 tabular-nums">
+                                              {p.salary === null
+                                                ? '—'
+                                                : `$${p.salary.toLocaleString()}`}
+                                            </td>
+                                            <td className="py-1 pr-2 text-right text-slate-400 tabular-nums w-14">
+                                              {p.projected ?? '—'}
+                                            </td>
+                                            <td className="py-1 pr-2 text-right text-slate-100 tabular-nums w-14">
+                                              {p.actual ?? '—'}
+                                            </td>
+                                            <td
+                                              className={`py-1 text-right tabular-nums w-16 ${
+                                                diff === null
+                                                  ? 'text-slate-600'
+                                                  : diff > 0
+                                                    ? 'text-brand-green'
+                                                    : 'text-red-400'
+                                              }`}
+                                            >
+                                              {diff === null
+                                                ? '—'
+                                                : `${diff > 0 ? '+' : ''}${diff.toFixed(1)}`}
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </div>
     </div>
