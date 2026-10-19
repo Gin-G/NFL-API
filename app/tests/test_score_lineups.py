@@ -531,3 +531,24 @@ class TestWhichObjectiveWon:
         assert verdict["comparable"] is False
         assert verdict["objectives_scored"] == 1
         assert verdict["contest"] in ("classic", "showdown")
+
+
+class TestTheRecordIsReadable:
+    def test_points_are_rounded_for_display(self, client, db_session):
+        """The columns are stored unrounded; a slot showing 24.299999999999997
+        is what that looks like on the page."""
+        _build(client, db_session)
+        _stats(db_session)
+        score_lineups.run(db_session, SEASON, week=WEEK)
+
+        body = client.get("/optimizer/performance",
+                          params={"season": SEASON, "week": WEEK}).json()
+        (detail,) = body["builds"]
+        (lineup,) = detail["lineups"]
+        numbers = [lineup["projected"], lineup["actual"], detail["fppg_baseline"],
+                   detail["best_possible"]]
+        numbers += [p["projected"] for p in lineup["players"]]
+        numbers += [p["actual"] for p in lineup["players"]]
+        for value in numbers:
+            if value is not None:
+                assert round(value, 2) == value, f"{value} is not display-ready"

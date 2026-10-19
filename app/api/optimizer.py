@@ -764,6 +764,12 @@ def _mean(values):
     return round(sum(values) / len(values), 2) if values else None
 
 
+def _round(value, places: int = 2):
+    """Points as something to read. The columns are stored unrounded, and a
+    lineup slot rendering as 24.299999999999997 is the result."""
+    return None if value is None else round(float(value), places)
+
+
 def _perf_bucket(**fields) -> dict:
     return {**fields, "builds": 0, "lineups": 0, "complete": 0,
             "projected": [], "actual": [], "best_actual": None, "worst_actual": None,
@@ -1099,23 +1105,23 @@ def lineup_performance(
                 "slate": build.slate,
                 "salary_cap": build.salary_cap,
                 "exclude_players": build.exclude_players,
-                "fppg_baseline": build.fppg_points,
-                "fppg_projected": build.fppg_projected,
-                "best_possible": build.best_points,
+                "fppg_baseline": _round(build.fppg_points),
+                "fppg_projected": _round(build.fppg_projected),
+                "best_possible": _round(build.best_points),
                 "scored_at": build.scored_at,
                 "lineups": [{
                     "lineup": entry.lineup_index,
                     "salary": entry.salary,
-                    "projected": entry.projected_points,
-                    "actual": entry.actual_points,
+                    "projected": _round(entry.projected_points),
+                    "actual": _round(entry.actual_points),
                     "unscored_players": entry.unscored_players,
                     "players": [{
                         "slot": p.slot,
                         "player_name": p.player_name,
                         "team": p.team,
                         "salary": p.salary,
-                        "projected": p.projected_points,
-                        "actual": p.actual_points,
+                        "projected": _round(p.projected_points),
+                        "actual": _round(p.actual_points),
                         "from_model": bool(p.from_model),
                     } for p in sorted(players.get(entry.id, []), key=lambda p: p.id)],
                 } for entry in entries.get(build.id, [])],
