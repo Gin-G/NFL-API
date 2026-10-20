@@ -1,4 +1,6 @@
-# Weekly data-loader CronJob (nflreadpy -> Postgres).
+# Daily data-loader CronJob (nflreadpy -> Postgres). This is the only thing that
+# brings results into the database, so everything downstream that scores what
+# happened -- projection accuracy, lineup accuracy -- waits on it.
 #
 # Was an ArgoCD PostSync hook, but the hook wedged every deploy: after the Job
 # completed, ArgoCD's hook-finalizer left it stuck Terminating and the sync hung
@@ -15,7 +17,19 @@ metadata:
     app: {{ .Values.webapp.name }}
     group: {{ .Values.webapp.group }}
 spec:
-  schedule: "0 10 * * 2"          # Tuesday 10:00 UTC (before the Wednesday projections run)
+  # Daily 10:00 UTC. Was Tuesday-only, which meant Sunday's results sat in
+  # nflverse for a day and a half before they reached us: player_stats stopped at
+  # the previous week, every one of the current week's `schedules` rows still had
+  # a null score, and both accuracy jobs below gate on a week being present in
+  # player_stats -- so Monday's run had nothing to score and said so. The loader
+  # was the bottleneck, not the scorers; they already run daily.
+  #
+  # 10:00 UTC is kept deliberately. It is ~6h after a Monday night game ends and
+  # two hours ahead of projection accuracy (12:00) and lineup accuracy (12:20),
+  # so the whole chain still runs in order, just seven times a week instead of
+  # once. A run is cheap: the six nflverse pulls total under 3s, and only the
+  # current season is force-refreshed (older seasons hit their per-table skip).
+  schedule: "0 10 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 2
