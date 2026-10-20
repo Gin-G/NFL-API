@@ -308,21 +308,26 @@ export default function Optimizer() {
                     <span className="text-brand-green font-medium">{lineup.projected} pts</span>
                   </span>
                 </div>
-                <table className="w-full text-xs">
+                {/* table-fixed, so the name column absorbs the slack and a long
+                    name truncates inside the card rather than widening the table
+                    past it. The numeric columns are given widths for the same
+                    reason: without them an auto table hands the name whatever is
+                    left after the content, which is nothing. */}
+                <table className="w-full table-fixed text-xs">
                   <tbody>
                     {lineup.players.map((p, i) => (
                       <tr key={`${p.player_name}-${i}`} className="border-t border-slate-700/60">
-                        <td className="py-1.5 pr-2 text-slate-500 w-16">{p.roster_position}</td>
-                        <td className="py-1.5 pr-2 text-slate-200">
+                        <td className="py-1.5 pr-2 text-slate-500 w-11">{p.roster_position}</td>
+                        <td className="py-1.5 pr-2 text-slate-200 truncate" title={p.player_name}>
                           {p.player_name}
                           {!p.from_model && (
                             <span className="text-slate-500" title="FanDuel's FPPG, not a model projection"> *</span>
                           )}
                         </td>
-                        <td className="py-1.5 pr-2 text-right text-slate-400 tabular-nums">
+                        <td className="py-1.5 pr-2 text-right text-slate-400 tabular-nums w-16 whitespace-nowrap">
                           ${p.salary?.toLocaleString()}
                         </td>
-                        <td className="py-1.5 text-right text-slate-200 tabular-nums w-12">
+                        <td className="py-1.5 text-right text-slate-200 tabular-nums w-11 whitespace-nowrap">
                           {p.projected}
                         </td>
                       </tr>
@@ -405,17 +410,17 @@ export default function Optimizer() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-400 border-b border-slate-700">
-                  <th className="text-left py-2 px-3 font-medium">Player</th>
-                  <th className="text-left py-2 px-2 font-medium">Pos</th>
-                  <th className="text-left py-2 px-2 font-medium">Team</th>
-                  <th className="text-right py-2 px-2 font-medium">Salary</th>
-                  <th className="text-right py-2 px-2 font-medium">Lineups</th>
+                  <th className="text-left py-2 px-3 font-medium whitespace-nowrap">Player</th>
+                  <th className="text-left py-2 px-2 font-medium whitespace-nowrap">Pos</th>
+                  <th className="text-left py-2 px-2 font-medium whitespace-nowrap">Team</th>
+                  <th className="text-right py-2 px-2 font-medium whitespace-nowrap">Salary</th>
+                  <th className="text-right py-2 px-2 font-medium whitespace-nowrap">Lineups</th>
                   {scope === 'week' && (
-                    <th className="text-right py-2 px-2 font-medium">Builds</th>
+                    <th className="text-right py-2 px-2 font-medium whitespace-nowrap">Builds</th>
                   )}
                   <th className="text-left py-2 px-3 font-medium w-40">Exposure</th>
-                  <th className="text-right py-2 px-2 font-medium">Proj</th>
-                  {showsActual && <th className="text-right py-2 px-3 font-medium">Actual</th>}
+                  <th className="text-right py-2 px-2 font-medium whitespace-nowrap">Proj</th>
+                  {showsActual && <th className="text-right py-2 px-3 font-medium whitespace-nowrap">Actual</th>}
                 </tr>
               </thead>
               <tbody>
@@ -448,14 +453,14 @@ export default function Optimizer() {
                         {slots.length > 1 && <span className="text-slate-600"> †</span>}
                       </td>
                       <td className="py-1.5 px-2 text-slate-400">{r.team}</td>
-                      <td className="py-1.5 px-2 text-right text-slate-400 tabular-nums">
+                      <td className="py-1.5 px-2 text-right text-slate-400 tabular-nums whitespace-nowrap">
                         {r.salary === null ? '—' : `$${r.salary.toLocaleString()}`}
                       </td>
-                      <td className="py-1.5 px-2 text-right text-slate-300 tabular-nums">
+                      <td className="py-1.5 px-2 text-right text-slate-300 tabular-nums whitespace-nowrap">
                         {r.lineups}
                       </td>
                       {scope === 'week' && (
-                        <td className="py-1.5 px-2 text-right text-slate-400 tabular-nums">
+                        <td className="py-1.5 px-2 text-right text-slate-400 tabular-nums whitespace-nowrap">
                           {r.builds ?? '—'}
                         </td>
                       )}
@@ -476,11 +481,11 @@ export default function Optimizer() {
                           </span>
                         </div>
                       </td>
-                      <td className="py-1.5 px-2 text-right text-slate-300 tabular-nums">
+                      <td className="py-1.5 px-2 text-right text-slate-300 tabular-nums whitespace-nowrap">
                         {r.projected ?? '—'}
                       </td>
                       {showsActual && (
-                        <td className="py-1.5 px-3 text-right text-slate-200 tabular-nums">
+                        <td className="py-1.5 px-3 text-right text-slate-200 tabular-nums whitespace-nowrap">
                           {r.actual ?? '—'}
                         </td>
                       )}
@@ -518,14 +523,14 @@ export default function Optimizer() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-500 text-left">
-                  <th className="pb-2 pr-3 font-medium">Week</th>
-                  <th className="pb-2 pr-3 font-medium text-right">Lineups</th>
-                  <th className="pb-2 pr-3 font-medium text-right">Scored</th>
-                  <th className="pb-2 pr-3 font-medium text-right">Projected</th>
-                  <th className="pb-2 pr-3 font-medium text-right">Actual</th>
-                  <th className="pb-2 pr-3 font-medium text-right">FPPG baseline</th>
-                  <th className="pb-2 pr-3 font-medium text-right">Best possible</th>
-                  <th className="pb-2 font-medium text-right">Beat baseline</th>
+                  <th className="pb-2 pr-3 font-medium whitespace-nowrap">Week</th>
+                  <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Lineups</th>
+                  <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Scored</th>
+                  <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Projected</th>
+                  <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Actual</th>
+                  <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">FPPG baseline</th>
+                  <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Best possible</th>
+                  <th className="pb-2 font-medium text-right whitespace-nowrap">Beat baseline</th>
                 </tr>
               </thead>
               <tbody>
@@ -536,13 +541,13 @@ export default function Optimizer() {
                   return (
                     <tr key={w.week} className="border-t border-slate-700/60">
                       <td className="py-1.5 pr-3 text-slate-200">Week {w.week}</td>
-                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                         {w.lineups}
                       </td>
-                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                         {w.scored_lineups || '—'}
                       </td>
-                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                         {w.projected ?? '—'}
                       </td>
                       <td className={`py-1.5 pr-3 text-right tabular-nums ${
@@ -551,13 +556,13 @@ export default function Optimizer() {
                       }`}>
                         {w.actual ?? '—'}
                       </td>
-                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                      <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                         {w.fppg_baseline ?? '—'}
                       </td>
-                      <td className="py-1.5 pr-3 text-right text-slate-500 tabular-nums">
+                      <td className="py-1.5 pr-3 text-right text-slate-500 tabular-nums whitespace-nowrap">
                         {w.best_possible ?? '—'}
                       </td>
-                      <td className="py-1.5 text-right text-slate-400 tabular-nums">
+                      <td className="py-1.5 text-right text-slate-400 tabular-nums whitespace-nowrap">
                         {w.compared_to_fppg ? `${w.beat_fppg} of ${w.compared_to_fppg}` : '—'}
                       </td>
                     </tr>
@@ -569,25 +574,25 @@ export default function Optimizer() {
                       {performance.data.totals.weeks_scored} week
                       {performance.data.totals.weeks_scored === 1 ? '' : 's'}
                     </td>
-                    <td className="py-2 pr-3 text-right tabular-nums">
+                    <td className="py-2 pr-3 text-right tabular-nums whitespace-nowrap">
                       {performance.data.totals.lineups}
                     </td>
-                    <td className="py-2 pr-3 text-right tabular-nums">
+                    <td className="py-2 pr-3 text-right tabular-nums whitespace-nowrap">
                       {performance.data.totals.scored_lineups}
                     </td>
-                    <td className="py-2 pr-3 text-right tabular-nums">
+                    <td className="py-2 pr-3 text-right tabular-nums whitespace-nowrap">
                       {performance.data.totals.projected ?? '—'}
                     </td>
-                    <td className="py-2 pr-3 text-right tabular-nums">
+                    <td className="py-2 pr-3 text-right tabular-nums whitespace-nowrap">
                       {performance.data.totals.actual ?? '—'}
                     </td>
-                    <td className="py-2 pr-3 text-right tabular-nums">
+                    <td className="py-2 pr-3 text-right tabular-nums whitespace-nowrap">
                       {performance.data.totals.fppg_baseline ?? '—'}
                     </td>
-                    <td className="py-2 pr-3 text-right text-slate-500 tabular-nums">
+                    <td className="py-2 pr-3 text-right text-slate-500 tabular-nums whitespace-nowrap">
                       {performance.data.totals.best_possible ?? '—'}
                     </td>
-                    <td className="py-2 text-right tabular-nums">
+                    <td className="py-2 text-right tabular-nums whitespace-nowrap">
                       {performance.data.totals.beat_fppg_rate !== null
                         ? `${Math.round(performance.data.totals.beat_fppg_rate * 100)}%`
                         : '—'}
@@ -632,13 +637,13 @@ export default function Optimizer() {
 
             {/* The insight: which objective actually won. */}
             {weekObjectives.length > 0 && (
-              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4 overflow-x-auto">
                 <h3 className="text-white font-medium text-xs mb-2">Objectives</h3>
                 {weekVerdict?.comparable && weekVerdict.best ? (
                   <p className="text-xs text-slate-300 mb-3">
                     <span className="text-brand-green font-medium">{weekVerdict.best}</span>{' '}
                     beat <span className="text-slate-200">{weekVerdict.worst}</span> by{' '}
-                    <span className="tabular-nums">{weekVerdict.spread}</span> points a
+                    <span className="tabular-nums whitespace-nowrap">{weekVerdict.spread}</span> points a
                     lineup this week
                     {weekContests.size > 1 && ` (${weekVerdict.contest} only)`}.
                     <span className="text-slate-500">
@@ -657,17 +662,17 @@ export default function Optimizer() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-slate-500 text-left">
-                      <th className="pb-2 pr-3 font-medium">Objective</th>
+                      <th className="pb-2 pr-3 font-medium whitespace-nowrap">Objective</th>
                       {weekContests.size > 1 && (
-                        <th className="pb-2 pr-3 font-medium">Contest</th>
+                        <th className="pb-2 pr-3 font-medium whitespace-nowrap">Contest</th>
                       )}
-                      <th className="pb-2 pr-3 font-medium text-right">Lineups</th>
-                      <th className="pb-2 pr-3 font-medium text-right">Scored</th>
-                      <th className="pb-2 pr-3 font-medium text-right">Projected</th>
-                      <th className="pb-2 pr-3 font-medium text-right">Actual</th>
-                      <th className="pb-2 pr-3 font-medium text-right">Best</th>
-                      <th className="pb-2 pr-3 font-medium text-right">Worst</th>
-                      <th className="pb-2 font-medium text-right">vs baseline</th>
+                      <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Lineups</th>
+                      <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Scored</th>
+                      <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Projected</th>
+                      <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Actual</th>
+                      <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Best</th>
+                      <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Worst</th>
+                      <th className="pb-2 font-medium text-right whitespace-nowrap">vs baseline</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -684,22 +689,22 @@ export default function Optimizer() {
                           {weekContests.size > 1 && (
                             <td className="py-1.5 pr-3 text-slate-500">{o.contest}</td>
                           )}
-                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                             {o.lineups}
                           </td>
-                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                             {o.scored_lineups}
                           </td>
-                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                             {o.projected ?? '—'}
                           </td>
-                          <td className="py-1.5 pr-3 text-right text-slate-100 tabular-nums">
+                          <td className="py-1.5 pr-3 text-right text-slate-100 tabular-nums whitespace-nowrap">
                             {o.actual ?? '—'}
                           </td>
-                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                             {o.best_lineup_actual ?? '—'}
                           </td>
-                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                          <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                             {o.worst_lineup_actual ?? '—'}
                           </td>
                           <td
@@ -740,7 +745,7 @@ export default function Optimizer() {
                       {b.fppg_baseline !== null ? (
                         <>
                           FPPG baseline{' '}
-                          <span className="text-slate-200 tabular-nums">{b.fppg_baseline}</span>
+                          <span className="text-slate-200 tabular-nums whitespace-nowrap">{b.fppg_baseline}</span>
                         </>
                       ) : (
                         <span className="text-slate-500">no baseline</span>
@@ -748,7 +753,7 @@ export default function Optimizer() {
                       {b.best_possible !== null && (
                         <>
                           {' '}· best possible{' '}
-                          <span className="text-slate-200 tabular-nums">{b.best_possible}</span>
+                          <span className="text-slate-200 tabular-nums whitespace-nowrap">{b.best_possible}</span>
                         </>
                       )}
                       {b.scored_at === null && (
@@ -760,11 +765,11 @@ export default function Optimizer() {
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="text-slate-500 text-left">
-                        <th className="pb-2 pr-3 font-medium">Lineup</th>
-                        <th className="pb-2 pr-3 font-medium text-right">Salary</th>
-                        <th className="pb-2 pr-3 font-medium text-right">Projected</th>
-                        <th className="pb-2 pr-3 font-medium text-right">Actual</th>
-                        <th className="pb-2 pr-3 font-medium text-right">vs baseline</th>
+                        <th className="pb-2 pr-3 font-medium whitespace-nowrap">Lineup</th>
+                        <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Salary</th>
+                        <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Projected</th>
+                        <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">Actual</th>
+                        <th className="pb-2 pr-3 font-medium whitespace-nowrap text-right">vs baseline</th>
                         <th className="pb-2 font-medium" />
                       </tr>
                     </thead>
@@ -792,13 +797,13 @@ export default function Optimizer() {
                                   </span>
                                 )}
                               </td>
-                              <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                              <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                                 {l.salary === null ? '—' : `$${l.salary.toLocaleString()}`}
                               </td>
-                              <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums">
+                              <td className="py-1.5 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
                                 {l.projected ?? '—'}
                               </td>
-                              <td className="py-1.5 pr-3 text-right text-slate-100 font-medium tabular-nums">
+                              <td className="py-1.5 pr-3 text-right text-slate-100 font-medium tabular-nums whitespace-nowrap">
                                 {l.actual ?? '—'}
                               </td>
                               <td
@@ -821,7 +826,12 @@ export default function Optimizer() {
                             {open && (
                               <tr className="border-t border-slate-700/40 bg-slate-900/40">
                                 <td colSpan={6} className="px-3 py-2">
-                                  <table className="w-full text-xs">
+                                  {/* min-w-[22rem] + the card's overflow-x-auto:
+                                      the roster scrolls with the card on a narrow
+                                      screen. Without a min-width a nested table
+                                      squeezes its own columns to illegible and
+                                      still drags the parent table wider. */}
+                                  <table className="w-full min-w-[22rem] table-fixed text-xs">
                                     <tbody>
                                       {l.players.map((p, i) => {
                                         const diff = p.actual !== null && p.projected !== null
@@ -829,10 +839,13 @@ export default function Optimizer() {
                                           : null
                                         return (
                                           <tr key={`${p.player_name}-${i}`}>
-                                            <td className="py-1 pr-2 text-slate-500 w-16">
+                                            <td className="py-1 pr-2 text-slate-500 w-14">
                                               {p.slot}
                                             </td>
-                                            <td className="py-1 pr-2 text-slate-200">
+                                            <td
+                                              className="py-1 pr-2 text-slate-200 truncate"
+                                              title={p.player_name}
+                                            >
                                               {p.player_name}
                                               {!p.from_model && (
                                                 <span
@@ -843,8 +856,8 @@ export default function Optimizer() {
                                                 </span>
                                               )}
                                             </td>
-                                            <td className="py-1 pr-2 text-slate-500">{p.team}</td>
-                                            <td className="py-1 pr-2 text-right text-slate-400 tabular-nums">
+                                            <td className="py-1 pr-2 text-slate-500 w-10">{p.team}</td>
+                                            <td className="py-1 pr-2 text-right text-slate-400 tabular-nums w-16 whitespace-nowrap">
                                               {p.salary === null
                                                 ? '—'
                                                 : `$${p.salary.toLocaleString()}`}
