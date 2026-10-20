@@ -42,10 +42,20 @@ def test_current_season_tables_are_reloaded(recorded):
 
     now = _forced(recorded, 2026)
     for name in ("load_schedules", "load_rosters", "load_player_stats",
-                 "load_depth_charts", "load_snap_counts"):
+                 "load_depth_charts", "load_snap_counts", "load_pbp"):
         assert now[name] is True, f"{name} would stop at the first week loaded"
-    # PBP appends rather than merging, so forcing it would duplicate plays.
-    assert now["load_pbp"] is False
+
+
+def test_pbp_is_refreshed_in_season_too(recorded):
+    """PBP was the exception while it appended, and paid for it by never
+    updating: 2026 held week 1 and nothing else for six weeks. load_pbp replaces
+    a season in one transaction now, so it belongs in the refresh with the rest.
+    See tests/test_pbp_loader.py for the replace itself."""
+    from database import loader
+
+    loader.load_all_data(db=None, seasons=[2026])
+
+    assert _forced(recorded, 2026)["load_pbp"] is True
 
 
 def test_finished_seasons_keep_the_fast_skip(recorded):

@@ -481,6 +481,24 @@ def ensure_pbp_indexes() -> None:
         logger.warning("Could not ensure PBP indexes (table may not exist yet): %s", exc)
 
 
+def _pbp_table_columns() -> set:
+    """The columns ``play_by_play`` actually has, or an empty set if there is no
+    table yet — which is a first load, where ``to_sql`` creates it from the frame.
+
+    Worth asking because the table has no ORM model: it is whatever the first
+    load poured into it. An upstream column added later would fail the INSERT and
+    take the season's whole load down with it, so the frame is narrowed to what
+    the table can hold and the dropped names are logged.
+    """
+    from sqlalchemy import inspect
+
+    from .session import engine
+    try:
+        return {c["name"].lower() for c in inspect(engine).get_columns("play_by_play")}
+    except Exception:
+        return set()
+
+
 def _pbp_season_loaded(db: Session, season: int) -> bool:
     """Return True if PBP data for this season is already in the DB."""
     from .session import engine
@@ -496,7 +514,20 @@ def _pbp_season_loaded(db: Session, season: int) -> bool:
 
 
 def load_pbp(db: Session, season: int, force: bool = False) -> int:
-    """Load play-by-play data for a season using fast pandas to_sql bulk insert."""
+    """Load play-by-play for a season, REPLACING whatever that season had.
+
+    It used to append, and that is why this was the one loader left out of the
+    in-season refresh in ``load_all_data``: re-running it would have doubled the
+    season instead of updating it. The cost was worse than the bug it avoided.
+    The current season loaded once, in week 1, and then stopped — 2,756 plays of
+    2026 sat in the table while nflverse had published 16,212 by week 6 — and
+    nothing said so, because "already in DB" was perfectly true.
+
+    There is no unique constraint on ``(game_id, play_id)`` to upsert against
+    (the table has no ORM model; it is whatever the first ``to_sql`` created), so
+    the season is deleted and rewritten inside ONE transaction. Either the new
+    season lands whole or the old one is still there — never half a season.
+    """
     from .session import engine
     if season < 2002:
         return 0
@@ -515,19 +546,42 @@ def load_pbp(db: Session, season: int, force: bool = False) -> int:
         df["season"] = season
     df = df.replace([float("inf"), float("-inf")], None)
     df = df.drop_duplicates(subset=["game_id", "play_id"], keep="last")
+
+    # An empty frame is an upstream hiccup, not an instruction to wipe the
+    # season. Deleting on the strength of it would lose plays we already have.
+    if df.empty:
+        logger.warning("PBP %d: upstream returned no plays; leaving what is there", season)
+        return 0
+
+    columns = _pbp_table_columns()
+    if columns:
+        extra = sorted(c for c in df.columns if c not in columns)
+        if extra:
+            logger.warning("PBP %d: dropping %d upstream column(s) the table does "
+                           "not have: %s", season, len(extra), ", ".join(extra[:10]))
+            df = df[[c for c in df.columns if c in columns]]
+
     count = len(df)
-    # Use engine directly so pandas manages its own connection and auto-commits.
-    # Avoids the session transaction being left in an aborted state by the
-    # _pbp_season_loaded check above (missing table aborts a PostgreSQL txn).
-    df.to_sql(
-        "play_by_play",
-        con=engine,
-        if_exists="append",
-        index=False,
-        method="multi",
-        chunksize=500,
-    )
-    logger.info("PBP loaded for %d: %d plays", season, count)
+    # The engine, not the session: a missing table aborts a PostgreSQL txn, and
+    # the _pbp_season_loaded check above may already have tried one. engine.begin()
+    # commits on the way out and rolls back on an exception, which is what makes
+    # the delete-then-insert safe. On a first load there is no table to delete
+    # from, and to_sql creates it.
+    with engine.begin() as conn:
+        replaced = 0
+        if columns:
+            replaced = conn.execute(
+                text("DELETE FROM play_by_play WHERE season = :s"), {"s": season}
+            ).rowcount or 0
+        df.to_sql(
+            "play_by_play",
+            con=conn,
+            if_exists="append",
+            index=False,
+            method="multi",
+            chunksize=500,
+        )
+    logger.info("PBP loaded for %d: %d plays (replaced %d)", season, count, replaced)
     return count
 
 
@@ -628,11 +682,16 @@ def load_all_data(db: Session, seasons: list, force: bool = False) -> None:
     # progress gains a week of games every week, and the per-table skip used to
     # stop at whatever the first in-season run found: 2026 would have loaded week 1
     # and nothing after, stalling the accuracy record with it. These loaders merge
-    # on their primary keys, so re-running them is safe. PBP appends, so it is not.
+    # on their primary keys, so re-running them is safe.
+    #
+    # PBP is in here too now. It was the exception for as long as it appended --
+    # forcing it would have duplicated the season -- and it paid for that by never
+    # updating at all: 2026 held week 1 and nothing else, all season. load_pbp
+    # replaces the season in one transaction instead, so it refreshes like the rest.
     from api.utils import get_current_nfl_season
     current = get_current_nfl_season()
     refresh = {load_schedules, load_rosters, load_player_stats,
-               load_depth_charts, load_snap_counts}
+               load_depth_charts, load_snap_counts, load_pbp}
     for season in seasons:
         logger.info("=== Processing season %d ===", season)
         for fn in loaders:
