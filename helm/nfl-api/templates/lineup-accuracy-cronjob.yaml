@@ -35,7 +35,11 @@ metadata:
     app: {{ .Values.webapp.name }}
     group: {{ .Values.webapp.group }}
 spec:
-  schedule: "20 12 * * *"         # daily 12:20 UTC — after the projection scoring
+  # Daily 12:20 Denver, 20 minutes after the projection scoring and two hours
+  # after the loader that both of them read. NOT UTC: see the db-loader chart
+  # for why the zone is spelled out rather than left to the controller's own.
+  schedule: "20 12 * * *"
+  timeZone: "America/Denver"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 2

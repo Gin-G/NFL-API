@@ -17,19 +17,29 @@ metadata:
     app: {{ .Values.webapp.name }}
     group: {{ .Values.webapp.group }}
 spec:
-  # Daily 10:00 UTC. Was Tuesday-only, which meant Sunday's results sat in
+  # Daily 10:00 DENVER. Was Tuesday-only, which meant Sunday's results sat in
   # nflverse for a day and a half before they reached us: player_stats stopped at
   # the previous week, every one of the current week's `schedules` rows still had
-  # a null score, and both accuracy jobs below gate on a week being present in
+  # a null score, and both accuracy jobs gate on a week being present in
   # player_stats -- so Monday's run had nothing to score and said so. The loader
   # was the bottleneck, not the scorers; they already run daily.
   #
-  # 10:00 UTC is kept deliberately. It is ~6h after a Monday night game ends and
-  # two hours ahead of projection accuracy (12:00) and lineup accuracy (12:20),
-  # so the whole chain still runs in order, just seven times a week instead of
-  # once. A run is cheap: the six nflverse pulls total under 3s, and only the
-  # current season is force-refreshed (older seasons hit their per-table skip).
+  # The timeZone is written out because the hour here was once documented as UTC
+  # and is not: a CronJob with no timeZone runs in the controller's own local
+  # time, which on this cluster is America/Denver, so these fire six hours later
+  # in UTC than the field reads. Measured, not assumed -- roster-sync's
+  # "0 8 * * *" has a lastScheduleTime of 14:00Z. Saying it out loud costs one
+  # line and changes no behaviour.
+  #
+  # 10:00 is kept deliberately: ~12h after a Sunday night game and ~12h after a
+  # Monday night one, and two hours ahead of projection accuracy (12:00) and
+  # lineup accuracy (12:20), so the whole chain still runs in order, just seven
+  # times a week instead of once. A run is cheap -- the six nflverse pulls total
+  # under 3s and only the current season is force-refreshed (older seasons hit
+  # their per-table skip) -- and it takes about 7.5 minutes, nearly all of it
+  # play-by-play.
   schedule: "0 10 * * *"
+  timeZone: "America/Denver"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 2
