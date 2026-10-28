@@ -89,11 +89,46 @@ export interface LineupRequest {
   exclude: string
   /** all | main | sunday | primetime — the export is always Thu-Mon. */
   slate: string
+  /** At most this many of the nine from one team, the defense included.
+   *  4 is FanDuel's own limit. */
+  max_per_team: number
+  /** Require this many WR/TE from the quarterback's team. */
+  stack_qb: number
+  /** False keeps a running back off his own quarterback. */
+  rb_with_qb: boolean
+  /** Points charged per percent of projected ownership, tilting the build
+   *  toward players the field has not found. 0 ignores the field. It buys that
+   *  tilt with expected points, so it is a tournament setting: on the 2026
+   *  week 6 main slate a charge of 0.10 took the best five from 125.1 actual
+   *  down to 109.3. */
+  ownership_weight?: number
   /** A specific saved slate, for a Showdown file alongside a classic list. */
   slate_id?: number
 }
 
 /** Build lineups: from an uploaded FanDuel slate CSV, or from the saved one. */
+/** Download a build as the CSV FanDuel's bulk entry accepts.
+ *
+ * `contestId` rewrites the contest half of every FanDuel id. An id is
+ * "<contest>-<player>", so lineups priced from one contest's player list are
+ * rejected wholesale by another — the number in the file name of the list or
+ * upload template you downloaded is the one to pass. */
+export async function downloadFanduelUpload(buildId: number, contestId?: string) {
+  const { data, headers } = await apiClient.get(
+    `/optimizer/builds/${buildId}/upload.csv`,
+    { params: contestId ? { contest_id: contestId } : {}, responseType: 'blob' },
+  )
+  const match = /filename="([^"]+)"/.exec(String(headers['content-disposition'] ?? ''))
+  const url = URL.createObjectURL(data as Blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = match?.[1] ?? `fanduel-build${buildId}.csv`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
 export function useBuildLineups() {
   const queryClient = useQueryClient()
   return useMutation({

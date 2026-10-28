@@ -1,6 +1,7 @@
 import { Fragment, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Info, Trash2, Upload } from 'lucide-react'
+import { ChevronDown, ChevronRight, Download, Info, Trash2, Upload } from 'lucide-react'
 import {
+  downloadFanduelUpload,
   useBuildLineups, useForgetSlate, useLineupExposure, useLineupPerformance, useSavedSlates,
   useSlateCoverage,
 } from '../api/optimizer'
@@ -32,6 +33,13 @@ export default function Optimizer() {
   const [slate, setSlate] = useState('all')
   const [salaryCap, setSalaryCap] = useState(60000)
   const [maxUsage, setMaxUsage] = useState(50)
+  // How the nine picks may relate to each other — the one thing a board of
+  // per-player projections cannot say. 4 is FanDuel's own per-team limit.
+  const [maxPerTeam, setMaxPerTeam] = useState(4)
+  const [stackQb, setStackQb] = useState(0)
+  const [rbWithQb, setRbWithQb] = useState(true)
+  const [ownershipWeight, setOwnershipWeight] = useState(0)
+  const [contestId, setContestId] = useState('')
   const [exclude, setExclude] = useState('')
 
   const [exposureScope, setExposureScope] = useState<'build' | 'week'>('build')
@@ -185,6 +193,56 @@ export default function Optimizer() {
             className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-1.5 text-sm w-24"
           />
         </label>
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          Max per team
+          <select
+            value={maxPerTeam}
+            onChange={(e) => setMaxPerTeam(Number(e.target.value))}
+            title="At most this many of the nine from one team, the defense included. FanDuel's own limit is 4."
+            className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-1.5 text-sm w-24"
+          >
+            {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          QB stack
+          <select
+            value={stackQb}
+            onChange={(e) => setStackQb(Number(e.target.value))}
+            title="Require this many of the quarterback's own receivers or tight ends."
+            className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-1.5 text-sm w-28"
+          >
+            <option value={0}>none</option>
+            <option value={1}>+1 pass catcher</option>
+            <option value={2}>+2 pass catchers</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          RB with his QB
+          <select
+            value={rbWithQb ? 'yes' : 'no'}
+            onChange={(e) => setRbWithQb(e.target.value === 'yes')}
+            title="A running back and his own quarterback compete for the same drives."
+            className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-1.5 text-sm w-24"
+          >
+            <option value="yes">allowed</option>
+            <option value="no">never</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          Fade the field
+          <select
+            value={ownershipWeight}
+            onChange={(e) => setOwnershipWeight(Number(e.target.value))}
+            title="Charge each player for how much of the field owns him. Buys contrarian lineups with expected points — a tournament setting, not a better build."
+            className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-1.5 text-sm w-32"
+          >
+            <option value={0}>off</option>
+            <option value={0.05}>slight</option>
+            <option value={0.1}>moderate</option>
+            <option value={0.25}>heavy</option>
+          </select>
+        </label>
         <label className="flex flex-col gap-1 text-xs text-slate-400 grow min-w-[12rem]">
           Exclude (comma separated)
           <input
@@ -210,6 +268,8 @@ export default function Optimizer() {
           onClick={() => canBuild && build.mutate({
             file, season, week, num_lineups: numLineups, objective,
             salary_cap: salaryCap, max_usage_percentage: maxUsage, exclude, slate,
+            max_per_team: maxPerTeam, stack_qb: stackQb, rb_with_qb: rbWithQb,
+            ownership_weight: ownershipWeight,
           }, {
             // The file has been saved server-side now, so later builds should
             // use the stored copy rather than re-uploading the same bytes.
@@ -342,9 +402,30 @@ export default function Optimizer() {
             join missed.
           </p>
           {result.build_id !== null && (
-            <p className="text-slate-500 text-xs mt-1">
-              Recorded as build {result.build_id}; it gets scored once the week is played.
-            </p>
+            <div className="flex flex-wrap items-center gap-3 mt-3">
+              <button
+                onClick={() => downloadFanduelUpload(result.build_id as number,
+                                                     contestId.trim() || undefined)}
+                title="Nine columns in FanDuel's order, one row per lineup — bulk entry takes it as is."
+                className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg px-3 py-1.5 text-sm transition-colors"
+              >
+                <Download size={14} />
+                Download for FanDuel
+              </button>
+              <label className="flex items-center gap-2 text-xs text-slate-400">
+                Contest ID
+                <input
+                  value={contestId}
+                  onChange={(e) => setContestId(e.target.value)}
+                  placeholder="optional"
+                  title="A FanDuel player id is <contest>-<player>. Entering a different contest from the one you priced off? Put its id here — the number in the file name — or FanDuel rejects the whole upload."
+                  className="bg-slate-700 border border-slate-600 text-white placeholder-slate-500 rounded-lg px-2 py-1 text-xs w-28"
+                />
+              </label>
+              <span className="text-slate-500 text-xs">
+                Recorded as build {result.build_id}; it gets scored once the week is played.
+              </span>
+            </div>
           )}
         </>
       )}

@@ -954,6 +954,14 @@ export interface LineupBuildRecord {
   slate: string
   salary_cap: number | null
   exclude_players: string | null
+  /** The correlation rules this build ran under; null on older builds. */
+  max_per_team: number | null
+  stack_qb: number | null
+  rb_with_qb: boolean | null
+  /** Points charged per percent of projected ownership; null on older builds. */
+  ownership_weight: number | null
+  /** When the board it read was computed — a stale one is otherwise invisible. */
+  projection_computed_at: string | null
   fppg_baseline: number | null
   fppg_projected: number | null
   best_possible: number | null
