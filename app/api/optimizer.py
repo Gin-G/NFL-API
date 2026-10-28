@@ -19,8 +19,10 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from database.models import (FanduelSlate, LineupBuild, LineupEntry, LineupPlayer,
@@ -114,6 +116,10 @@ def _projection_frame(db, season: int, week: int) -> pd.DataFrame:
         "team": r.team,
         **{dest: getattr(r, src) for src, dest in PROJECTION_COLUMNS.items()},
     } for r in rows])
+    # Stamped on the frame, not a column: the build records WHEN the board it
+    # read was computed, because a stale one is otherwise invisible.
+    stamps = [r.computed_at for r in rows if r.computed_at is not None]
+    frame.attrs["computed_at"] = max(stamps) if stamps else None
     return frame
 
 
@@ -156,6 +162,132 @@ def _attach_opportunity(pool: pd.DataFrame, season: int, week: int) -> pd.DataFr
         # build is not optional.
         logger.warning("opportunity context not attached (%s); omitting", exc)
         return pool
+
+
+def _attach_defense(pool: pd.DataFrame, season: int, week: int) -> pd.DataFrame:
+    """Give the DEF rows a real projection, in place of FanDuel's FPPG.
+
+    FPPG is what the slot has always used, for the honest reason that the
+    board projects no defenses — and it is worse than nothing. Over 2019-2026,
+    ranking defenses by their season average picks a weekly top three worth
+    7.2 actual points where `nfl_projections.defense` picks one worth 8.5, and
+    FPPG's error is worse than a flat league average's. The slot is one ninth
+    of a lineup and this is about a point and a quarter of it.
+
+    Soft-fails the same way the volume context does: a defense projection that
+    can break somebody's build is not worth having. The optimizer falls back
+    to FPPG per row wherever `defense_points` is missing.
+    """
+    try:
+        from nfl_projections import defense as dst
+
+        if "Team" not in pool.columns:
+            return pool
+        projected = dst.project(season, week)
+        if projected is None or projected.empty:
+            return pool
+        # FanDuel writes JAC, LAR and WSH where nflverse writes JAX, LA and
+        # WAS. Unnormalised, those three defenses quietly keep their FPPG.
+        normalize = getattr(dst, "normalize_team",
+                            lambda code: str(code or "").strip().upper())
+        teams = projected.assign(team=projected["team"].map(normalize)) \
+                         .set_index("team")["projected_points"]
+        slots = pool.get("Roster Position", pd.Series("", index=pool.index)).astype(str)
+        is_def = slots.str.upper().str.replace("/", "", regex=False).isin({"DEF", "D", "DST"})
+        pool = pool.copy()
+        pool["defense_points"] = np.where(
+            is_def, pool["Team"].map(normalize).map(teams).astype(float), np.nan)
+        logger.info("defense projections attached for %d of %d DEF rows",
+                    int(pool.loc[is_def, "defense_points"].notna().sum()), int(is_def.sum()))
+        return pool
+    except Exception as exc:
+        logger.warning("defense projections not attached (%s); the slot keeps FPPG", exc)
+        return pool
+
+
+def _attach_ownership(pool: pd.DataFrame, season: int, week: int) -> pd.DataFrame:
+    """Add projected roster percentages — how much of the field owns each player.
+
+    Footballguys publishes these per site and week, free, and they are the only
+    read we have on what everyone else is doing. Two things make them worth
+    handling carefully.
+
+    They cover ONE slate: the Sunday 13:00-16:25 windows. Attach them to a pool
+    that also holds Thursday, the London game, Sunday night and Monday and eight
+    teams come back with no ownership at all, every one of their players looking
+    beautifully contrarian. `ownership.coverage` is checked and logged for
+    exactly that reason.
+
+    And inside the slate, an omission is information rather than a zero. On 2026
+    week 6 every one of the five main-slate players our board projected above 10
+    points and the page did not list was inactive, while our own `exp_games` had
+    all five at 1.00. So unlisted stays NaN, is never charged for, and is
+    reported separately as something to check.
+
+    Soft-fails like the rest of the context: no ownership is a build without a
+    tilt, not a failed build.
+    """
+    try:
+        from nfl_projections import ownership as own_mod
+
+        published = own_mod.load(week, warn=False)
+        if published is None or published.empty:
+            logger.info("no roster percentages published yet for week %s", week)
+            return pool
+        pool = own_mod.attach(pool, published, warn=False)
+        report = own_mod.coverage(pool)
+        logger.info("ownership attached: %s of %s rated players listed (%.0f%%)",
+                    report["listed"], report["players"],
+                    100 * (report["listed_share"] or 0))
+        if report["players"] and report["listed_share"] < 0.8:
+            logger.warning(
+                "only %.0f%% of rated players have ownership — is this pool a "
+                "wider slate than the Sunday 13:00-16:25 games?",
+                100 * report["listed_share"])
+        return pool
+    except Exception as exc:
+        logger.warning("ownership not attached (%s); the build ignores the field", exc)
+        return pool
+
+
+def _unlisted_note(pool: pd.DataFrame, threshold: float = 10.0) -> list:
+    """Players the board rates that the field has not rostered — check the news."""
+    try:
+        from nfl_projections import ownership as own_mod
+
+        if "ownership_listed" not in pool.columns:
+            return []
+        flagged = own_mod.flag_unlisted(pool, "fanduel_fantasy_points",
+                                        threshold=threshold)
+        return [{"player_name": r.Nickname, "team": getattr(r, "Team", None),
+                 "position": getattr(r, "Position", None),
+                 "salary": int(r.Salary) if pd.notna(getattr(r, "Salary", None)) else None,
+                 "projected": round(float(r.fanduel_fantasy_points), 2)}
+                for r in flagged.itertuples()]
+    except Exception as exc:
+        logger.warning("could not flag unlisted players (%s)", exc)
+        return []
+
+
+def _ownership_summary(pool: pd.DataFrame) -> dict:
+    """What the field read covered, so a tilt can be judged on its coverage."""
+    if "ownership_listed" not in pool.columns:
+        return {"available": False, "reason": "not published for this week yet"}
+    try:
+        from nfl_projections import ownership as own_mod
+
+        report = own_mod.coverage(pool)
+        return {"available": True, "rated_players": report["players"],
+                "with_ownership": report["listed"],
+                "covered_share": (None if report["players"] == 0
+                                  else round(report["listed_share"], 3)),
+                "source": "footballguys.com projected roster percentages",
+                "slate_note": ("The source projects the Sunday 13:00-16:25 "
+                               "games. A build on a wider slate will show a low "
+                               "covered_share, and the teams it skips will look "
+                               "contrarian when they are only unmeasured.")}
+    except Exception:
+        return {"available": False, "reason": "could not be summarised"}
 
 
 def _opportunity(season: int, week: int):
@@ -349,7 +481,9 @@ def _drop_superseded(db, settings: dict) -> None:
 
 def _record_build(db, lineups, *, season: int, week: int, slate_id: Optional[int],
                   contest: str, slate: str, objective: str, salary_cap: int,
-                  max_usage_percentage: int, excludes, num_requested: int):
+                  max_usage_percentage: int, excludes, num_requested: int,
+                  max_per_team=None, stack_qb=None, rb_with_qb=None,
+                  ownership_weight=None, projection_computed_at=None):
     """Write the build and its lineups; return the build id, or None.
 
     Wrapped whole in try/except on purpose, the same way the volume context is:
@@ -361,10 +495,16 @@ def _record_build(db, lineups, *, season: int, week: int, slate_id: Optional[int
             objective=objective, salary_cap=int(salary_cap),
             max_usage_percentage=int(max_usage_percentage),
             exclude_players=",".join(excludes) if excludes else None,
-            num_requested=int(num_requested))
+            num_requested=int(num_requested),
+            max_per_team=max_per_team, stack_qb=stack_qb, rb_with_qb=rb_with_qb,
+            ownership_weight=ownership_weight)
+        # The vintage is recorded but is NOT part of what makes two builds the
+        # same request: rebuilding after the board moves supersedes the older
+        # lineups, which is the whole point of rebuilding.
         _drop_superseded(db, settings)
         build = LineupBuild(**settings, num_built=len(lineups),
-                            built_at=datetime.utcnow())
+                            built_at=datetime.utcnow(),
+                            projection_computed_at=projection_computed_at)
         db.add(build)
         db.flush()
         for index, lineup in enumerate(lineups, start=1):
@@ -388,11 +528,13 @@ def _record_build(db, lineups, *, season: int, week: int, slate_id: Optional[int
                     slot=_text_or_none(row.get("Roster Position")),
                     position=_text_or_none(row.get("Position")),
                     player_id=_text_or_none(row.get("player_id")),
+                    fanduel_id=_text_or_none(row.get("Id")),
                     player_name=_text_or_none(row.get("Nickname")),
                     team=_text_or_none(row.get("Team")),
                     salary=int(row["Salary"]) if pd.notna(row.get("Salary")) else None,
                     projected_points=_float_or_none(row.get("lineup_points")),
-                    from_model=int(pd.notna(row.get("fanduel_fantasy_points"))),
+                    from_model=int(pd.notna(row.get("fanduel_fantasy_points"))
+                                   or pd.notna(row.get("defense_points"))),
                     actual_points=None))
         if slate_id is not None:
             row = db.query(FanduelSlate).filter(FanduelSlate.id == slate_id).one_or_none()
@@ -420,6 +562,10 @@ async def build_lineups(
     exclude: str = Form(""),
     slate: str = Form("all"),
     one_kicker: bool = Form(True),
+    max_per_team: int = Form(4),
+    stack_qb: int = Form(0),
+    rb_with_qb: bool = Form(True),
+    ownership_weight: float = Form(0.0),
     slate_id: Optional[int] = Form(None),
     save_slate: bool = Form(True),
     track: bool = Form(True),
@@ -444,6 +590,26 @@ async def build_lineups(
 
     `max_usage_percentage` caps how many of the returned lineups one player can
     appear in, which is what keeps five lineups from being one lineup five times.
+
+    The remaining three say how the nine picks may relate to each other, which
+    is the one thing a board of per-player projections cannot express — it is
+    made one player at a time and has no idea that nine of them can be one bet
+    on one offence. In 2026 week 7 the board put Carolina in 16% of every slot
+    it filled; Carolina lost 43-13, and lineups holding two Panthers averaged
+    75.1 against 101.6 for lineups holding none.
+
+      `max_per_team` — at most this many of the nine from one team, the defense
+        counted as one of its own. Defaults to 4, which is FanDuel's own limit:
+        before this the builder could return a lineup the site would refuse.
+      `stack_qb` — require this many WR/TE from the quarterback's team.
+      `rb_with_qb` — false forbids a running back from the quarterback's team.
+      `ownership_weight` — points charged per percent of projected ownership,
+      which tilts the build toward players the field has not found. 0 ignores
+      the field. It costs expected points to buy that tilt: on the 2026 week 6
+      main slate a charge of 0.10 took the best five from 125.1 actual to
+      109.3, so it is a tournament trade, not an improvement. Players with no
+      published ownership are charged nothing rather than treated as free
+      leverage — see `_attach_ownership`.
     """
     from nfl_projections import optimizer as opt
 
@@ -518,6 +684,8 @@ async def build_lineups(
     merged = opt.merge_fanduel_salaries(salaries, projections)
     matched = int(merged["fanduel_fantasy_points"].notna().sum())
     merged = _attach_opportunity(merged, season, week)
+    merged = _attach_defense(merged, season, week)
+    merged = _attach_ownership(merged, season, week)
 
     excludes = [n.strip() for n in exclude.split(",") if n.strip()]
     extra = {}
@@ -527,6 +695,14 @@ async def build_lineups(
         # model does not project them — makes them look cheap and dependable.
         # The first real slate duly produced a lineup with both kickers in it.
         extra["position_limits"] = {"K": 1, "D": 1}
+    if not showdown:
+        extra.update(max_per_team=max_per_team or None, stack_qb=stack_qb,
+                     rb_with_qb=rb_with_qb)
+        if ownership_weight and "ownership" in merged.columns:
+            extra["ownership_weight"] = float(ownership_weight)
+        elif ownership_weight:
+            logger.warning("ownership_weight=%s ignored: no ownership for this "
+                           "week yet", ownership_weight)
     build = opt.optimize_showdown if showdown else opt.optimize_lineups
     try:
         lineups = build(
@@ -597,7 +773,12 @@ async def build_lineups(
             contest="showdown" if showdown else "classic",
             slate="single_game" if showdown else slate, objective=objective,
             salary_cap=salary_cap, max_usage_percentage=max_usage_percentage,
-            excludes=excludes, num_requested=num_lineups)
+            excludes=excludes, num_requested=num_lineups,
+            max_per_team=None if showdown else (int(max_per_team) or None),
+            stack_qb=None if showdown else int(stack_qb),
+            rb_with_qb=None if showdown else int(bool(rb_with_qb)),
+            ownership_weight=None if showdown else float(ownership_weight or 0.0),
+            projection_computed_at=projections.attrs.get("computed_at"))
 
     out = []
     for i, lineup in enumerate(lineups, start=1):
@@ -608,7 +789,10 @@ async def build_lineups(
             "salary": int(r["Salary"]) if pd.notna(r.get("Salary")) else None,
             "projected": round(float(r["lineup_points"]), 2) if pd.notna(
                 r.get("lineup_points")) else None,
-            "from_model": bool(pd.notna(r.get("fanduel_fantasy_points"))),
+            # A projected defense is from a model too, even though it comes
+            # from a different one than the players do.
+            "from_model": bool(pd.notna(r.get("fanduel_fantasy_points"))
+                               or pd.notna(r.get("defense_points"))),
             # Volume context. `opportunities` is targets + carries per game
             # (pass attempts for a quarterback), `opportunity_share` his cut of
             # the team's, and `volume_td_gap` what his volume says he should
@@ -661,6 +845,14 @@ async def build_lineups(
             "of 83. A positive share_jump is a FADE, not a buy: on the clearest "
             "cases receivers scored 3.688 against a 4.470 projection."),
         "games": games,
+        "ownership_weight": float(ownership_weight or 0.0),
+        "ownership": _ownership_summary(merged),
+        # Players the board rates that the field has not rostered at all. Not
+        # excluded — checked. Almost always the field knows he is inactive (on
+        # 2026 week 6, all five such players were), but in week 7 Kirk Cousins
+        # was unlisted at a projected 18.4 because the field expected Penix to
+        # start, and he went for 20.4.
+        "unlisted_but_projected": _unlisted_note(merged),
         # Fewer than requested is normal rather than an error: the exposure cap
         # limits how often a player may repeat, so a thin slate (or a short
         # one) runs out of distinct lineups. Saying so beats silently returning
@@ -690,6 +882,84 @@ async def build_lineups(
         "exposure_cap": max_usage_percentage,
         "data": out,
     }
+
+
+@router.get("/builds/{build_id}/upload.csv")
+def build_upload_csv(
+    build_id: int,
+    contest_id: Optional[str] = Query(
+        None, description="Rewrite the contest half of every FanDuel id. A "
+                          "FanDuel id is '<contest>-<player>', so lineups "
+                          "priced from one contest's player list are rejected "
+                          "by another. The contest id is the number in the "
+                          "file name of the list or template you downloaded."),
+    include_names: bool = Query(
+        True, description="Write 'id:Name' rather than the bare id. FanDuel "
+                          "accepts either; names make the file readable."),
+    db: Session = Depends(get_db),
+):
+    """A build as a CSV FanDuel's bulk entry will accept.
+
+    Nine columns in FanDuel's own order, one row per lineup, up to their limit
+    of 250. The solver does not record which flexible player it treated as the
+    FLEX -- FanDuel scores it the same either way -- so the quotas are filled
+    first and the surplus back, receiver or tight end takes the FLEX.
+    """
+    from nfl_projections import optimizer as opt
+
+    build = db.query(LineupBuild).filter(LineupBuild.id == build_id).one_or_none()
+    if build is None:
+        raise HTTPException(status_code=404, detail=f"No build {build_id}.")
+    if build.contest == "showdown":
+        raise HTTPException(
+            status_code=400,
+            detail="Showdown lineups are five players with an MVP, not the nine "
+                   "classic columns; FanDuel takes a different upload for them.")
+    entries = sorted(
+        db.query(LineupEntry).filter(LineupEntry.build_id == build_id).all(),
+        key=lambda e: e.lineup_index or 0)
+    if not entries:
+        raise HTTPException(status_code=404,
+                            detail=f"Build {build_id} has no lineups stored.")
+
+    players = db.query(LineupPlayer).filter(
+        LineupPlayer.lineup_id.in_([e.id for e in entries])).all()
+    by_lineup: dict = {}
+    for player in players:
+        by_lineup.setdefault(player.lineup_id, []).append(player)
+
+    lineups, missing = [], set()
+    for entry in entries:
+        rows = by_lineup.get(entry.id, [])
+        for player in rows:
+            if not player.fanduel_id:
+                missing.add(player.player_name)
+        lineups.append(pd.DataFrame([{
+            "Id": player.fanduel_id,
+            "Nickname": player.player_name,
+            "Position": player.position,
+            "Roster Position": player.slot,
+            "Salary": player.salary,
+            "lineup_points": player.projected_points,
+        } for player in rows]))
+    if missing:
+        # Builds made before the id was recorded cannot be exported, and saying
+        # so beats handing back a file FanDuel rejects without explanation.
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Build {build_id} predates FanDuel ids being stored "
+                    f"({len(missing)} players have none). Rebuild it and the "
+                    "download will work."))
+
+    try:
+        text = opt.write_fanduel_upload(lineups, contest_id=contest_id,
+                                        include_names=include_names)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    name = f"fanduel-week{build.week}-build{build_id}-{len(lineups)}-lineups.csv"
+    return Response(content=text, media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.get("/slate-coverage")
@@ -1105,6 +1375,12 @@ def lineup_performance(
                 "slate": build.slate,
                 "salary_cap": build.salary_cap,
                 "exclude_players": build.exclude_players,
+                "max_per_team": build.max_per_team,
+                "stack_qb": build.stack_qb,
+                "rb_with_qb": (None if build.rb_with_qb is None
+                               else bool(build.rb_with_qb)),
+                "ownership_weight": build.ownership_weight,
+                "projection_computed_at": build.projection_computed_at,
                 "fppg_baseline": _round(build.fppg_points),
                 "fppg_projected": _round(build.fppg_projected),
                 "best_possible": _round(build.best_points),

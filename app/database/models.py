@@ -556,6 +556,23 @@ class LineupBuild(Base):
     num_built            = Column(Integer)
     built_at             = Column(DateTime, default=datetime.utcnow)
 
+    # The correlation rules in force, because a build is not reproducible
+    # without them and two builds under different rules are not comparable.
+    max_per_team         = Column(Integer)  # at most this many of the nine from one team
+    stack_qb             = Column(Integer)  # WR/TE required from the QB's team
+    rb_with_qb           = Column(Integer)  # 0 = no RB from the QB's team
+    # Points charged per percent of projected ownership. Recorded because it
+    # trades expected points for a tilt against the field, so a build's score
+    # cannot be read without knowing whether it paid that.
+    ownership_weight     = Column(Float)
+
+    # WHEN the board it read was computed. 2026 week 7 was built twice, once
+    # against a board that turned out to be the preseason projection still
+    # sitting in the table because the in-season run had not fired yet, and
+    # nothing recorded which was which. Without this the lineups cannot be
+    # told apart after the fact.
+    projection_computed_at = Column(DateTime)
+
     # Filled in once the week has actuals, by scripts.score_lineups.
     fppg_points          = Column(Float)    # FanDuel's own FPPG lineup, actually scored
     fppg_projected       = Column(Float)    # ... and what FPPG said it would score
@@ -601,6 +618,10 @@ class LineupPlayer(Base):
     # Showdown lineup the slot is "MVP"/"AnyFLEX" and names no position at all.
     position         = Column(String)
     player_id        = Column(String, index=True)  # null for DEF, and when the name join missed
+    # FanDuel's own id, "<contest>-<player>". Kept because it is the only thing
+    # their bulk-entry upload accepts, and it cannot be reconstructed from a
+    # name: the contest half differs per contest.
+    fanduel_id       = Column(String)
     player_name      = Column(String)
     team             = Column(String)
     salary           = Column(Integer)
@@ -628,7 +649,13 @@ def apply_light_migrations(engine) -> None:
         except Exception as exc:                       # pragma: no cover - best effort
             logger.warning("Could not drop the old espn_roster table: %s", exc)
 
-    wanted = {("player_projections", "exp_games"): "FLOAT"}
+    wanted = {("player_projections", "exp_games"): "FLOAT",
+              ("lineup_builds", "max_per_team"): "INTEGER",
+              ("lineup_builds", "stack_qb"): "INTEGER",
+              ("lineup_builds", "rb_with_qb"): "INTEGER",
+              ("lineup_builds", "ownership_weight"): "FLOAT",
+              ("lineup_players", "fanduel_id"): "VARCHAR",
+              ("lineup_builds", "projection_computed_at"): "TIMESTAMP"}
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
     for (table, col), coltype in wanted.items():

@@ -10,9 +10,10 @@ honest about what it could not match, which is most of what these pin.
 import io
 from datetime import datetime
 
+import numpy as np
 import pytest
 
-from database.models import PlayerProjection, Schedule
+from database.models import LineupPlayer, PlayerProjection, Schedule
 
 pytest.importorskip("nfl_projections.optimizer",
                     reason="optimizer comes from nfl_projections (installed --no-deps in the image)")
@@ -119,14 +120,40 @@ class TestLineups:
         assert body["matched_to_projections"] == len(SLATE_ROWS) - 2
         assert body["slate_players"] == len(SLATE_ROWS)
 
-    def test_defenses_come_from_fanduels_own_fppg(self, client, db_session):
-        """The model projects no defenses, so the DEF slot has to fall back."""
+    def test_defenses_fall_back_to_fppg_when_nothing_projects_them(
+            self, client, db_session, monkeypatch):
+        """Without a defense projection the DEF slot keeps FanDuel's FPPG —
+        the behaviour the slot had for its whole life, and still the fallback
+        when the projection cannot be had."""
+        from api import optimizer as api_optimizer
+
+        monkeypatch.setattr(api_optimizer, "_attach_defense",
+                            lambda pool, season, week: pool)
         _project(db_session, _board())
         body = _post(client, num_lineups=1).json()
         defense = next(p for p in body["data"][0]["players"]
                        if p["roster_position"] == "D")
         assert defense["from_model"] is False
         assert defense["projected"] in (8.5, 8.0)
+
+    def test_a_defense_projection_overrides_fppg(self, client, db_session, monkeypatch):
+        """And when one exists it wins: FPPG ranks defenses worse than a flat
+        league average does, so the slot should not be left on it."""
+        from api import optimizer as api_optimizer
+
+        def stub(pool, season, week):
+            pool = pool.copy()
+            slots = pool["Roster Position"].astype(str).str.upper()
+            pool["defense_points"] = np.where(slots.isin(["D", "DEF", "D/ST"]), 11.5, np.nan)
+            return pool
+
+        monkeypatch.setattr(api_optimizer, "_attach_defense", stub)
+        _project(db_session, _board())
+        body = _post(client, num_lineups=1).json()
+        defense = next(p for p in body["data"][0]["players"]
+                       if p["roster_position"] == "D")
+        assert defense["projected"] == 11.5
+        assert defense["from_model"] is True
 
     def test_several_lineups_are_not_one_lineup_repeated(self, client, db_session):
         # 100% exposure: this fixture slate is 16 players, and the default 50%
@@ -470,3 +497,70 @@ class TestOpportunityContext:
             assert [p["player_name"] for p in a["players"]] \
                 == [p["player_name"] for p in b["players"]]
             assert a["projected"] == pytest.approx(b["projected"])
+
+
+class TestFanduelUploadDownload:
+    """GET /optimizer/builds/{id}/upload.csv — the file FanDuel bulk entry takes."""
+
+    def test_a_build_comes_back_as_a_csv_attachment(self, client, db_session):
+        _project(db_session, _board())
+        build_id = _post(client, num_lineups=2).json()["build_id"]
+
+        response = client.get(f"/optimizer/builds/{build_id}/upload.csv")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        assert "attachment" in response.headers["content-disposition"]
+        assert f"build{build_id}" in response.headers["content-disposition"]
+
+    def test_the_csv_is_nine_columns_in_fanduels_order(self, client, db_session):
+        _project(db_session, _board())
+        body = _post(client, num_lineups=2).json()
+        build_id = body["build_id"]
+
+        lines = client.get(
+            f"/optimizer/builds/{build_id}/upload.csv").text.strip().split("\r\n")
+        assert lines[0] == "QB,RB,RB,WR,WR,WR,TE,FLEX,DEF"
+        # However many fit this thin fixture slate — one row each, and no
+        # header counted twice.
+        assert len(lines) == len(body["data"]) + 1
+        assert all(len(line.split(",")) == 9 for line in lines[1:])
+
+    def test_cells_carry_the_fanduel_id(self, client, db_session):
+        _project(db_session, _board())
+        build_id = _post(client, num_lineups=1).json()["build_id"]
+
+        row = client.get(
+            f"/optimizer/builds/{build_id}/upload.csv").text.strip().split("\r\n")[1]
+        # The fixture CSV ids are plain integers; what matters is that the id
+        # from the slate file is what gets written, not the player's name alone.
+        assert all(":" in cell for cell in row.split(","))
+
+    def test_the_contest_id_can_be_rewritten(self, client, db_session):
+        _project(db_session, _board())
+        build_id = _post(client, num_lineups=1).json()["build_id"]
+
+        row = client.get(f"/optimizer/builds/{build_id}/upload.csv",
+                         params={"contest_id": "135859"}).text.strip().split("\r\n")[1]
+        assert all(cell.startswith("135859-") for cell in row.split(","))
+
+    def test_bare_ids_can_be_asked_for(self, client, db_session):
+        _project(db_session, _board())
+        build_id = _post(client, num_lineups=1).json()["build_id"]
+
+        row = client.get(f"/optimizer/builds/{build_id}/upload.csv",
+                         params={"include_names": "false"}).text.strip().split("\r\n")[1]
+        assert not any(":" in cell for cell in row.split(","))
+
+    def test_an_unknown_build_is_a_404(self, client, db_session):
+        assert client.get("/optimizer/builds/999999/upload.csv").status_code == 404
+
+    def test_a_build_without_stored_ids_explains_itself(self, client, db_session):
+        _project(db_session, _board())
+        build_id = _post(client, num_lineups=1).json()["build_id"]
+        for player in db_session.query(LineupPlayer).all():
+            player.fanduel_id = None
+        db_session.commit()
+
+        response = client.get(f"/optimizer/builds/{build_id}/upload.csv")
+        assert response.status_code == 409
+        assert "Rebuild" in response.json()["detail"]

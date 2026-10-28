@@ -214,3 +214,27 @@ def client(db_session):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _offline_slate_context(monkeypatch):
+    """Keep the DEF slot and the ownership read off the network.
+
+    `api.optimizer._attach_defense` trains `nfl_projections.defense` on
+    nflreadpy data, which is a download. It already soft-fails when that
+    cannot be had, so the suite would pass either way — but it would pass
+    slowly, differently on a machine with network than on one without, and
+    with the DEF slot holding whatever the real 2026 season happens to say.
+    Tests that care about the projection stub it themselves.
+    """
+    try:
+        from api import optimizer as api_optimizer
+    except Exception:                      # pragma: no cover - import-time skew
+        return
+    monkeypatch.setattr(api_optimizer, "_attach_defense",
+                        lambda pool, season, week: pool, raising=False)
+    # `_attach_ownership` fetches footballguys.com. Same reasoning: it already
+    # soft-fails, but a suite whose builds tilt against a live ownership page is
+    # a suite whose results change every Friday.
+    monkeypatch.setattr(api_optimizer, "_attach_ownership",
+                        lambda pool, season, week: pool, raising=False)
