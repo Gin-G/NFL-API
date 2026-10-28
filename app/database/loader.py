@@ -481,6 +481,33 @@ def ensure_pbp_indexes() -> None:
         logger.warning("Could not ensure PBP indexes (table may not exist yet): %s", exc)
 
 
+def ensure_pbp_game_index() -> None:
+    """Index play_by_play on (game_id, play_id), without blocking it.
+
+    GET /pbp/?game_id=... is documented as "all plays for a game", and without
+    this index it was a sequential scan and sort of the whole table — 3.5 GB,
+    1.16M rows in October 2026. One request ran 7.5 minutes and took the only
+    worker with it: /health timed out and every consumer (NickKnows, the
+    betting board) went unanswered until the query was cancelled.
+
+    Kept out of ``ensure_pbp_indexes`` on purpose, because that one also runs at
+    API startup, and the first build of this index takes minutes on a table this
+    size. The daily loader job builds it once; CONCURRENTLY keeps reads and the
+    load's own writes going while it does. It cannot run inside a transaction,
+    hence the AUTOCOMMIT connection.
+    """
+    from .session import engine
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_pbp_game_play "
+                "ON play_by_play (game_id, play_id)"
+            ))
+        logger.info("PBP game index ensured")
+    except Exception as exc:
+        logger.warning("Could not ensure the PBP game index: %s", exc)
+
+
 def _pbp_table_columns() -> set:
     """The columns ``play_by_play`` actually has, or an empty set if there is no
     table yet — which is a first load, where ``to_sql`` creates it from the frame.

@@ -95,7 +95,7 @@ def main() -> None:
 
     from database.session import engine, SessionLocal
     from database.models import Base
-    from database.loader import load_all_data, ensure_pbp_indexes
+    from database.loader import load_all_data, ensure_pbp_indexes, ensure_pbp_game_index
 
     logger.info("Creating tables (no-op if they already exist)…")
     Base.metadata.create_all(engine)
@@ -104,6 +104,8 @@ def main() -> None:
     # coaching analytics queries. Must run before the early-exit check so indexes
     # are created even when the data load is skipped.
     ensure_pbp_indexes()
+    # Not at API startup — see ensure_pbp_game_index for why it lives here.
+    ensure_pbp_game_index()
 
     db = SessionLocal()
     try:
