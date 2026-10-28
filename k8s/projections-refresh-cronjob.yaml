@@ -1,0 +1,112 @@
+# Late-week projection refreshes: the same job as projections-cronjob.yaml,
+# run again once the week's news has landed.
+#
+# The Tuesday/Wednesday runs see only what is known mid-week. Everything that
+# changes a role after that never reached the board: 2026 week 6, Jalen Hurts
+# was ruled out after Tuesday's run, so Tanner McKee went into the week
+# projected for 45 passing yards and threw for 215 while Hurts still carried
+# 179; week 7, Josh Jacobs's reinstatement had not reached the roster feed by
+# Tuesday, so he had no projection at all and the backs who had been covering
+# for him kept theirs (Pierre Strong 24 yards, 0 carries).
+#
+# These runs are cheap. No football has been played since Tuesday's model was
+# trained, so the cached model is reused (PROJECTION_MODEL_CACHE) and a run is
+# minutes, and teams already kicked off keep their pre-game projection, so a
+# Sunday run cannot rewrite Thursday's game. The cost of running early is
+# already measured as nil (nfl-data-py EXPERIMENTS, "The injury report is not
+# the weak link"); this is about running late enough to see the news.
+#
+#   Fri 17:00 MT  after Friday's final injury designations (~16:00 ET)
+#   Sat 17:00 MT  after Saturday's 16:00 ET roster deadline: IR activations,
+#                 reinstatements, practice-squad elevations
+#   Sun 06:00 MT  last pass before the 1pm ET games, ahead of sharp-edge's
+#                 two-hour pick lock (11:00 ET)
+#
+# One schedule covers all three, so it also fires Fri/Sat 06:00 and Sun 17:00.
+# Those extra runs are harmless: cached model, minutes each, and Sunday 17:00
+# still refreshes the night games before their kickoff.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nfl-api-projections-refresh
+  namespace: nfl-api
+  labels:
+    app: nfl-api-projections-refresh
+spec:
+  schedule: "0 6,17 * * 0,5,6"
+  timeZone: "America/Denver"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 10800   # 3 h: a run is 15-45 min, so this only fires when the pod cannot be scheduled
+      # or has hung. Failing is better than a job that sits Pending for days and
+      # holds the refresh button shut.
+      ttlSecondsAfterFinished: 172800   # clean up after 48 h
+      template:
+        metadata:
+          labels:
+            app: nfl-api-projections
+        spec:
+          restartPolicy: Never
+          # TensorFlow needs AVX, and gingmachine's CPU does not have it: a run
+          # scheduled there dies with "Illegal instruction (core dumped)" the
+          # moment training starts (2026-09-28). Nodes that can run it are
+          # labelled `cpu-avx=true`:
+          #   kubectl label node <node> cpu-avx=true
+          # That leaves two eligible nodes, so a run can wait for room —
+          # activeDeadlineSeconds above decides how long before it gives up, and
+          # GET /projections/refresh reports the wait as queued rather than
+          # running.
+          nodeSelector:
+            cpu-avx: "true"
+          containers:
+            - name: projections
+              image: docker.io/ncging/nfl-api:latest
+              imagePullPolicy: Always
+              workingDir: /app
+              command:
+                - /bin/sh
+                - -c
+                # Install from a tarball URL (the API image has no `git`, so a
+                # git+https:// URL would fail). pip builds the package from the
+                # repo's pyproject.toml.
+                - >-
+                  pip install --no-cache-dir
+                  "nfl-projections @ https://github.com/Gin-G/nfl-data-py/archive/refs/heads/main.tar.gz"
+                  && python -m scripts.compute_projections
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /models
+              env:
+                # Where the trained model is kept between runs. A run reuses it
+                # when no football has been played since it was trained, which is
+                # what makes the Wednesday run — and POST /projections/refresh —
+                # minutes rather than the better part of an hour.
+                - name: PROJECTION_MODEL_CACHE
+                  value: /models
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: password
+                - name: DATABASE_URL
+                  value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api-db"
+              resources:
+                requests:
+                  memory: "2Gi"
+                  cpu: "1"
+                limits:
+                  memory: "8Gi"
+                  cpu: "3"
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: nfl-api-model-cache
