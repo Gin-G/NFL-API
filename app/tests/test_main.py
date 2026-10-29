@@ -77,3 +77,63 @@ class TestDebugEndpoint:
         assert "working_directory" in body
         assert "available_systems" in body
         assert "files" in body
+
+
+class TestLightMigrations:
+    """Columns added to a model after its table exists.
+
+    `create_all` creates missing TABLES and never a missing COLUMN, so a model
+    that grows a field deploys clean and then 500s on the first query that
+    selects it. That is not hypothetical: `lineup_builds.max_per_team` shipped
+    without its column and took every read of the table down with it, because
+    `apply_light_migrations` was only being run by the cron scripts.
+    """
+
+    @staticmethod
+    def _stale_db(tmp_path, table, drop):
+        """A database whose table predates some of its model's columns."""
+        from sqlalchemy import create_engine, inspect, text
+
+        from database.models import Base, apply_light_migrations
+
+        engine = create_engine(f"sqlite:///{tmp_path}/stale.db")
+        Base.metadata.create_all(engine)
+        with engine.begin() as conn:
+            for column in drop:
+                conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+        missing = set(drop) - {c["name"] for c in inspect(engine).get_columns(table)}
+        assert missing == set(drop), "the fixture did not actually drop them"
+        apply_light_migrations(engine)
+        return {c["name"] for c in inspect(engine).get_columns(table)}
+
+    def test_the_build_columns_come_back(self, tmp_path):
+        wanted = ["max_per_team", "stack_qb", "rb_with_qb", "ownership_weight",
+                  "projection_computed_at"]
+        assert set(wanted) <= self._stale_db(tmp_path, "lineup_builds", wanted)
+
+    def test_the_fanduel_id_comes_back(self, tmp_path):
+        assert "fanduel_id" in self._stale_db(tmp_path, "lineup_players",
+                                              ["fanduel_id"])
+
+    def test_running_it_twice_is_a_no_op(self, tmp_path):
+        from sqlalchemy import create_engine, inspect
+
+        from database.models import Base, apply_light_migrations
+
+        engine = create_engine(f"sqlite:///{tmp_path}/twice.db")
+        Base.metadata.create_all(engine)
+        apply_light_migrations(engine)
+        before = {c["name"] for c in inspect(engine).get_columns("lineup_builds")}
+        apply_light_migrations(engine)          # must not raise on existing columns
+        after = {c["name"] for c in inspect(engine).get_columns("lineup_builds")}
+        assert before == after
+
+    def test_startup_applies_them(self):
+        # The web app is the only process most deploys run, so it is the one
+        # that has to do this.
+        import inspect as _inspect
+
+        import main
+
+        source = _inspect.getsource(main)
+        assert "apply_light_migrations(engine)" in source

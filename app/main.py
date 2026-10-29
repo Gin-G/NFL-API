@@ -41,8 +41,15 @@ logger = logging.getLogger(__name__)
 # if the DB is unavailable at startup time — routers will fall back to nflreadpy)
 try:
     from database.session import engine
-    from database.models import Base
+    from database.models import Base, apply_light_migrations
     Base.metadata.create_all(engine)
+    # create_all adds missing TABLES and never a missing COLUMN, so a model
+    # that grows a field deploys fine and then 500s on the first query that
+    # selects it. apply_light_migrations was only being run by the cron
+    # scripts, which meant a new column landed whenever one of them next
+    # happened to fire -- and in between, every read of that table was broken.
+    # It is idempotent and additive, so the web app runs it too.
+    apply_light_migrations(engine)
     logger.info("DB tables verified/created.")
 except Exception as _db_startup_err:
     logger.warning("DB unavailable at startup (tables not created): %s", _db_startup_err)
