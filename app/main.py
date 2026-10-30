@@ -187,23 +187,30 @@ class SPAStaticFiles(StaticFiles):
 
     @staticmethod
     def _cache_headers(path: str, response):
-        """Let the hashed assets cache forever; never let index.html cache.
+        """Let the hashed assets cache forever; never let anything else cache.
 
-        Vite fingerprints every asset, so `index-C_4ZHWVW.js` can be immutable
+        Vite fingerprints every asset, so `index-CFHA0Osj.js` can be immutable
         — the name changes when the content does. index.html is the one file
         that cannot be fingerprinted, because it is what names the others, and
         with no Cache-Control at all a browser caches it heuristically off
         Last-Modified. That is how a deploy ships and nobody sees it: the new
-        bundle is on the server, and the stale index.html keeps asking for the
+        bundle sits on the server while a stale index.html keeps asking for the
         old one.
+
+        The rule is written as "assets cache, everything else does not" rather
+        than by naming the files that must not cache, because the first attempt
+        did the latter and missed. StaticFiles hands over a MOUNT-RELATIVE path
+        run through `os.path.normpath`, so a request for `/dashboard/` — the
+        way anyone actually opens the page — arrives as **"."**, not as "" and
+        not as "index.html". Enumerating the exceptions meant that one path
+        fell through every branch and went out with no header at all. This way
+        a path nobody thought of gets revalidated, which is the harmless side
+        to be wrong on.
         """
-        # StaticFiles hands over a MOUNT-RELATIVE path: "assets/index-ab12.js",
-        # with no leading slash.
-        name = path.rsplit("/", 1)[-1]
-        if not name or name == "index.html" or "." not in name:
-            response.headers["Cache-Control"] = "no-cache, must-revalidate"
-        elif path.lstrip("/").startswith("assets/"):
+        if path.lstrip("./").startswith("assets/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
 
 

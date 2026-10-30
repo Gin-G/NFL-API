@@ -140,21 +140,37 @@ jobs:
     # WAF skip (secret header / IP allowlist) is in place for the API subdomain.
     continue-on-error: true
     steps:
+      # 60 s was never enough. The deploy is GitOps: this workflow commits an
+      # image tag and Argo CD picks it up on its own poll cycle, which has
+      # taken anywhere from seconds to five minutes in practice, and the
+      # rollout follows that. So the old budget expired before the new pod
+      # existed and reported "API did not return status=running" on deploys
+      # that were fine -- on top of the Cloudflare challenge this job already
+      # tolerates. Six minutes covers the sync; the job stays non-blocking.
       - name: Wait for API to be fully ready
         run: |
           echo "curl: $(curl --version | head -1)"
-          echo "Polling ${{ vars.API_URL }}/ until status == running (max 60 s)..."
-          for i in $(seq 1 12); do
-            STATUS=$(curl -sf --max-time 10 "${{ vars.API_URL }}/" 2>/dev/null \
-              | jq -r '.status' 2>/dev/null || echo "")
+          echo "Polling ${{ vars.API_URL }}/ until status == running (max 360 s)..."
+          for i in $(seq 1 36); do
+            BODY=$(curl -sf --max-time 10 "${{ vars.API_URL }}/" 2>/dev/null || echo "")
+            STATUS=$(printf '%s' "$BODY" | jq -r '.status' 2>/dev/null || echo "")
             if [ "$STATUS" = "running" ]; then
-              echo "API is ready (attempt $i)"
+              echo "API is ready (attempt $i, ~$((i * 10)) s)"
               exit 0
             fi
-            echo "  [$i/12] status='$STATUS' — retrying in 5 s..."
-            sleep 5
+            if [ -n "$BODY" ] && [ "$STATUS" = "null" ]; then
+              # A body that is not our JSON is the Cloudflare bot challenge,
+              # not a sick API. Say which it is instead of leaving it to be
+              # rediscovered from the comment above every time.
+              echo "  [$i/36] reached something that is not the API (Cloudflare challenge?)"
+            else
+              echo "  [$i/36] status='$STATUS' — retrying in 10 s..."
+            fi
+            sleep 10
           done
-          echo "ERROR: API did not return status=running within 60 s"
+          echo "ERROR: API did not report status=running within 360 s."
+          echo "Either Argo CD has not synced the new image yet, or Cloudflare"
+          echo "is challenging this runner. This job does not gate the deploy."
           curl -v --max-time 10 "${{ vars.API_URL }}/" || true
           exit 1
 

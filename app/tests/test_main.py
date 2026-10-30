@@ -158,6 +158,14 @@ class TestDashboardCaching:
 
         return SPAStaticFiles._cache_headers(path, Response("x")).headers
 
+    def test_the_directory_path_is_never_cached(self):
+        # THE regression. StaticFiles normalises the mount-relative path, so a
+        # request for /dashboard/ — how anyone actually opens the page —
+        # arrives as ".", not "" and not "index.html". The first version of
+        # this enumerated the files that must not cache, "." matched none of
+        # them, and the page went out with no Cache-Control at all.
+        assert "no-cache" in self._headers(".")["cache-control"]
+
     def test_index_is_never_cached(self):
         assert "no-cache" in self._headers("index.html")["cache-control"]
 
@@ -169,9 +177,34 @@ class TestDashboardCaching:
         assert "no-cache" in self._headers("")["cache-control"]
 
     def test_fingerprinted_assets_cache_forever(self):
-        cache = self._headers("assets/index-C_4ZHWVW.js")["cache-control"]
+        cache = self._headers("assets/index-CFHA0Osj.js")["cache-control"]
         assert "immutable" in cache and "max-age=31536000" in cache
 
     def test_a_stray_file_is_not_made_immutable(self):
-        # Only /assets/ is fingerprinted; favicon.ico keeps its name forever.
-        assert "immutable" not in self._headers("favicon.ico").get("cache-control", "")
+        # Only /assets/ is fingerprinted; favicon.ico keeps its name forever,
+        # so it has to revalidate like the rest.
+        assert "immutable" not in self._headers("favicon.ico")["cache-control"]
+
+    def test_every_path_gets_some_rule(self):
+        # The point of inverting the rule: a path nobody anticipated should
+        # revalidate rather than fall through with no header.
+        for path in (".", "", "/", "index.html", "optimizer", "teams/DET",
+                     "favicon.ico", "robots.txt", "assets/x.css", "./assets/x.js"):
+            assert "cache-control" in self._headers(path), path
+
+    def test_a_real_request_for_the_page_carries_the_header(self, client):
+        # The unit tests above all passed while the live site still served
+        # index.html with no Cache-Control, because they called the helper
+        # directly and never asked what path a real request produces. This one
+        # goes through the mount.
+        import os
+
+        import main
+
+        if not os.path.isdir(os.path.join(os.path.dirname(main.__file__),
+                                          "static", "dashboard")):
+            import pytest as _pytest
+            _pytest.skip("frontend not built in this checkout")
+        response = client.get("/dashboard/")
+        assert response.status_code == 200
+        assert "no-cache" in response.headers["cache-control"]
