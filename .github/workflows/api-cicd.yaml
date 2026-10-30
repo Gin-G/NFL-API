@@ -152,20 +152,26 @@ jobs:
           echo "curl: $(curl --version | head -1)"
           echo "Polling ${{ vars.API_URL }}/ until status == running (max 360 s)..."
           for i in $(seq 1 36); do
-            BODY=$(curl -sf --max-time 10 "${{ vars.API_URL }}/" 2>/dev/null || echo "")
+            # No -f. With it, curl prints nothing and exits non-zero on a
+            # 4xx, so a Cloudflare challenge page arrives as an empty body and
+            # every attempt reports status='' -- which is what the first
+            # version of this did, and it could never tell the two causes
+            # apart. The HTTP code comes back on its own line instead.
+            RESP=$(curl -s --max-time 10 -w '\n%{http_code}' \
+              "${{ vars.API_URL }}/" 2>/dev/null || echo "000")
+            CODE=$(printf '%s' "$RESP" | tail -1)
+            BODY=$(printf '%s' "$RESP" | sed '$d')
             STATUS=$(printf '%s' "$BODY" | jq -r '.status' 2>/dev/null || echo "")
             if [ "$STATUS" = "running" ]; then
               echo "API is ready (attempt $i, ~$((i * 10)) s)"
               exit 0
             fi
-            if [ -n "$BODY" ] && [ "$STATUS" = "null" ]; then
-              # A body that is not our JSON is the Cloudflare bot challenge,
-              # not a sick API. Say which it is instead of leaving it to be
-              # rediscovered from the comment above every time.
-              echo "  [$i/36] reached something that is not the API (Cloudflare challenge?)"
-            else
-              echo "  [$i/36] status='$STATUS' — retrying in 10 s..."
-            fi
+            case "$CODE" in
+              000) echo "  [$i/36] no response at all — retrying in 10 s..." ;;
+              403|503) echo "  [$i/36] HTTP $CODE from the edge — Cloudflare is challenging this runner" ;;
+              200) echo "  [$i/36] HTTP 200 but status='$STATUS' — old pod still serving?" ;;
+              *)   echo "  [$i/36] HTTP $CODE — retrying in 10 s..." ;;
+            esac
             sleep 10
           done
           echo "ERROR: API did not report status=running within 360 s."
