@@ -815,12 +815,29 @@ export default function Optimizer() {
                   className="bg-slate-800 border border-slate-700 rounded-xl p-4 overflow-x-auto"
                 >
                   <div className="flex items-baseline justify-between gap-3 mb-3 flex-wrap">
-                    <h3 className="text-white font-medium text-xs">
-                      {b.objective} · {b.contest} · {b.slate}
-                      <span className="text-slate-500 font-normal">
-                        {' '}· build {b.build_id} · {b.lineups.length} lineup
-                        {b.lineups.length === 1 ? '' : 's'}
+                    <h3 className="text-white font-medium text-xs flex items-center gap-2 flex-wrap">
+                      <span>
+                        {b.objective} · {b.contest} · {b.slate}
+                        <span className="text-slate-500 font-normal">
+                          {' '}· build {b.build_id} · {b.lineups.length} lineup
+                          {b.lineups.length === 1 ? '' : 's'}
+                        </span>
                       </span>
+                      {/* Downloadable from the history, not only in the moments
+                          after a build: the build you want to enter is usually
+                          one you made earlier. Showdown has a different roster
+                          and FanDuel takes a different upload for it. */}
+                      {b.contest !== 'showdown' && (
+                        <button
+                          onClick={() => downloadFanduelUpload(b.build_id,
+                                                               contestId.trim() || undefined)}
+                          title="Download these lineups as FanDuel's bulk-entry CSV."
+                          className="flex items-center gap-1 bg-slate-700 hover:bg-emerald-700 border border-slate-600 text-slate-200 hover:text-white rounded-md px-2 py-1 text-[11px] font-normal transition-colors"
+                        >
+                          <Download size={11} />
+                          FanDuel CSV
+                        </button>
+                      )}
                     </h3>
                     <span className="text-xs text-slate-400">
                       {b.fppg_baseline !== null ? (

@@ -137,3 +137,41 @@ class TestLightMigrations:
 
         source = _inspect.getsource(main)
         assert "apply_light_migrations(engine)" in source
+
+
+class TestDashboardCaching:
+    """A deploy nobody can see is a deploy that did not happen.
+
+    Vite fingerprints every asset, so the bundle name changes when its content
+    does — but index.html is the file that NAMES the bundles, so it cannot be
+    fingerprinted itself. Served with no Cache-Control at all, a browser
+    caches it heuristically from Last-Modified and keeps asking for the
+    previous deploy's bundle. That is exactly how the ownership controls and
+    the FanDuel download shipped and stayed invisible.
+    """
+
+    @staticmethod
+    def _headers(path):
+        from starlette.responses import Response
+
+        from main import SPAStaticFiles
+
+        return SPAStaticFiles._cache_headers(path, Response("x")).headers
+
+    def test_index_is_never_cached(self):
+        assert "no-cache" in self._headers("index.html")["cache-control"]
+
+    def test_the_spa_fallback_route_is_never_cached(self):
+        # /dashboard/optimizer is served index.html's bytes under its own path.
+        assert "no-cache" in self._headers("optimizer")["cache-control"]
+
+    def test_the_mount_root_is_never_cached(self):
+        assert "no-cache" in self._headers("")["cache-control"]
+
+    def test_fingerprinted_assets_cache_forever(self):
+        cache = self._headers("assets/index-C_4ZHWVW.js")["cache-control"]
+        assert "immutable" in cache and "max-age=31536000" in cache
+
+    def test_a_stray_file_is_not_made_immutable(self):
+        # Only /assets/ is fingerprinted; favicon.ico keeps its name forever.
+        assert "immutable" not in self._headers("favicon.ico").get("cache-control", "")

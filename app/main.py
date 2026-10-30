@@ -177,11 +177,34 @@ class SPAStaticFiles(StaticFiles):
 
     async def get_response(self, path: str, scope: Scope):
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
             if exc.status_code == 404 and "." not in path.rsplit("/", 1)[-1]:
-                return await super().get_response("index.html", scope)
-            raise
+                response = await super().get_response("index.html", scope)
+            else:
+                raise
+        return self._cache_headers(path, response)
+
+    @staticmethod
+    def _cache_headers(path: str, response):
+        """Let the hashed assets cache forever; never let index.html cache.
+
+        Vite fingerprints every asset, so `index-C_4ZHWVW.js` can be immutable
+        — the name changes when the content does. index.html is the one file
+        that cannot be fingerprinted, because it is what names the others, and
+        with no Cache-Control at all a browser caches it heuristically off
+        Last-Modified. That is how a deploy ships and nobody sees it: the new
+        bundle is on the server, and the stale index.html keeps asking for the
+        old one.
+        """
+        # StaticFiles hands over a MOUNT-RELATIVE path: "assets/index-ab12.js",
+        # with no leading slash.
+        name = path.rsplit("/", 1)[-1]
+        if not name or name == "index.html" or "." not in name:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        elif path.lstrip("/").startswith("assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 
 # Mount the React dashboard (only when the build exists)
