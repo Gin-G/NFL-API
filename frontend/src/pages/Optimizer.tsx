@@ -40,6 +40,8 @@ export default function Optimizer() {
   const [rbWithQb, setRbWithQb] = useState(true)
   const [ownershipWeight, setOwnershipWeight] = useState(0)
   const [contestId, setContestId] = useState('')
+  const [contestType, setContestType] = useState('')
+  const [aggression, setAggression] = useState(50)
   const [exclude, setExclude] = useState('')
 
   const [exposureScope, setExposureScope] = useState<'build' | 'week'>('build')
@@ -230,6 +232,38 @@ export default function Optimizer() {
           </select>
         </label>
         <label className="flex flex-col gap-1 text-xs text-slate-400">
+          Build for
+          <select
+            value={contestType}
+            onChange={(e) => setContestType(e.target.value)}
+            title="A preset picks the objective, how many lineups, the exposure cap, stacking and the fade together. Manual leaves every control as you set it."
+            className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-1.5 text-sm w-32"
+          >
+            <option value="">manual</option>
+            <option value="cash">cash / 50-50</option>
+            <option value="gpp">tournament</option>
+          </select>
+        </label>
+        {contestType && (
+          <label className="flex flex-col gap-1 text-xs text-slate-400 w-48">
+            Aggression — {aggression}
+            <input
+              type="range" min={0} max={100} step={5}
+              value={aggression}
+              onChange={(e) => setAggression(Number(e.target.value))}
+              title={contestType === 'cash'
+                ? 'How much to trust the board. 0 hedges our own error across more lineups and a looser exposure cap; 100 plays the single best lineup it can find. Week 6 rewarded committing, week 8 punished it — the dial spans the question rather than answering it.'
+                : 'Buys a QB stack first, then exposure spread, then a charge against the field — in order of how well each is evidenced.'}
+              className="w-full accent-emerald-500"
+            />
+            <span className="text-[11px] text-slate-500">
+              {contestType === 'cash'
+                ? (aggression < 34 ? 'hedge the board' : aggression < 67 ? 'balanced' : 'commit to the best lineup')
+                : (aggression < 25 ? 'near-optimal' : aggression < 60 ? 'stacked' : 'contrarian')}
+            </span>
+          </label>
+        )}
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
           Fade the field
           <select
             value={ownershipWeight}
@@ -270,6 +304,7 @@ export default function Optimizer() {
             salary_cap: salaryCap, max_usage_percentage: maxUsage, exclude, slate,
             max_per_team: maxPerTeam, stack_qb: stackQb, rb_with_qb: rbWithQb,
             ownership_weight: ownershipWeight,
+            ...(contestType ? { contest_type: contestType, aggression } : {}),
           }, {
             // The file has been saved server-side now, so later builds should
             // use the stored copy rather than re-uploading the same bytes.

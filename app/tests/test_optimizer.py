@@ -564,3 +564,42 @@ class TestFanduelUploadDownload:
         response = client.get(f"/optimizer/builds/{build_id}/upload.csv")
         assert response.status_code == 409
         assert "Rebuild" in response.json()["detail"]
+
+
+class TestContestPresets:
+    """POST /optimizer/lineups with contest_type + aggression."""
+
+    def test_cash_builds(self, client, db_session):
+        _project(db_session, _board())
+        body = _post(client, contest_type="cash", aggression=100).json()
+        assert body["status"] == "success"
+        assert body["data"]
+
+    def test_gpp_builds(self, client, db_session):
+        _project(db_session, _board())
+        body = _post(client, contest_type="gpp", aggression=0).json()
+        assert body["status"] == "success"
+        assert body["data"]
+
+    def test_cash_at_full_aggression_commits_to_one_lineup(self, client, db_session):
+        # The dial's whole point: at 100 it plays the board's best lineup
+        # rather than hedging across several near-copies.
+        _project(db_session, _board())
+        loud = _post(client, contest_type="cash", aggression=100).json()
+        quiet = _post(client, contest_type="cash", aggression=0).json()
+        assert len(loud["data"]) <= len(quiet["data"])
+
+    def test_the_preset_overrides_the_plain_defaults(self, client, db_session):
+        _project(db_session, _board())
+        body = _post(client, contest_type="gpp", aggression=100).json()
+        # gpp runs the ceiling objective, which the bare default does not.
+        assert body.get("objective") == "ceiling", body
+
+    def test_an_unknown_contest_type_is_a_400(self, client, db_session):
+        _project(db_session, _board())
+        assert _post(client, contest_type="showdown").status_code == 400
+
+    def test_no_contest_type_leaves_behaviour_alone(self, client, db_session):
+        _project(db_session, _board())
+        body = _post(client, num_lineups=1).json()
+        assert body["objective"] == "mean"

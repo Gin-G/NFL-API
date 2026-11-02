@@ -555,7 +555,9 @@ async def build_lineups(
                           "when no file is sent."),
     season: Optional[int] = Form(None),
     week: Optional[int] = Form(None),
-    num_lineups: int = Form(5),
+    # Optional, not 5: with a contest preset the lineup count is part of the
+    # preset, and a Form default would silently win over it every time.
+    num_lineups: Optional[int] = Form(None),
     objective: str = Form("mean"),
     salary_cap: int = Form(60000),
     max_usage_percentage: int = Form(50),
@@ -566,6 +568,8 @@ async def build_lineups(
     stack_qb: int = Form(0),
     rb_with_qb: bool = Form(True),
     ownership_weight: float = Form(0.0),
+    contest_type: Optional[str] = Form(None),
+    aggression: int = Form(50),
     slate_id: Optional[int] = Form(None),
     save_slate: bool = Form(True),
     track: bool = Form(True),
@@ -603,6 +607,17 @@ async def build_lineups(
         before this the builder could return a lineup the site would refuse.
       `stack_qb` — require this many WR/TE from the quarterback's team.
       `rb_with_qb` — false forbids a running back from the quarterback's team.
+      `contest_type` — "cash" or "gpp". Given one, the build settings come
+      from `nfl_projections.optimizer.contest_settings` and `aggression`
+      (0-100) moves them together; anything sent explicitly still wins. Cash
+      aggression is "how much do I trust the board": at 0 it hedges our own
+      error with more lineups and a looser exposure cap, at 100 it plays the
+      board's single best lineup. Measured both ways -- 2026 week 6 rewarded
+      committing (105.6 to 123.5 across the dial) and week 8 punished it
+      (106.9 to 88.9) -- so the dial spans the question rather than answering
+      it. GPP aggression buys a stack first, then exposure spread, then a
+      charge against the field, in order of how well each is evidenced.
+
       `ownership_weight` — points charged per percent of projected ownership,
       which tilts the build toward players the field has not found. 0 ignores
       the field. It costs expected points to buy that tilt: on the 2026 week 6
@@ -621,7 +636,7 @@ async def build_lineups(
             raise HTTPException(status_code=404,
                                 detail=f"No projections stored for {season}.")
         week = min(weeks)        # the upcoming week is the lowest unplayed one
-    if num_lineups < 1 or num_lineups > 50:
+    if num_lineups is not None and (num_lineups < 1 or num_lineups > 50):
         raise HTTPException(status_code=400, detail="num_lineups must be 1-50.")
 
     projections = _projection_frame(db, season, week)
@@ -698,11 +713,35 @@ async def build_lineups(
     if not showdown:
         extra.update(max_per_team=max_per_team or None, stack_qb=stack_qb,
                      rb_with_qb=rb_with_qb)
+        if contest_type:
+            # The preset supplies the whole shape; whatever the caller sent
+            # explicitly still wins, which is why it is applied underneath.
+            try:
+                preset = opt.contest_settings(contest_type, aggression,
+                                              num_lineups=num_lineups)
+            except (ValueError, AttributeError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            objective = preset.pop("objective", objective)
+            num_lineups = preset.pop("num_lineups", num_lineups)
+            max_usage_percentage = preset.pop("max_usage_percentage",
+                                              max_usage_percentage)
+            extra.update({k: v for k, v in preset.items()
+                          if k not in ("price_step",)})
+            # The preset asks for an ownership charge at high aggression, and
+            # the page is only published from the Friday before a slate. A
+            # Tuesday build must come back without the tilt, not fail.
+            if extra.get("ownership_weight") and "ownership" not in merged.columns:
+                logger.info("no ownership for week %s yet; %s build runs without "
+                            "the fade", week, contest_type)
+                extra.pop("ownership_weight", None)
+                extra.pop("ownership_exempt_rank", None)
         if ownership_weight and "ownership" in merged.columns:
             extra["ownership_weight"] = float(ownership_weight)
         elif ownership_weight:
             logger.warning("ownership_weight=%s ignored: no ownership for this "
                            "week yet", ownership_weight)
+    if num_lineups is None:
+        num_lineups = 5
     build = opt.optimize_showdown if showdown else opt.optimize_lineups
     try:
         lineups = build(

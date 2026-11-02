@@ -102,6 +102,14 @@ export interface LineupRequest {
    *  week 6 main slate a charge of 0.10 took the best five from 125.1 actual
    *  down to 109.3. */
   ownership_weight?: number
+  /** "cash" or "gpp". Given one, the build settings come from the contest
+   *  preset and `aggression` moves them together; anything sent explicitly
+   *  still wins. */
+  contest_type?: string
+  /** 0-100. In cash it is "how much do I trust the board" — 0 hedges our own
+   *  error across more lineups, 100 plays the board's single best. In GPP it
+   *  buys a stack, then exposure spread, then a charge against the field. */
+  aggression?: number
   /** A specific saved slate, for a Showdown file alongside a classic list. */
   slate_id?: number
 }
