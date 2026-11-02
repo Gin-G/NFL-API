@@ -632,6 +632,47 @@ class LineupPlayer(Base):
     __table_args__ = (Index("ix_lineup_player_lineup", "lineup_id"),)
 
 
+class MatchupSignal(Base):
+    """What the matchup signals said about a week, frozen before kickoff.
+
+    Every matchup idea in the projection repo's EXPERIMENTS.md was judged by
+    fitting it to history, and the few that did not come back null came back
+    borderline -- where there is no honest way to separate a real effect from
+    the best of sixteen looks at one dataset. The trench report sits exactly
+    there for running backs: a +0.166 correlation with the board's error whose
+    bootstrap interval touches zero, but which pointed the right way in five of
+    five testable weeks for a pooled +4.98 points.
+
+    So this table is the only thing that can settle it: the signals recorded
+    before each slate, scored afterwards, accumulating a sample nobody has
+    looked at. Nothing here adjusts a projection, and a week whose answer is
+    "no" is as valuable as the others.
+    """
+    __tablename__ = "matchup_signals"
+
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    season          = Column(Integer, index=True)
+    week            = Column(Integer, index=True)
+    player_id       = Column(String, index=True)
+    player_name     = Column(String)
+    position        = Column(String)
+    team            = Column(String)
+    opponent        = Column(String)
+    projected       = Column(Float)
+    run_matchup     = Column(Float)
+    pass_matchup    = Column(Float)
+    opp_cover_grade = Column(Float)
+    run_lean        = Column(String)
+    rosterable      = Column(Integer)
+    actual          = Column(Float)
+    recorded_at     = Column(DateTime, default=datetime.utcnow)
+    scored_at       = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("season", "week", "player_id", name="uq_matchup_signal"),
+    )
+
+
 def apply_light_migrations(engine) -> None:
     """Idempotent additive schema fixups for columns added after a table already
     exists (no Alembic here; ``create_all`` only creates missing tables, never alters
@@ -655,6 +696,7 @@ def apply_light_migrations(engine) -> None:
               ("lineup_builds", "rb_with_qb"): "INTEGER",
               ("lineup_builds", "ownership_weight"): "FLOAT",
               ("lineup_players", "fanduel_id"): "VARCHAR",
+              ("matchup_signals", "scored_at"): "TIMESTAMP",
               ("lineup_builds", "projection_computed_at"): "TIMESTAMP"}
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())

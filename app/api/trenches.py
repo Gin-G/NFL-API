@@ -202,6 +202,70 @@ def weekly_matchups(season: int = Query(..., ge=1999),
     }
 
 
+@router.get("/signals")
+def matchup_signals(
+    season: Optional[int] = Query(None),
+    position: str = Query("RB", description="QB/RB/WR/TE"),
+    signal: str = Query("run_matchup", description="run_matchup | pass_matchup | opp_cover_grade"),
+    threshold: float = Query(58.0, description="The trench report's 'lean up' band edge."),
+    db: Session = Depends(get_db),
+):
+    """Has the matchup signal paid, on everything recorded before kickoff?
+
+    The honest state of this question. Fitted to history, the trench report's
+    run matchup correlates +0.166 with the board's error for running backs the
+    board rates -- but the bootstrap interval touches zero, the effect halves
+    across a weeks 3-5 / 6-8 split, and it is the best of sixteen tests run on
+    the same data. What is harder to dismiss is that it pointed the right way
+    in five of five testable weeks for a pooled +4.98 points.
+
+    So nothing adjusts a projection, and this reads the prospective record
+    instead. `weeks_right` out of `weeks` is the number to watch: a signal
+    worth using points the right way most weeks, rather than winning one slate
+    and averaging out. `per_week` is there so a single big week cannot hide
+    inside the pooled gap -- 2026 week 5 alone was +14.0 of it.
+
+    Coverage is carried here too, and the answer is already no: four
+    independent tests (team yards allowed, per-corner grades, the board's own
+    residual, and the game level) and the best of them is +0.008.
+    """
+    import pandas as pd
+
+    from database.models import MatchupSignal
+
+    season = season or get_current_nfl_season()
+    rows = db.query(MatchupSignal).filter(MatchupSignal.season == season).all()
+    if not rows:
+        return {"status": "no_data", "season": season,
+                "message": ("Nothing recorded yet. scripts/record_signals.py "
+                            "freezes each week's signals before kickoff.")}
+    frame = pd.DataFrame([{
+        "season": r.season, "week": r.week, "player_id": r.player_id,
+        "player_name": r.player_name, "position": r.position, "team": r.team,
+        "projected": r.projected, "run_matchup": r.run_matchup,
+        "pass_matchup": r.pass_matchup, "opp_cover_grade": r.opp_cover_grade,
+        "rosterable": bool(r.rosterable), "actual": r.actual,
+        "miss": (None if r.actual is None or r.projected is None
+                 else r.actual - r.projected),
+    } for r in rows])
+    try:
+        from nfl_projections import signals as sig
+
+        verdict = sig.verdict(frame, position=position, signal=signal,
+                              threshold=threshold)
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail=f"nfl_projections.signals unavailable: {exc}")
+    return {
+        "status": "success", "season": season, "position": position,
+        "signal": signal, "threshold": threshold,
+        "recorded": len(frame), "scored": int(frame["miss"].notna().sum()),
+        "verdict": verdict,
+        "note": ("Nothing here adjusts a projection. weeks_right/weeks is the "
+                 "number that matters; the pooled gap can be one slate."),
+    }
+
+
 @router.get("/backtest")
 def backtest(seasons: int = Query(3, ge=1, le=10),
              through_season: Optional[int] = Query(None, ge=1999),

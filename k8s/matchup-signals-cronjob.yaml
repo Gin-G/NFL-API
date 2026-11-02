@@ -1,0 +1,71 @@
+# Freezes the week's matchup signals before kickoff, and scores earlier weeks
+# once their stats land.
+#
+# This job exists because a borderline result cannot be settled on the data it
+# was found in. The trench report's run matchup correlates +0.166 with the
+# board's error for running backs the board rates, which is the strongest
+# matchup finding in EXPERIMENTS.md and still not enough: the bootstrap
+# interval touches zero, the effect halves across a weeks 3-5 / 6-8 split, and
+# it was the best of sixteen tests on one dataset. What it has going for it is
+# five of five testable weeks pointing the right way, for a pooled +4.98.
+#
+# So nothing adjusts a projection. This accumulates a record nobody has looked
+# at, and GET /trenches/signals reads the verdict back. A week whose answer is
+# "no" is as useful as the others.
+#
+# Thursday and Saturday: after the Tuesday/Wednesday projection runs have
+# published a board to freeze, and before Sunday's slate. The Saturday run is
+# the one that catches a late board, and it also scores the previous week.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nfl-api-matchup-signals
+  namespace: nfl-api
+spec:
+  schedule: "30 13 * * 4,6"
+  timeZone: America/Denver
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: record-signals
+              image: docker.io/ncging/nfl-api:latest
+              imagePullPolicy: Always
+              workingDir: /app
+              # nfl_projections is installed at run time, the same way the
+              # projections job does it: the image ships without it so the web
+              # container stays small, and the signals need trenches/coverage.
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  pip install --no-cache-dir
+                  "nfl-projections @ https://github.com/Gin-G/nfl-data-py/archive/refs/heads/main.tar.gz"
+                  && python -m scripts.record_signals
+              env:
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: nfl-api-db-app-user
+                      key: password
+                - name: DATABASE_URL
+                  value: postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api-db
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "1Gi"
+                limits:
+                  cpu: "2"
+                  memory: "4Gi"
