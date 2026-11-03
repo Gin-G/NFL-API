@@ -14,7 +14,16 @@ rollback isolates each test.
 import pandas as pd
 import pytest
 
+from api import fpa as fpa_api
 from database.models import PlayerStat, Schedule, Team
+
+
+@pytest.fixture(autouse=True)
+def _clear_fpa_cache():
+    """The adjusted ratings are cached at module scope for 15 minutes."""
+    fpa_api._adj_cache.clear()
+    yield
+    fpa_api._adj_cache.clear()
 
 
 # ── seeding helpers ───────────────────────────────────────────────────────────
@@ -125,6 +134,122 @@ class TestFPA:
         assert rows["KC"]["wr"] == 20.0
         assert rows["KC"]["qb"] == 0.0
 
+
+
+def _seed_adjusted_slate(db):
+    """Two defences that allow the same points against very different players.
+
+    SF's star receiver and NYJ's replacement both put up exactly 9.0 FanDuel
+    points in weeks 4-6, so raw FPA has SEA and WAS tied. But the star was
+    running at 20.5 a week and the replacement at 1.5, so SEA held a good
+    player well under his level and WAS let a bad one beat his -- which is the
+    distinction the raw table cannot make.
+
+    Weeks 1-3 build the two baselines against filler defences; those filler
+    teams never earn a grade, because a delta needs three prior games first.
+    """
+    rows, games = [], []
+    for team, player, position, fill, early, late_ppr in (
+        ("SF", "STAR_WR", "WR", ["DAL", "NYG", "PHI"],
+         dict(receiving_yards=95, receptions=10, receiving_tds=1), 9.0),
+        ("NYJ", "SCRUB_WR", "WR", ["NE", "MIA", "BUF"],
+         dict(receiving_yards=10, receptions=1, receiving_tds=0), 9.0),
+    ):
+        defence = "SEA" if team == "SF" else "WAS"
+        for week, opponent in enumerate(fill, start=1):
+            rows.append(_stat(player_id=player, week=week, position=position,
+                              player_display_name=player, recent_team=team,
+                              fantasy_points_ppr=20.0, **early))
+            games.append(Schedule(game_id=f"2024_{week:02d}_{team}_{opponent}",
+                                  season=2024, week=week, home_team=opponent,
+                                  away_team=team, home_score=17, away_score=20))
+        for week in (4, 5, 6):
+            rows.append(_stat(player_id=player, week=week, position=position,
+                              player_display_name=player, recent_team=team,
+                              receiving_yards=60, receptions=6, receiving_tds=0,
+                              fantasy_points_ppr=late_ppr))
+            games.append(Schedule(game_id=f"2024_{week:02d}_{team}_{defence}",
+                                  season=2024, week=week, home_team=defence,
+                                  away_team=team, home_score=17, away_score=20))
+    db.add_all(rows + games)
+    db.add_all([Team(team_abbr="SEA", team_name="Seattle Seahawks"),
+                Team(team_abbr="WAS", team_name="Washington Commanders")])
+    db.flush()
+
+
+class TestFPAAdjusted:
+    @staticmethod
+    def _rows(client):
+        body = client.get("/fpa/?season=2024").json()
+        assert body["adjusted"] is True
+        assert body["adjusted_note"] is None
+        return {r["team"]: r for r in body["data"]}
+
+    def test_raw_ties_while_the_adjustment_splits_them(self, client, db_session):
+        _seed_adjusted_slate(db_session)
+        rows = self._rows(client)
+        assert rows["SEA"]["wr"] == rows["WAS"]["wr"]            # raw, PPR
+        assert rows["WAS"]["wr_grade"] > rows["SEA"]["wr_grade"]
+        assert rows["SEA"]["wr_band"] == "tough"
+        assert rows["WAS"]["wr_band"] == "soft"
+
+    def test_allowed_and_faced_are_the_pair_that_explains_a_grade(self, client, db_session):
+        _seed_adjusted_slate(db_session)
+        rows = self._rows(client)
+        # Identical points allowed (FanDuel this time: 6 yards + 3 receptions)
+        assert rows["SEA"]["wr_allowed"] == rows["WAS"]["wr_allowed"] == 9.0
+        # The schedule each one had is what differs, and by a long way.
+        assert rows["SEA"]["wr_faced"] > 15.0
+        assert rows["WAS"]["wr_faced"] < 5.0
+        assert rows["SEA"]["wr_adjusted"] < 0 < rows["WAS"]["wr_adjusted"]
+        assert rows["SEA"]["wr_weeks"] == 3
+
+    def test_the_most_distorting_week_is_named(self, client, db_session):
+        _seed_adjusted_slate(db_session)
+        rows = self._rows(client)
+        # SEA's three weekly gaps are -11.5, -8.6 and -6.9: dropping week 4
+        # moves the rating +1.25, more than dropping either of the others.
+        assert rows["SEA"]["wr_outlier_week"] == 4
+        assert rows["SEA"]["wr_outlier_swing"] == pytest.approx(1.25, abs=0.01)
+        # WAS has no week worth a point, so it reports none rather than a zero.
+        assert rows["WAS"]["wr_outlier_week"] is None
+
+    def test_a_defence_with_no_rated_weeks_is_null_not_zero(self, client, db_session):
+        _seed_adjusted_slate(db_session)
+        rows = self._rows(client)
+        # DAL only appears in week 1, before anyone has a baseline. A missing
+        # grade must not read as 0.0, which the bands would call "very tough".
+        assert rows["DAL"]["wr_grade"] is None
+        assert rows["DAL"]["wr_band"] is None
+        assert rows["DAL"]["wr"] == 20.0          # the raw number is still there
+
+    def test_through_week_rates_only_the_earlier_weeks(self, client, db_session):
+        _seed_adjusted_slate(db_session)
+        body = client.get("/fpa/?season=2024&through_week=5").json()
+        rows = {r["team"]: r for r in body["data"]}
+        assert body["through_week"] == 5
+        assert rows["SEA"]["wr_weeks"] == 1       # week 4 only
+        assert rows["WAS"]["wr_grade"] > rows["SEA"]["wr_grade"]
+
+    def test_early_season_explains_itself_instead_of_failing(self, client, db_session):
+        _seed_teams(db_session)
+        _seed_schedule(db_session)
+        _seed_stats(db_session)                   # two weeks: no baselines yet
+        body = client.get("/fpa/?season=2024").json()
+        assert body["status"] == "success"
+        assert body["adjusted"] is False
+        assert "three prior games" in body["adjusted_note"]
+        # The raw series the site charts is unaffected by that.
+        rows = {r["team"]: r for r in body["data"]}
+        assert rows["DET"]["qb"] == 25.0
+        assert rows["DET"]["qb_grade"] is None
+
+    def test_the_response_carries_the_scale_and_the_bands(self, client, db_session):
+        _seed_adjusted_slate(db_session)
+        body = client.get("/fpa/?season=2024").json()
+        assert "higher = softer" in body["scale"]
+        assert [b["label"] for b in body["bands"]][0] == "very tough"
+        assert body["scoring"]["qb_rb_wr_te"].startswith("PPR")
 
 # ── /teams/{abbr}/fpa ─────────────────────────────────────────────────────────
 
