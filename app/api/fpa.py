@@ -16,11 +16,16 @@ Only the second is a target, and raw FPA ranks them the same.
 so the schedule a defence has had nets out. That math lives in
 `nfl_projections.fpa` so the research harness and this endpoint cannot drift
 apart; this module is the DB adapter and the cache. Measured over 2019-2026 the
-two rankings disagree a lot (Spearman 0.60 for receivers, ~0.76 elsewhere) and
-the adjusted one predicts next week's over/under-performance better for three
-positions of four -- QB 0.094 vs 0.068, WR 0.051 vs 0.026, TE 0.049 vs 0.037,
-RB a wash. Those are small correlations and are meant to be read that way: a
-tiebreak between comparable players, not a signal to chase.
+two rankings disagree a lot: Spearman 0.60 for receivers, ~0.76 elsewhere.
+
+Held out on 2024-2026 with both arms on the same scale, neither predicts a
+player's week better than the other -- the adjustment is a wash on accuracy. It
+is served because it is the only one of the two that can be read: `{pos}_allowed`
+next to `{pos}_faced` says whether a number is a soft defence or a hard
+schedule, and raw FPA cannot distinguish those at all. Both are returned, and
+the correlations behind either are 0.01-0.09 against what a player actually
+does, so this is a tiebreak between comparable players and never a signal to
+chase.
 
 The adjusted side is scored FanDuel (half-PPR), winsorises each player's weekly
 gap at +/-12 so one weather game cannot carry a season, and reports
