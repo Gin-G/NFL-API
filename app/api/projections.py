@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from database.models import (AnalyticsJobStatus, PlayerProjection,
                              PlayerProjectionVintage, ProjectionAccuracy,
-                             ShadowProjection)
+                             ProjectionRun, ShadowProjection)
 from database.session import get_db
 from .utils import _orm_to_dict, get_current_nfl_season
 
@@ -50,6 +50,122 @@ def _regular_stats(db, season: int) -> dict:
         vals = {c.name: getattr(st, c.name) for c in st.__table__.columns}
         out[(st.week, st.player_id)] = fanduel_points(vals)
     return out
+
+
+def _run_for(db, season: int, week=None, as_of=None):
+    """The run that produced these rows.
+
+    A live row for week W came from the run that PUBLISHED W. An archived
+    vintage came from the run that had `as_of` weeks of football behind it,
+    whichever week that run published — which is why the two lookups differ.
+    """
+    q = db.query(ProjectionRun).filter(ProjectionRun.season == season)
+    if as_of is not None:
+        q = q.filter(ProjectionRun.as_of_week == as_of)
+    elif week is not None:
+        q = q.filter(ProjectionRun.week == week)
+    else:
+        return None          # a whole season spans many runs; none of them is it
+    return q.order_by(ProjectionRun.id.desc()).first()
+
+
+def _run_notes(run) -> list:
+    """The conditions in words, so a board declares itself instead of leaving
+    the reader to infer it from an absence."""
+    notes = []
+    if run.injury_source == "disabled":
+        notes.append("Injuries were not applied to this run.")
+    elif not run.injury_report_available:
+        latest = run.injury_report_latest_week
+        notes.append(
+            f"No club had filed a week {run.week} injury report when this ran"
+            + (f" (the feed ended at week {latest})" if latest else "")
+            + f". The only injury signal was the {run.ir_players or 0} players on "
+            "IR/PUP/Reserve, so anyone hurt during the week is projected healthy "
+            "and his backup is projected as a backup."
+        )
+    if run.model_reused:
+        notes.append(
+            "Reused the model trained earlier in the week. No football had been "
+            "played in between, so only the injuries and depth charts are newer."
+        )
+    if run.teams_frozen:
+        notes.append(f"Left {run.teams_frozen} untouched: already kicked off.")
+    return notes
+
+
+def _run_summary(run) -> Optional[dict]:
+    """One row of `projection_runs` as the API serves it."""
+    if run is None:
+        return None
+    return {
+        "run_id": run.id,
+        "season": run.season,
+        "week": run.week,
+        "as_of_week": run.as_of_week,
+        "computed_at": run.computed_at.isoformat() if run.computed_at else None,
+        "job_id": run.job_id,
+        "model": {
+            "version": run.model_version,
+            "reused": bool(run.model_reused),
+            "training_min_season": run.training_min_season,
+            "seeds": run.seeds,
+            "epochs": run.epochs,
+        },
+        "injuries": {
+            "source": run.injury_source,
+            # The flag: had anybody filed for this week yet when the run went?
+            "report_available": bool(run.injury_report_available),
+            "report_rows": run.injury_report_rows,
+            "report_latest_week": run.injury_report_latest_week,
+            "report_players": run.injury_report_players,
+            "ir_players": run.ir_players,
+            "players_zeroed": run.players_zeroed,
+            "backups_elevated": run.backups_elevated,
+            "questionable": run.questionable,
+        },
+        "inputs": {
+            "roster_source": run.roster_source,
+            "roster_rows": run.roster_rows,
+            "depth_chart_as_of": (run.depth_chart_as_of.isoformat()
+                                  if run.depth_chart_as_of else None),
+        },
+        "output": {
+            "projections_published": run.projections_published,
+            "weeks_archived": run.weeks_archived,
+            "teams_frozen": run.teams_frozen,
+        },
+        "notes": _run_notes(run),
+    }
+
+
+@router.get("/runs")
+def get_projection_runs(
+    season: Optional[int] = Query(None, description="Season (default: current)"),
+    week: Optional[int] = Query(None, description="Only runs that published this week"),
+    limit: int = Query(25, le=200),
+    db: Session = Depends(get_db),
+):
+    """What each projection run could see, newest first.
+
+    The projections cannot say this about themselves: a week where every club
+    filed a clean injury report and a week where nobody had filed yet produce
+    the same rows. The difference is systematic rather than random -- the cron
+    runs Tuesday and Wednesday nights and clubs file on Wednesday -- so this is
+    the record that says which kind of board a given week got.
+    """
+    season = season or get_current_nfl_season()
+    q = db.query(ProjectionRun).filter(ProjectionRun.season == season)
+    if week is not None:
+        q = q.filter(ProjectionRun.week == week)
+    runs = q.order_by(ProjectionRun.id.desc()).limit(limit).all()
+    return {
+        "status": "success" if runs else "no_data",
+        "season": season,
+        "week": week,
+        "count": len(runs),
+        "data": [_run_summary(r) for r in runs],
+    }
 
 
 @router.get("/")
@@ -102,6 +218,10 @@ def get_projections(
         "week": week,
         "as_of_week": as_of,
         "count": len(rows),
+        # What the run behind these numbers could see. Null for a query that
+        # spans several runs (no week), and for weeks projected before runs
+        # were recorded.
+        "provenance": _run_summary(_run_for(db, season, week=week, as_of=as_of)),
         "data": [_orm_to_dict(r) for r in rows],
     }
 

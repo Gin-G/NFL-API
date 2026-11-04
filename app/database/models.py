@@ -6,7 +6,8 @@ SQLAlchemy ORM models for NFL data.
 import logging
 from datetime import datetime
 
-from sqlalchemy import Column, String, Integer, Float, Text, DateTime, UniqueConstraint, Index
+from sqlalchemy import (Boolean, Column, String, Integer, Float, Text, DateTime,
+                        UniqueConstraint, Index)
 from sqlalchemy.orm import DeclarativeBase
 
 logger = logging.getLogger(__name__)
@@ -351,6 +352,77 @@ class PlayerProjectionVintage(Base):
         # The cohort query: everything produced by one run.
         Index("ix_ppv_asof", "season", "as_of_week"),
         Index("ix_ppv_pos", "position", "season", "week"),
+    )
+
+
+class ProjectionRun(Base):
+    """One row per projection run: what the board was allowed to see.
+
+    The projections themselves cannot answer this. A week where every club
+    filed a clean injury report and a week where nobody had filed yet produce
+    the same rows — no overrides either way — and the depth chart a run read is
+    overwritten by the next nflverse publish within the day. So a board two
+    weeks old can be argued about but not checked.
+
+    It matters because the conditions differ *systematically*, not randomly.
+    The projections cron runs Tuesday and Wednesday nights; clubs file their
+    first injury report on Wednesday. The Tuesday run therefore can never see
+    one and the Wednesday run always can, and the two publish to the same
+    table. Week 9 shipped with Baltimore's injured starting quarterback
+    projected for 8.3 points and the whole passing game priced off him, which
+    looked like a model failure and was a run-condition failure.
+
+    Written by scripts.compute_projections at publish time and served by
+    GET /projections/runs, plus the `provenance` block on GET /projections.
+    Append-only: a run is a historical fact, so re-projecting a week adds a row
+    rather than replacing one.
+    """
+    __tablename__ = "projection_runs"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    season        = Column(Integer)
+    # The week PUBLISHED to player_projections. The same run archives every
+    # later week to the vintage table, which is keyed on as_of_week instead.
+    week          = Column(Integer)
+    as_of_week    = Column(Integer)      # completed weeks of football behind it
+    computed_at   = Column(DateTime, default=datetime.utcnow)
+    job_id        = Column(Integer, nullable=True)   # analytics_job_status.id
+
+    # -- the model
+    model_version       = Column(String)
+    model_reused        = Column(Boolean, default=False)  # cache hit, no retrain
+    training_min_season = Column(Integer, nullable=True)
+    seeds               = Column(Integer, nullable=True)
+    epochs              = Column(Integer, nullable=True)
+
+    # -- what the injury sources offered for THIS week
+    injury_source             = Column(String)   # nflverse | sportradar | disabled
+    # Whether any club had filed for `week` yet. The flag the Tuesday run needs.
+    injury_report_available   = Column(Boolean)
+    injury_report_rows        = Column(Integer)  # report rows for `week`
+    injury_report_latest_week = Column(Integer, nullable=True)  # newest week on file
+    injury_report_players     = Column(Integer)  # designations parsed out of it
+    ir_players                = Column(Integer)  # from roster status, not the report
+    players_zeroed            = Column(Integer)  # OUT/doubtful, both sources
+    backups_elevated          = Column(Integer)
+    questionable              = Column(Integer)
+
+    # -- rosters and depth charts
+    roster_source     = Column(String)           # nflverse | espn
+    roster_rows       = Column(Integer)
+    depth_chart_as_of = Column(DateTime, nullable=True)  # the snapshot in force
+
+    # -- what came out
+    projections_published = Column(Integer)
+    weeks_archived        = Column(Integer)
+    # Teams already kicked off, whose rows the run left alone.
+    teams_frozen          = Column(String, nullable=True)
+
+    __table_args__ = (
+        # Both lookups are season-leading, so these cover the bare-season
+        # listing too; no single-column index is needed beside them.
+        Index("ix_projection_runs_season_week", "season", "week"),
+        Index("ix_projection_runs_season_asof", "season", "as_of_week"),
     )
 
 

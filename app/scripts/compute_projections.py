@@ -237,6 +237,69 @@ def _save_model(cache_dir: str, key: dict, svc) -> None:
         logger.warning("Could not cache the trained model (%s)", exc)
 
 
+def _as_naive_utc(value):
+    """An ISO stamp (possibly tz-aware) as a naive UTC datetime, matching the
+    rest of the schema, or None if it cannot be read."""
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is not None:
+        ts = (ts - ts.utcoffset()).replace(tzinfo=None)
+    return ts
+
+
+def _record_run(db, *, job, season: int, week: int, as_of: int, model_version: str,
+                model_reused: bool, min_season, seeds, epochs: int, provenance: dict,
+                roster_source: str, published: int, weeks_archived: int,
+                started) -> None:
+    """Append what this run could see to `projection_runs`.
+
+    The one thing the projections cannot say about themselves. An empty injury
+    report and a healthy league produce identical rows, so without this a board
+    can be argued about but not checked — see the table's docstring.
+
+    Never fatal: a run that cannot write its own provenance is still a good run,
+    and failing the job over the audit trail would be the tail wagging the dog.
+    """
+    from database.models import ProjectionRun
+
+    inj = (provenance or {}).get("injuries") or {}
+    try:
+        db.add(ProjectionRun(
+            season=season, week=week, as_of_week=as_of,
+            computed_at=datetime.utcnow(), job_id=getattr(job, "id", None),
+            model_version=model_version, model_reused=bool(model_reused),
+            training_min_season=min_season, seeds=seeds, epochs=epochs,
+            injury_source=inj.get("source"),
+            injury_report_available=bool(inj.get("report_available")),
+            injury_report_rows=int(inj.get("report_rows_for_week") or 0),
+            injury_report_latest_week=inj.get("report_latest_week"),
+            injury_report_players=int(inj.get("report_players") or 0),
+            ir_players=int(inj.get("ir_players") or 0),
+            players_zeroed=int(inj.get("out") or 0),
+            backups_elevated=int(inj.get("backups_elevated") or 0),
+            questionable=int(inj.get("questionable") or 0),
+            roster_source=roster_source,
+            roster_rows=int((provenance or {}).get("roster_rows") or 0),
+            depth_chart_as_of=_as_naive_utc((provenance or {}).get("depth_chart_as_of")),
+            projections_published=published, weeks_archived=weeks_archived,
+            teams_frozen=",".join(sorted(started)) if started else None,
+        ))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Could not record the run's provenance (%s)", exc)
+        return
+    if inj.get("source") not in (None, "disabled") and not inj.get("report_available"):
+        logger.warning(
+            "No club had filed a week %d injury report when this ran (the feed ends "
+            "at week %s); the only injury signal was the %d players on IR/PUP/Reserve",
+            week, inj.get("report_latest_week"), int(inj.get("ir_players") or 0))
+
+
 def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         seeds: int = None, overwrite_started: bool = False,
         model_cache: str = None, shadow_min_season: int = None) -> None:
@@ -368,6 +431,12 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         # completing the job first keeps /projections/status (and the dashboard
         # button reading it) about the board rather than about an experiment
         # that runs for another half hour behind it.
+        _record_run(db, job=job, season=season, week=week, as_of=as_of,
+                    model_version=model_version, model_reused=bool(mean_dir),
+                    min_season=live_min_season, seeds=seeds, epochs=epochs,
+                    provenance=getattr(svc, "last_provenance", None),
+                    roster_source="nflverse", published=written,
+                    weeks_archived=weeks_done, started=started)
         _update_job(db, job, status="completed", processed_entries=weeks_done)
         logger.info("Published %d projections for %d week %d; archived %d across "
                     "weeks %d-%d as_of week %d (model %s)",
@@ -401,6 +470,12 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         _update_job(db, job, current_coach=f"season {season} week {w}",
                     processed_entries=weeks_done)
         logger.info("week %d: wrote %d projections", w, len(f))
+    _record_run(db, job=job, season=season, week=week, as_of=as_of,
+                model_version=model_version, model_reused=bool(mean_dir),
+                min_season=live_min_season, seeds=seeds, epochs=epochs,
+                provenance=getattr(svc, "last_provenance", None),
+                roster_source="espn", published=total, weeks_archived=weeks_done,
+                started=started)
     _update_job(db, job, status="completed", processed_entries=weeks_done)
     logger.info("Wrote %d total projections for %d weeks %d-%d (model %s)",
                 total, season, week, end_week or week, model_version)
