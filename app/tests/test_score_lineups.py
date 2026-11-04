@@ -492,6 +492,7 @@ class TestWhichObjectiveWon:
         body = client.get("/optimizer/performance", params={"season": SEASON}).json()
         assert body["by_objective"][-1]["objective"] == "floor"
         assert body["by_objective"][-1]["actual"] is None
+        assert body["by_objective"][-1]["weeks_scored"] == 0   # nor a week
         assert body["objective_verdict"]["best"] != "floor"
         assert body["objective_verdict"]["objectives_scored"] == 2
 
@@ -504,6 +505,47 @@ class TestWhichObjectiveWon:
                              params={"season": SEASON}).json()["objective_verdict"]
         assert verdict["one_week_only"] is True
         assert verdict["weeks_scored"] == 1
+
+    def _second_week(self, client, db, objectives, week=WEEK + 1):
+        """Build and score the given objectives on a second week's slate."""
+        _divided_board(db, week=week)
+        _schedule(db, week=week)
+        for i, objective in enumerate(objectives):
+            # Only the first build of a new week has a slate to upload.
+            assert _post(client, csv=_csv if i == 0 else None, num_lineups=1,
+                         week=week, objective=objective
+                         ).json()["status"] == "success"
+        _stats(db, week=week)
+        score_lineups.run(db, SEASON, week=week)
+
+    def test_a_winner_seen_in_one_week_is_still_a_one_week_verdict(self, client,
+                                                                   db_session):
+        """The season having two scored weeks does not mean the ranking does.
+
+        This is the live record's shape: four scored weeks, but "floor" was
+        built in exactly one of them and took the title on it.
+        """
+        self._two_objectives(client, db_session)            # week 6: mean, ceiling
+        self._second_week(client, db_session, ["mean"])      # week 7: mean only
+
+        body = client.get("/optimizer/performance", params={"season": SEASON}).json()
+        assert {o["objective"]: o["weeks_scored"] for o in body["by_objective"]} == {
+            "mean": 2, "ceiling": 1}
+
+        verdict = body["objective_verdict"]
+        assert verdict["weeks_scored"] == 2        # the season's weeks...
+        assert sorted([verdict["best_weeks"], verdict["worst_weeks"]]) == [1, 2]
+        assert verdict["one_week_only"] is True    # ...but the ranking's is one
+
+    def test_both_ends_on_two_weeks_is_a_verdict(self, client, db_session):
+        self._two_objectives(client, db_session)
+        self._second_week(client, db_session, ["mean", "ceiling"])
+
+        verdict = client.get("/optimizer/performance",
+                             params={"season": SEASON}).json()["objective_verdict"]
+        assert verdict["weeks_scored"] == 2
+        assert verdict["best_weeks"] == 2 and verdict["worst_weeks"] == 2
+        assert verdict["one_week_only"] is False
 
     def test_a_showdown_is_not_ranked_against_a_classic(self, client, db_session):
         """Five players against nine: the contest would decide the comparison.

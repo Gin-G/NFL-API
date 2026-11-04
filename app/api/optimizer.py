@@ -1082,7 +1082,8 @@ def _round(value, places: int = 2):
 def _perf_bucket(**fields) -> dict:
     return {**fields, "builds": 0, "lineups": 0, "complete": 0,
             "projected": [], "actual": [], "best_actual": None, "worst_actual": None,
-            "fppg_points": [], "best_points": [], "beat_fppg": 0, "compared": 0}
+            "fppg_points": [], "best_points": [], "beat_fppg": 0, "compared": 0,
+            "weeks": set()}
 
 
 def _perf_add(bucket: dict, build, rows) -> None:
@@ -1096,6 +1097,11 @@ def _perf_add(bucket: dict, build, rows) -> None:
     bucket["builds"] += 1
     bucket["lineups"] += len(rows)
     bucket["complete"] += len(complete)
+    if complete:
+        # Week coverage per bucket, which is what says whether an objective's
+        # average is a season's evidence or one slate's. A build with nothing
+        # scored yet does not buy its objective a week.
+        bucket["weeks"].add(build.week)
     bucket["projected"].extend(e.projected_points for e in complete)
     bucket["actual"].extend(e.actual_points for e in complete)
     for entry in complete:
@@ -1118,6 +1124,7 @@ def _perf_summary(bucket: dict) -> dict:
         "builds": bucket["builds"],
         "lineups": bucket["lineups"],
         "scored_lineups": bucket["complete"],
+        "weeks_scored": len(bucket["weeks"]),
         "projected": projected,
         "actual": actual,
         "error": (round(projected - actual, 2)
@@ -1382,6 +1389,8 @@ def lineup_performance(
     # beaten the other, and a handful of lineups from one slate is a sample of
     # one week, not evidence about an objective. The flags say which it is; the
     # caller decides whether to phrase a verdict.
+    best_weeks = judged[0]["weeks_scored"] if judged else None
+    worst_weeks = judged[-1]["weeks_scored"] if len(judged) >= 2 else None
     verdict = {
         "comparable": len(judged) >= 2,
         "contest": contest,
@@ -1389,12 +1398,21 @@ def lineup_performance(
         "scored_lineups": sum(o["scored_lineups"] for o in judged),
         "weeks_scored": len(scored),
         "best": judged[0]["objective"] if judged else None,
+        "best_weeks": best_weeks,
         "worst": judged[-1]["objective"] if len(judged) >= 2 else None,
+        "worst_weeks": worst_weeks,
         "spread": (round(judged[0]["actual"] - judged[-1]["actual"], 2)
                    if len(judged) >= 2 else None),
         # One week cannot separate objectives that differ by a point or two:
-        # the same slate, the same pool, largely the same players.
-        "one_week_only": len(scored) <= 1,
+        # the same slate, the same pool, largely the same players. It is the
+        # RANKED ENDS that have to clear a week each, not the season: four
+        # scored weeks with the winner appearing in only one of them is still
+        # a one-slate verdict, and the live record hit exactly that -- "floor"
+        # took the title on week 7 alone, a week whose FPPG baseline was low
+        # enough that every objective beat it.
+        "one_week_only": (len(scored) <= 1
+                          or (best_weeks is not None and best_weeks <= 1)
+                          or (worst_weeks is not None and worst_weeks <= 1)),
     }
 
     detail = []
