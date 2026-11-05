@@ -355,6 +355,130 @@ class PlayerProjectionVintage(Base):
     )
 
 
+class ExternalSnapshot(Base):
+    """One hand-exported third-party matchup table, kept verbatim.
+
+    The first source is FantasyGuru's weekly "smash" tables, exported by a
+    subscriber. **Nothing fetches these.** The source's terms are personal use
+    only, so the only way a row gets here is a person uploading a CSV, and
+    there is deliberately no fetcher anywhere in either repo — see
+    `nfl_projections.external`.
+
+    The bytes are stored as uploaded, the same choice `fanduel_slates` makes
+    and for the same reason: the file is a few kilobytes, and keeping it means
+    the source changing a column next month is something to re-read rather
+    than something already lost to today's schema. The shredded rows in the
+    two tables below are derived from it and can be rebuilt.
+
+    Keyed (source, season, week, kind) so a re-upload REPLACES: a corrected
+    export should overwrite, not accumulate. `content_hash` says whether it
+    actually changed.
+    """
+    __tablename__ = "external_snapshots"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    source       = Column(String)        # fantasyguru
+    kind         = Column(String)        # wr_coverage | team_lines | line_matchups
+    season       = Column(Integer)
+    week         = Column(Integer)
+    filename     = Column(String)
+    content      = Column(Text)          # the CSV exactly as uploaded
+    content_hash = Column(String)        # sha256
+    row_count    = Column(Integer)       # data rows in the file
+    parsed_rows  = Column(Integer)       # rows that shredded cleanly
+    # Names and teams the mapping could not resolve, comma-joined. Not an
+    # error: it is the list to fix, and it belongs with the upload that
+    # produced it rather than in a log nobody reads.
+    unmapped     = Column(Text, nullable=True)
+    uploaded_at  = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("source", "season", "week", "kind",
+                         name="uq_external_snapshot"),
+        Index("ix_external_snapshots_week", "season", "week"),
+    )
+
+
+class ExternalTeamLine(Base):
+    """A third-party offensive-line / defensive-front rating, one per team-week.
+
+    Compared against /trenches rather than merged with it. The two measure
+    overlapping but different things: across week 9 2026 their O-line ranks
+    Spearman 0.66 against our run_block and only 0.42 against pass_block, and
+    their D-front 0.73 against run_stop and 0.22 against pass_rush -- so their
+    ratings are substantially a run-game measure. Their own O-line and D-front
+    also correlate 0.6 with each other, which is what team strength leaking
+    into both would look like.
+    """
+    __tablename__ = "external_team_lines"
+
+    source          = Column(String,  primary_key=True)
+    season          = Column(Integer, primary_key=True)
+    week            = Column(Integer, primary_key=True)
+    team            = Column(String,  primary_key=True)   # nflverse abbreviation
+    team_raw        = Column(String)      # the source's own spelling
+    offensive_line  = Column(Float)
+    defensive_front = Column(Float)
+    snapshot_id     = Column(Integer, index=True)
+    uploaded_at     = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_external_team_lines_week", "season", "week"),)
+
+
+class ExternalWrMatchup(Base):
+    """A third-party corner-vs-receiver pairing for one week.
+
+    The reason this table is worth keeping at all is `shadow` and the pairing
+    itself. Our own coverage work closed the WR matchup question three times
+    over -- EXPERIMENTS.md "Per-corner coverage grades" has wide receiver at
+    -0.0032 MAE, actively harmful with the interval clear of zero -- but every
+    one of those tests used a TEAM-level secondary, because nflverse publishes
+    no assignment. Which corner a receiver actually draws, and whether he is
+    shadowed, is the one column here that is not a second opinion about
+    something we already measure.
+
+    `shell`/`man_zone` use nflverse's own vocabulary where the source's label
+    maps onto it, so the two are directly comparable. "Match" does not map and
+    keeps its own value rather than being forced into a shell it is not.
+
+    Keyed on the source's own rank, which is unique within an export, so a
+    re-upload replaces cleanly.
+    """
+    __tablename__ = "external_wr_matchups"
+
+    source         = Column(String,  primary_key=True)
+    season         = Column(Integer, primary_key=True)
+    week           = Column(Integer, primary_key=True)
+    fg_rank        = Column(Integer, primary_key=True)
+
+    defender       = Column(String)
+    defender_id    = Column(String, index=True)   # gsis_id, null if unresolved
+    defender_team  = Column(String)
+    # exact | team | name | team_fuzzy | null. A fuzzy match is a one-letter
+    # spelling difference resolved inside one roster; it is recorded rather
+    # than passed off as exact.
+    defender_match = Column(String)
+    receiver       = Column(String)
+    receiver_id    = Column(String, index=True)
+    receiver_team  = Column(String)
+    receiver_match = Column(String)
+
+    coverage_type  = Column(String)      # the source's raw label
+    shell_pct      = Column(Float)
+    shell          = Column(String)      # nflverse vocabulary, or MATCH
+    man_zone       = Column(String)      # MAN_COVERAGE | ZONE_COVERAGE
+    shadow         = Column(Boolean, default=False)
+    advantage      = Column(Float)       # higher = better for the receiver
+
+    snapshot_id    = Column(Integer, index=True)
+    uploaded_at    = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_external_wr_week", "season", "week"),
+        Index("ix_external_wr_receiver", "receiver_id", "season", "week"),
+    )
+
+
 class ProjectionRun(Base):
     """One row per projection run: what the board was allowed to see.
 

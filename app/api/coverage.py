@@ -112,6 +112,47 @@ def _grades(season: int, through_week: Optional[int]):
     return _cached(("grades", season, through_week), build)
 
 
+# Participation is ~45,000 rows a season against PFR charting's ~1 MB, and it
+# never changes once published — nflverse stopped publishing it after 2025 — so
+# it is cached for the day rather than the hour.
+_SHELL_TTL = 86400
+
+
+def _shells(season: int, through_week: Optional[int]):
+    """Each defence's coverage-shell mix, cached.
+
+    **This is the one table on this page that may be a season stale, and it
+    cannot be anything else.** The shell and man/zone fields live in
+    nflverse's participation release, which is published for 2016-2025 and
+    stopped; nothing else in nflverse carries them (not load_pbp, not
+    load_ftn_charting, not load_nextgen_stats — checked 2026-11-04). So for a
+    current season there is no charting at all and the mix falls back to the
+    last season there was one for.
+
+    Scheme is a coaching trait and travels with a coordinator, which is why a
+    stale mix is still worth showing — but a defence with a new coordinator is
+    being described by its predecessor. Every row carries `shell_seasons` and
+    `current_season_plays` so that is visible in the data, not just here.
+    """
+    coverage = _coverage()
+
+    def build():
+        try:
+            part = coverage.load_shells([season - 1, season])
+            sp = coverage.shell_plays(part)
+            return coverage.shell_mix(sp, season, through_week)
+        except Exception as exc:
+            logger.warning("coverage shells unavailable: %s", exc)
+            return pd.DataFrame()
+
+    hit = _cache.get(("shells", season, through_week))
+    if hit and time.time() - hit[0] < _SHELL_TTL:
+        return hit[1]
+    value = build()
+    _cache[("shells", season, through_week)] = (time.time(), value)
+    return value
+
+
 def _records(frame: pd.DataFrame):
     """Rows as JSON-safe dicts.
 
@@ -179,11 +220,65 @@ def team_grades(season: int = Query(..., ge=2018),
         raise HTTPException(
             status_code=404,
             detail=f"Not enough {season} coverage charting to rate secondaries.")
+    # The shell mix rides alongside rather than being merged into the grade
+    # row: the grade is this season's charting and the mix may be last
+    # season's, and a single row implying they were measured together would be
+    # the misleading version.
+    sm = _shells(season, through_week)
+    shells = {r["defense"]: r for r in _records(sm)}
+    stale = [t for t, r in shells.items() if not r.get("current_season_plays")]
     return {
         "season": season, "through_week": through_week,
         "scale": "0-100, 50 = league average; high = good coverage",
         "bands": _bands(coverage),
-        "secondaries": _records(tc),
+        "secondaries": [dict(r, shells=shells.get(r.get("team"))) for r
+                        in _records(tc)],
+        "shell_source": "nflverse participation (defense_coverage_type /"
+                        " defense_man_zone_type)",
+        "shell_last_published_season": coverage.SHELL_LAST_SEASON,
+        "shell_seasons_stale": sorted(stale),
+        "shell_note": (
+            "Shell mix is charted only through "
+            f"{coverage.SHELL_LAST_SEASON}; nflverse publishes nothing after "
+            "it and no other feed carries the fields. For a later season the "
+            "mix is a scheme tendency from the last charted year, not this "
+            "week's. Every row says which seasons it came from."),
+    }
+
+
+@router.get("/shells")
+def coverage_shells(season: int = Query(..., ge=2016),
+                    through_week: Optional[int] = Query(None, ge=1, le=22)):
+    """What each defence actually plays: shell mix and man/zone rate.
+
+    Percentages of charted plays, most man-heavy first. The shell columns plus
+    `other` add to 100; `other` carries COMBO and BLOWN and the rounding.
+
+    **Read `shell_seasons` before using a row.** nflverse charts these fields
+    in its participation release, published 2016 to
+    `shell_last_published_season` and then stopped, and nothing else carries
+    them. After that the mix is the last charted season's scheme, which is a
+    real thing — coverage scheme travels with a coordinator — but is not this
+    week's tendency, and a defence with a new coordinator is described by its
+    predecessor.
+    """
+    coverage = _coverage()
+    sm = _shells(season, through_week)
+    if sm is None or sm.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"No coverage-shell charting available for {season}. "
+                    f"nflverse publishes participation through "
+                    f"{coverage.SHELL_LAST_SEASON} only, and a fallback needs "
+                    f"{season - 1} to be charted."))
+    rows = _records(sm)
+    return {
+        "season": season, "through_week": through_week,
+        "shell_last_published_season": coverage.SHELL_LAST_SEASON,
+        "current_season_charted": any(r.get("current_season_plays") for r in rows),
+        "min_plays": coverage.MIN_SHELL_PLAYS,
+        "shells": coverage.SHELLS,
+        "defenses": rows,
     }
 
 
