@@ -36,7 +36,7 @@ import hashlib
 import io
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
                      UploadFile)
@@ -72,8 +72,18 @@ def _external():
             detail="Uploads need the nfl-projections package in this image.")
 
 
-async def _read_upload(upload: UploadFile) -> str:
-    raw = await upload.read()
+async def _read_upload(upload) -> str:
+    """The CSV text of an upload, whether or not it arrived with a filename.
+
+    A multipart part with no filename is, per the spec, an ordinary form
+    field, and Starlette hands it over as a `str` rather than an `UploadFile`.
+    Since nothing here cares what a file is called, a nameless one is a
+    perfectly good upload and is read as the CSV it is -- which also means the
+    text can simply be posted as a form field.
+    """
+    raw = upload if isinstance(upload, (str, bytes)) else await upload.read()
+    if isinstance(raw, str):
+        raw = raw.encode()
     if not raw:
         raise HTTPException(status_code=400, detail="That file is empty.")
     if len(raw) > MAX_CSV_BYTES:
@@ -93,7 +103,9 @@ def _data_rows(text: str) -> int:
 
 @router.post("/upload")
 async def upload_snapshot(
-    file: UploadFile = File(..., description="A CSV exported by hand from the source"),
+    file: Union[UploadFile, str] = File(
+        ..., description="A CSV exported by hand from the source. The filename "
+                         "is ignored, and a part with no filename is fine."),
     season: Optional[int] = Form(None),
     week: int = Form(..., description="The week the table is about"),
     source: str = Form("fantasyguru"),
@@ -103,11 +115,20 @@ async def upload_snapshot(
 ):
     """Store one weekly export and shred it onto our own ids.
 
-    The kind is detected from the file's own header, so there is nothing to get
-    wrong from a menu. Passing `kind` turns that into an assertion instead: a
-    file that disagrees with what you said it was is refused rather than
-    stored under the wrong name, because a WR table filed as team lines would
-    read as an empty week rather than as a mistake.
+    **The filename is not used for anything.** These files arrive as
+    `table.csv`, `table (1).csv` and whatever the browser calls the next one,
+    and the source is free to rename its exports whenever it likes, so the
+    kind is worked out from the contents: the header is located by the columns
+    it carries rather than assumed to be the first line, and columns are read
+    by name, so a title row, a blank leading line, a reordered export or an
+    added column all still load. The filename is kept on the snapshot as a
+    label and never consulted again.
+
+    So `kind` is optional and there is nothing to get wrong from a menu.
+    Passing it turns detection into an assertion instead: a file that
+    disagrees with what you said it was is refused rather than stored under
+    the wrong name, because a WR table filed as team lines would read as an
+    empty week rather than as a mistake.
     """
     external = _external()
     season = season or get_current_nfl_season()
@@ -117,13 +138,18 @@ async def upload_snapshot(
                                    f"{', '.join(SOURCES)}.")
     text = await _read_upload(file)
 
+    # Detected from the file's contents, never its name: these arrive called
+    # table.csv, table (1).csv and whatever the browser names the next one.
     detected = external.detect_kind(text)
     if detected is None:
+        head = [ln[:120] for ln in text.splitlines()[:3]] or ["(empty)"]
         raise HTTPException(
             status_code=400,
-            detail="That header matches none of the known exports "
-                   f"({', '.join(external.KINDS)}). First line: "
-                   f"{text.splitlines()[0][:200] if text.strip() else '(empty)'}")
+            detail=f"Nothing in the first {external.HEADER_SEARCH_ROWS} rows "
+                   "of that file heads a known export "
+                   f"({', '.join(external.KINDS)}). The filename is not used "
+                   "and does not matter; the header is what identifies it. "
+                   f"First rows seen: {head}")
     if kind and kind != detected:
         raise HTTPException(
             status_code=400,
@@ -141,8 +167,9 @@ async def upload_snapshot(
     if kind in DERIVED_KINDS:
         return _check_derived(db, frame, source, season, week, kind, text)
 
-    snapshot = _store_snapshot(db, source, season, week, kind, file.filename,
-                              text, _data_rows(text))
+    snapshot = _store_snapshot(db, source, season, week, kind,
+                               getattr(file, "filename", None) or None,
+                               text, _data_rows(text))
     if kind == "team_lines":
         result = _store_team_lines(db, frame, snapshot, source, season, week)
     else:

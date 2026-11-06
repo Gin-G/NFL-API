@@ -154,7 +154,11 @@ class TestUpload:
     def test_an_unrecognised_file(self, client):
         r = _upload(client, "a,b,c\n1,2,3\n")
         assert r.status_code == 400
-        assert "matches none of the known exports" in r.json()["detail"]
+        detail = r.json()["detail"]
+        assert "heads a known export" in detail
+        # The refusal names every kind it tried, so the next step is obvious.
+        for kind in ("wr_coverage", "team_lines", "line_matchups"):
+            assert kind in detail
 
     def test_an_empty_file(self, client):
         r = _upload(client, "")
@@ -535,3 +539,54 @@ class TestLineRatings:
     def test_nothing_uploaded(self, db_session):
         assert grade_external._grade_lines(
             db_session, SEASON, "fantasyguru")["status"] == "no_data"
+
+
+class TestTheFilenameDoesNotMatter:
+    """Uploads are identified by content, so any name must behave the same.
+
+    The source renames its exports freely and the browser decorates
+    duplicates, so a pipeline keyed on the filename would break on a week
+    where nothing was actually wrong.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "table.csv", "table (1).csv", "table (17).csv",
+        "FG Week 9 - WR Coverage FINAL(2).csv", "download", "",
+        "wr_coverage.csv", "team_lines.csv",
+    ])
+    def test_any_name_loads_the_same_rows(self, client, name):
+        body = _upload(client, WR_CSV, filename=name).json()
+        assert body["kind"] == "wr_coverage", body
+        assert body["stored"] == 3
+
+    def test_a_name_that_contradicts_the_contents_is_ignored(self, client):
+        """Named for the wrong export; the header is what counts."""
+        body = _upload(client, TEAM_CSV, filename="wr_coverage.csv").json()
+        assert body["kind"] == "team_lines"
+        assert body["teams"] == 3
+
+    def test_a_title_row_above_the_header_still_uploads(self, client):
+        body = _upload(client,
+                       "FantasyGuru Weekly Matchups - Week 9\n\n" + WR_CSV).json()
+        assert body["kind"] == "wr_coverage"
+        assert body["stored"] == 3
+
+    def test_a_reordered_export_still_uploads(self, client):
+        text = ("Primary Receiver,Team,Advantage,Coverage Type,"
+                "Defensive Back,Team,Rank\n"
+                "Zay Flowers,BAL,51.20,100% Shadow Coverage,"
+                "Travis Hunter,JAC,3\n")
+        body = _upload(client, text).json()
+        assert body["kind"] == "wr_coverage"
+        assert body["stored"] == 1
+        rows = client.get(f"/external/wr-matchups?season={SEASON}&week={WEEK}"
+                          ).json()["data"]
+        assert rows[0]["defender"] == "Travis Hunter"
+        assert rows[0]["defender_team"] == "JAX"
+        assert rows[0]["receiver"] == "Zay Flowers"
+        assert rows[0]["receiver_team"] == "BAL"
+
+    def test_an_unrecognised_file_says_the_name_is_irrelevant(self, client):
+        resp = _upload(client, "a,b,c\n1,2,3\n", filename="team_lines.csv")
+        assert resp.status_code == 400
+        assert "filename is not used" in resp.json()["detail"]
