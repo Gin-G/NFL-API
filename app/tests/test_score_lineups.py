@@ -486,7 +486,10 @@ class TestWhichObjectiveWon:
         self._two_objectives(client, db_session)
         # A third build made after the scoring run, so it has no actuals yet --
         # which is what happens whenever you build again mid-week.
-        assert _post(client, csv=None, num_lineups=1,
+        # dedupe off: this slate's distinct lineups are already entered by
+        # `_two_objectives`, and a refusal to repeat one is not what is under
+        # test here.
+        assert _post(client, csv=None, num_lineups=1, dedupe=False,
                      objective="floor").json()["status"] == "success"
 
         body = client.get("/optimizer/performance", params={"season": SEASON}).json()

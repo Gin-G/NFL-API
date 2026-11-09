@@ -21,7 +21,8 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from database.models import FanduelSlate, PlayerProjection, ProjectionRun
+from database.models import (FanduelSlate, PlayerProjection, PlayerStat,
+                             ProjectionRun)
 from database.session import get_db
 from .utils import get_current_nfl_season
 
@@ -80,6 +81,32 @@ def _board(db, season: int, week: int) -> pd.DataFrame:
     stamps = [r.computed_at for r in rows if r.computed_at is not None]
     frame.attrs["computed_at"] = max(stamps) if stamps else None
     return frame
+
+
+def _history(db, season: int, week: int) -> pd.DataFrame:
+    """Each player's weekly FanDuel points BEFORE `week`, one row per game.
+
+    Weeks strictly before the slate's: a range that already contains the result
+    being projected would be hindsight dressed as context.
+    """
+    from .utils import fanduel_points
+
+    rows = db.query(PlayerStat).filter(PlayerStat.season == season,
+                                       PlayerStat.week < week).all()
+    records = []
+    for row in rows:
+        if (row.season_type or "REG") != "REG":
+            continue
+        name = row.player_display_name or row.player_name
+        if not name:
+            continue
+        records.append({
+            "player_name": name,
+            "week": row.week,
+            "fantasy_points": fanduel_points(
+                {c.name: getattr(row, c.name) for c in row.__table__.columns}),
+        })
+    return pd.DataFrame(records)
 
 
 def _slate_row(db, season: int, week: int, slate_id: Optional[int]):
@@ -175,6 +202,10 @@ def dfs_targets(
         None, description="Restrict to these games, e.g. 'DET@MIA,LV@SF'. A "
                           "FanDuel week file holds every game, so a main-slate "
                           "read has to say which ones it means."),
+    history: bool = Query(
+        True, description="Attach the lowest, highest and median each player "
+                          "has actually scored this season. Reading material: "
+                          "it never enters a projection, a value or a rank."),
     db: Session = Depends(get_db),
 ):
     """The slate grouped into price tiers per position, best value first.
@@ -224,7 +255,8 @@ def dfs_targets(
     wanted = targets.canonical_positions(positions.split(","))
     frame = targets.build(board, slate, name_key=name_key,
                           premium_min=premium_min, value_max=value_max,
-                          positions=wanted)
+                          positions=wanted,
+                          history=_history(db, season, week) if history else None)
     if frame.empty:
         return {"status": "no_overlap", "season": season, "week": week,
                 "message": "The board and the slate have no players in common."}
@@ -259,12 +291,22 @@ def dfs_targets(
                     "tier_rank": int(r["tier_rank"]),
                     "position_rank": int(r["position_rank"]),
                     "injury_flag": r.get("injury_flag") or None,
+                    # What he has actually scored. Reading material, not a
+                    # band: see dfs_targets.attach_history.
+                    "history": ({"games": int(r["hist_games"]),
+                                 "low": round(float(r["hist_low"]), 1),
+                                 "high": round(float(r["hist_high"]), 1),
+                                 "median": round(float(r["hist_median"]), 1)}
+                                if pd.notna(r.get("hist_games")) else None),
                     "summary": targets.summarize(r, ctx),
                     "context": ctx or None,
                 })
             groups.append({"position": pos, "tier": tier,
                            "band": _band_text(tier, premium_min, value_max),
                            "count": int(len(sel)), "players": players})
+
+    missing_positions = [p for p in wanted
+                         if not any(g["position"] == p for g in groups)]
 
     return {
         "status": "success",
@@ -293,6 +335,31 @@ def dfs_targets(
         "no_vegas": ("Implied totals and spreads are deliberately absent: a "
                      "line may be a benchmark but never an input."),
         "excluded_injury_flags": list(targets.UNROSTERABLE),
+        # A position asked for that came back with no group at all. DEF is the
+        # standing case and it is not a data gap: the model does not project
+        # defenses, so that slot runs on FanDuel's own FPPG and there is
+        # nothing here to tier. Returning ten groups where eleven were asked
+        # for, without a word, read as a missing week.
+        "positions_requested": list(wanted),
+        "positions_absent": missing_positions,
+        "positions_absent_note": (
+            None if not missing_positions else
+            ("No group for " + ", ".join(missing_positions) + ". "
+             + ("DEF is not projected by the model at all -- the optimizer "
+                "fills that slot from FanDuel's own FPPG on the uploaded "
+                "slate, so there is no projection here to rank. "
+                if "D" in missing_positions else "")
+             + "Anything else absent means the board and the slate share no "
+               "player at that position.")),
+        "history_note": (
+            "Each player's `history` is the lowest, highest and median he has "
+            "actually scored this season. It is description, not a band: "
+            "measured on 2026 weeks 5-9 (n=617), a low-to-high band covers "
+            "71.0% of a player's next result against the model band's 81.7%, "
+            "and both ends drift outward all season as the sample grows "
+            "rather than as the player changes. It never enters a projection, "
+            "a value or a rank." if history else
+            "History was not attached (`history=false`)."),
         "unmatched_on_slate": unmatched[:25],
         "unmatched_count": len(unmatched),
         "groups": groups,

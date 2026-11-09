@@ -270,9 +270,10 @@ class TestTheBuildIsRecorded:
         assert all(p.projected_points and p.salary for p in players)
 
     def test_pressing_build_twice_is_not_two_samples(self, client, db_session):
+        """With dedupe off, the same settings really are the same request."""
         _project(db_session)
-        first = _post(client).json()["build_id"]
-        second = _post(client).json()["build_id"]
+        first = _post(client, dedupe=False).json()["build_id"]
+        second = _post(client, dedupe=False).json()["build_id"]
 
         assert second != first
         (build,) = db_session.query(LineupBuild).all()
@@ -280,6 +281,36 @@ class TestTheBuildIsRecorded:
         # ... and the superseded build's lineups went with it.
         assert db_session.query(LineupEntry).count() == 1
         assert db_session.query(LineupPlayer).count() == 9
+
+    def test_but_a_deduped_rebuild_is_kept_beside_the_first(self, client, db_session):
+        """Because it is not the same lineups.
+
+        With dedupe on the second build returns the next-best set precisely
+        because the first set exists. Superseding it would delete the better
+        lineups it had just stepped around and keep only the ones it settled
+        for, leaving the week worse after two clicks of Build than after one.
+        """
+        _project(db_session)
+        first = _post(client).json()
+        second = _post(client).json()
+
+        assert second["build_id"] != first["build_id"]
+        assert second["deduped_against"] == len(first["data"])
+        assert {b.id for b in db_session.query(LineupBuild).all()} == \
+            {first["build_id"], second["build_id"]}
+
+        def names(body):
+            return {frozenset(p["player_name"] for p in l["players"])
+                    for l in body["data"]}
+
+        assert names(first) and not (names(first) & names(second))
+
+    def test_the_first_build_of_a_week_has_nothing_to_dedupe_against(
+            self, client, db_session):
+        _project(db_session)
+        body = _post(client).json()
+        assert body["deduped_against"] == 0
+        assert "nothing to dedupe against" in body["dedupe_note"]
 
     def test_different_settings_are_different_builds(self, client, db_session):
         _project(db_session)

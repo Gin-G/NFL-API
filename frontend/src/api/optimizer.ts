@@ -4,6 +4,9 @@ import type {
   ExposureResponse,
   LineupPerformance,
   LineupResponse,
+  PlayerPoolResponse,
+  PoolRulesResponse,
+  PoolRuleWrite,
   SlateCoverage,
   SlateList,
 } from './types'
@@ -112,6 +115,20 @@ export interface LineupRequest {
   aggression?: number
   /** A specific saved slate, for a Showdown file alongside a classic list. */
   slate_id?: number
+  /** Nicknames in EVERY lineup, comma-separated. */
+  lock?: string
+  /** Per-player rules: "Walker:lock, Allgeier:exclude, Hubbard:40". A bare
+   *  number is a target share of the lineups, not a cap. */
+  pool?: string
+  /** False ignores the pool saved against this slate for one build. */
+  use_saved_rules?: boolean
+  /** Never return a lineup already entered this week. On by default: the
+   *  builder is exact and deterministic, so the same settings return the same
+   *  nine men — 2026 week 9 entered 45 lineups and held 31 distinct ones. */
+  dedupe?: boolean
+  /** Count the lineups already entered toward the exposure percentages,
+   *  making them a share of the week rather than of this build. */
+  pool_exposure?: boolean
 }
 
 /** Build lineups: from an uploaded FanDuel slate CSV, or from the saved one. */
@@ -161,5 +178,55 @@ export function useBuildLineups() {
       queryClient.invalidateQueries({ queryKey: ['lineupPerformance'] })
       queryClient.invalidateQueries({ queryKey: ['lineupExposure'] })
     },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// The player pool
+//
+// The settings above apply to everyone at once. This is where a single player
+// gets an instruction: in every lineup, in none, or in a given share of them.
+
+/** The uploaded slate as a table: price, board, what the week already holds,
+ *  and the rule set against each player. */
+export function usePlayerPool(season: number, week?: number, enabled = true) {
+  return useQuery({
+    queryKey: ['playerPool', season, week],
+    queryFn: async () => {
+      const params: Record<string, number> = { season }
+      if (week !== undefined) params.week = week
+      const { data } = await apiClient.get<PlayerPoolResponse>('/optimizer/pool', { params })
+      return data
+    },
+    enabled,
+    staleTime: 1000 * 60,
+  })
+}
+
+export function useSetPoolRules(season: number, week?: number) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (rules: PoolRuleWrite[]) => {
+      const params: Record<string, number> = { season }
+      if (week !== undefined) params.week = week
+      const { data } = await apiClient.post<PoolRulesResponse>(
+        '/optimizer/pool', rules, { params })
+      return data
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['playerPool'] }),
+  })
+}
+
+export function useClearPoolRules(season: number, week?: number) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (nickname?: string) => {
+      const params: Record<string, number | string> = { season }
+      if (week !== undefined) params.week = week
+      if (nickname) params.nickname = nickname
+      const { data } = await apiClient.delete('/optimizer/pool', { params })
+      return data
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['playerPool'] }),
   })
 }

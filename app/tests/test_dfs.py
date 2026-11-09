@@ -6,7 +6,8 @@ from datetime import datetime
 
 import pytest
 
-from database.models import FanduelSlate, PlayerProjection, ProjectionRun
+from database.models import (FanduelSlate, PlayerProjection, PlayerStat,
+                             ProjectionRun)
 
 SEASON, WEEK = 2026, 9
 
@@ -33,7 +34,8 @@ BOARD = [
 
 @pytest.fixture(autouse=True)
 def _seed(db_session):
-    for model in (FanduelSlate, PlayerProjection, ProjectionRun):
+    for model in (FanduelSlate, PlayerProjection, PlayerStat,
+                  ProjectionRun):
         db_session.query(model).delete()
     db_session.add(FanduelSlate(
         season=SEASON, week=WEEK, contest="classic", slate_key="classic",
@@ -166,3 +168,102 @@ def _player(body, name):
             if p["player"] == name:
                 return p
     raise KeyError(name)
+
+
+def _played(db_session, name, weeks_points, player_id="p1"):
+    """Give a player a weekly record, in the shape nflverse stores it."""
+    for week, points in weeks_points:
+        # Built from receptions (0.5 each) and the remainder in yards, because
+        # receptions carry no bonus threshold: 312 rushing yards would be 31.2
+        # points PLUS the 100-yard bonus, and the fixture would not say what it
+        # meant to say.
+        catches = int(round(points / 0.5)) - 1
+        yards = round((points - 0.5 * catches) * 10)
+        db_session.add(PlayerStat(
+            season=SEASON, week=week, season_type="REG",
+            player_id=f"{player_id}-{week}", player_name=name,
+            player_display_name=name, position="RB", recent_team="DET",
+            receptions=catches, receiving_yards=yards))
+    db_session.commit()
+
+
+class TestWhatHeHasActuallyScored:
+    """The range is description, not a band: measured on 617 player-weeks it
+    covers less of the next result than the model's floor/ceiling does."""
+
+    def test_the_range_is_on_the_row_and_in_the_summary(self, client, db_session):
+        _played(db_session, "Alpha Back",
+                [(1, 31.2), (2, 8.4), (3, 19.0), (4, 22.6), (5, 11.1),
+                 (6, 27.3), (7, 4.2), (8, 14.0)])
+        player = _player(_get(client).json(), "Alpha Back")
+        assert player["history"] == {"games": 8, "low": 4.2, "high": 31.2,
+                                     "median": 16.5}
+        assert "Has scored 4.2 to 31.2 in 8 games" in player["summary"]
+
+    def test_it_only_counts_weeks_before_the_slate(self, client, db_session):
+        """A range holding the result being projected is hindsight."""
+        _played(db_session, "Alpha Back", [(1, 10.0), (2, 12.0), (3, 14.0),
+                                           (WEEK, 99.0)])
+        player = _player(_get(client).json(), "Alpha Back")
+        assert player["history"]["games"] == 3
+        assert player["history"]["high"] == 14.0
+
+    def test_a_player_with_no_record_has_no_range(self, client, db_session):
+        _played(db_session, "Alpha Back", [(1, 10.0), (2, 12.0), (3, 14.0)])
+        assert _player(_get(client).json(), "Cheap Back")["history"] is None
+
+    def test_it_can_be_turned_off(self, client, db_session):
+        _played(db_session, "Alpha Back", [(1, 10.0), (2, 12.0), (3, 14.0)])
+        body = _get(client, history="false").json()
+        assert _player(body, "Alpha Back")["history"] is None
+        assert "not attached" in body["history_note"]
+
+    def test_the_note_says_it_does_not_rank(self, client, db_session):
+        body = _get(client).json()
+        assert "never enters a projection, a value or a rank" in body["history_note"]
+
+    def test_the_range_does_not_reorder_anything(self, client, db_session):
+        plain = _get(client).json()
+        _played(db_session, "Cheap Back", [(1, 70.0), (2, 72.0), (3, 75.0)],
+                player_id="p2")
+        _played(db_session, "Alpha Back", [(1, 0.1), (2, 0.2), (3, 0.3)])
+        loud = _get(client).json()
+
+        def order(body):
+            return [(g["position"], g["tier"], [p["player"] for p in g["players"]])
+                    for g in body["groups"]]
+
+        assert order(plain) == order(loud)
+
+    def test_projecting_above_his_best_is_said_outright(self, client, db_session):
+        _played(db_session, "Alpha Back", [(1, 2.0), (2, 3.0), (3, 4.0)])
+        player = _player(_get(client).json(), "Alpha Back")
+        assert "We project above anything done this season." in player["summary"]
+
+
+class TestAPositionWithNoGroup:
+    """DEF vanished from the response without a word, because the board holds
+    no defenses — ten groups where eleven were asked for reads as a bad week."""
+
+    def test_a_board_with_defenses_has_a_def_group(self, client):
+        body = _get(client).json()
+        assert any(g["position"] == "D" for g in body["groups"])
+        # TE really is absent from this slate, which is the other half of the
+        # point: the list names what is missing rather than claiming nothing is.
+        assert "D" not in body["positions_absent"]
+        assert body["positions_absent"] == ["TE"]
+
+    def test_without_them_it_says_so_and_says_why(self, client, db_session):
+        db_session.query(PlayerProjection).filter(
+            PlayerProjection.position == "D").delete()
+        db_session.commit()
+        body = _get(client).json()
+        assert not any(g["position"] == "D" for g in body["groups"])
+        assert "D" in body["positions_absent"]
+        assert "not projected by the model" in body["positions_absent_note"]
+        assert "FanDuel's own FPPG" in body["positions_absent_note"]
+
+    def test_a_position_not_asked_for_is_not_reported_absent(self, client):
+        body = _get(client, positions="QB,RB").json()
+        assert body["positions_requested"] == ["QB", "RB"]
+        assert body["positions_absent"] == []

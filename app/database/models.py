@@ -769,6 +769,15 @@ class LineupBuild(Base):
     # told apart after the fact.
     projection_computed_at = Column(DateTime)
 
+    # The player pool in force, as JSON, and whether this build was told what
+    # had already been entered. 2026 week 9 entered 45 lineups and held 31
+    # distinct ones, because six builds each re-solved the same slate from
+    # scratch; without these two a repeat cannot be told from a choice.
+    player_rules         = Column(Text)     # {"Nickname": {"min": x, "max": y}}
+    deduped_against      = Column(Integer)  # lineups already entered that it avoided
+    duplicates_skipped   = Column(Integer)  # solved lineups dropped as already entered
+    pool_exposure        = Column(Integer)  # 1 = percentages counted the whole week
+
     # Filled in once the week has actuals, by scripts.score_lineups.
     fppg_points          = Column(Float)    # FanDuel's own FPPG lineup, actually scored
     fppg_projected       = Column(Float)    # ... and what FPPG said it would score
@@ -776,6 +785,46 @@ class LineupBuild(Base):
     scored_at            = Column(DateTime)
 
     __table_args__ = (Index("ix_lineup_build_week", "season", "week"),)
+
+
+class SlatePlayerRule(Base):
+    """What the player pool says about one player on one slate.
+
+    One row per player the user has an opinion about -- locked in, faded out,
+    or held to a share of the lineups -- so the opinion outlives the request
+    that set it and every later build obeys it without being told again. A
+    player with no row is unconstrained, which is why this table stays small:
+    it holds decisions, not the slate.
+
+    `min_exposure` and `max_exposure` are percentages of the lineups, and they
+    are one dial: 0/0 is an exclusion, 100/100 is a lock, 40/40 is "about four
+    in ten". A floor is the thing the global `max_usage_percentage` could never
+    express -- it caps everyone equally, and can neither require a player nor
+    name one.
+
+    Keyed (slate_id, nickname) rather than (season, week): prices and the
+    player list both move during the week, a re-upload REPLACES the slate, and
+    a rule set against Wednesday's file should not silently attach itself to
+    Saturday's different contest. `nickname` is FanDuel's own spelling, because
+    that is what the optimizer matches on.
+    """
+    __tablename__ = "slate_player_rules"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    slate_id     = Column(Integer, index=True)
+    season       = Column(Integer, index=True)
+    week         = Column(Integer, index=True)
+    nickname     = Column(String, index=True)
+    min_exposure = Column(Float)            # null = no floor
+    max_exposure = Column(Float)            # null = no ceiling
+    note         = Column(Text)             # why, in the user's own words
+    updated_at   = Column(DateTime, default=datetime.utcnow,
+                          onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("slate_id", "nickname", name="uq_slate_player_rule"),
+        Index("ix_slate_player_rule_week", "season", "week"),
+    )
 
 
 class LineupEntry(Base):
@@ -893,7 +942,11 @@ def apply_light_migrations(engine) -> None:
               ("lineup_builds", "ownership_weight"): "FLOAT",
               ("lineup_players", "fanduel_id"): "VARCHAR",
               ("matchup_signals", "scored_at"): "TIMESTAMP",
-              ("lineup_builds", "projection_computed_at"): "TIMESTAMP"}
+              ("lineup_builds", "projection_computed_at"): "TIMESTAMP",
+              ("lineup_builds", "player_rules"): "TEXT",
+              ("lineup_builds", "deduped_against"): "INTEGER",
+              ("lineup_builds", "duplicates_skipped"): "INTEGER",
+              ("lineup_builds", "pool_exposure"): "INTEGER"}
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
     for (table, col), coltype in wanted.items():

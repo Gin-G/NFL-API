@@ -15,18 +15,20 @@ TensorFlow (the package defers its model imports), so the web image stays small.
 """
 import hashlib
 import io
+import json
 import logging
+from collections import Counter
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from database.models import (FanduelSlate, LineupBuild, LineupEntry, LineupPlayer,
-                             PlayerProjection, Schedule)
+                             PlayerProjection, PlayerStat, Schedule, SlatePlayerRule)
 from database.session import get_db
 
 from .utils import get_current_nfl_season
@@ -461,6 +463,145 @@ def _float_or_none(value):
         return None
 
 
+# --- the player pool: lock, exclude, exposure -----------------------------
+#
+# Three things the global exposure cap cannot do: require a player, name a
+# player, or survive the request that asked for it. They are one dial -- 0% is
+# an exclusion, 100% is a lock -- so they share a table and a parser.
+
+def _rule_kind(low, high) -> str:
+    """The word for a rule, for a table a person reads."""
+    if high is not None and high <= 0:
+        return "exclude"
+    if low is not None and low >= 100:
+        return "lock"
+    if low is not None and high is not None and low == high:
+        return "target"
+    if low is not None and high is not None:
+        return "band"
+    return "floor" if low is not None else "cap"
+
+
+def _rule_payload(row: SlatePlayerRule) -> dict:
+    return {"min_exposure": row.min_exposure, "max_exposure": row.max_exposure,
+            "kind": _rule_kind(row.min_exposure, row.max_exposure),
+            "note": row.note,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+
+
+def _saved_rules(db, slate_id: Optional[int]) -> dict:
+    """``{nickname: {"min": x, "max": y}}`` stored against one slate."""
+    if slate_id is None:
+        return {}
+    out = {}
+    for row in db.query(SlatePlayerRule).filter(
+            SlatePlayerRule.slate_id == slate_id).all():
+        if row.min_exposure is None and row.max_exposure is None:
+            continue
+        out[row.nickname] = {"min": row.min_exposure, "max": row.max_exposure}
+    return out
+
+
+def _parse_pool_spec(spec: str) -> dict:
+    """``"Walker:lock, Allgeier:exclude, Hubbard:40, Gibbs:20-60"`` as rules.
+
+    A compact form because the whole request is multipart form fields and a
+    nested JSON body cannot ride alongside an uploaded file. Names hold no
+    colons and no commas, so splitting on them is safe; the value is whatever
+    follows the LAST colon.
+    """
+    rules = {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{part!r} is not a pool rule. Write them as "
+                        "'Name:lock', 'Name:exclude', 'Name:40' or "
+                        "'Name:20-60', separated by commas."))
+        name, _, value = part.rpartition(":")
+        name, value = name.strip(), value.strip().lower()
+        if not name:
+            raise HTTPException(status_code=400,
+                                detail=f"{part!r} names no player.")
+        if value in ("lock", "exclude"):
+            rules[name] = value
+            continue
+        if "-" in value:
+            low, _, high = value.partition("-")
+            try:
+                rules[name] = {"min": float(low), "max": float(high)}
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{value!r} for {name} is not a percentage range.")
+            continue
+        try:
+            rules[name] = float(value)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{value!r} for {name} is not a percentage, 'lock' or "
+                        "'exclude'."))
+    return rules
+
+
+def _entered_lineups(db, season: int, week: int, *, slate_id=None):
+    """Every lineup already recorded for the week, as sets of nicknames.
+
+    This is what stops six builds being one build six times. 2026 week 9
+    entered 45 lineups and held 31 distinct, because the builder is exact and
+    deterministic: re-run with the same settings it returns the same nine men.
+    """
+    builds = db.query(LineupBuild).filter(LineupBuild.season == season,
+                                          LineupBuild.week == week)
+    if slate_id is not None:
+        builds = builds.filter(LineupBuild.slate_id == slate_id)
+    build_ids = [b.id for b in builds.all()]
+    if not build_ids:
+        return []
+    entries = db.query(LineupEntry).filter(
+        LineupEntry.build_id.in_(build_ids)).all()
+    if not entries:
+        return []
+    by_lineup: dict = {}
+    for player in db.query(LineupPlayer).filter(
+            LineupPlayer.lineup_id.in_([e.id for e in entries])).all():
+        by_lineup.setdefault(player.lineup_id, set()).add(player.player_name)
+    return [names for names in by_lineup.values() if names]
+
+
+def _player_history(db, season: int, week: int) -> pd.DataFrame:
+    """Each player's own weekly FanDuel points before `week`, for reading.
+
+    Description, not prediction: measured on 2026 weeks 5-9, a band of a
+    player's lowest and highest covers 71.0% of his next result against the
+    model band's 81.7%. It is here because it says in one line what the player
+    has actually done, which neither a projection nor a band shows.
+    """
+    from .utils import fanduel_points
+
+    rows = db.query(PlayerStat).filter(
+        PlayerStat.season == season, PlayerStat.week < week).all()
+    if not rows:
+        return pd.DataFrame()
+    records = []
+    for row in rows:
+        if (row.season_type or "REG") != "REG":
+            continue
+        name = row.player_display_name or row.player_name
+        if not name:
+            continue
+        records.append({
+            "player_name": name, "week": row.week,
+            "fantasy_points": fanduel_points(
+                {c.name: getattr(row, c.name) for c in row.__table__.columns}),
+        })
+    return pd.DataFrame(records)
+
+
 def _drop_superseded(db, settings: dict) -> None:
     """Forget an earlier UNSCORED build with exactly these settings.
 
@@ -483,7 +624,9 @@ def _record_build(db, lineups, *, season: int, week: int, slate_id: Optional[int
                   contest: str, slate: str, objective: str, salary_cap: int,
                   max_usage_percentage: int, excludes, num_requested: int,
                   max_per_team=None, stack_qb=None, rb_with_qb=None,
-                  ownership_weight=None, projection_computed_at=None):
+                  ownership_weight=None, projection_computed_at=None,
+                  player_rules=None, pool_exposure=False, deduped_against=0,
+                  duplicates_skipped=0):
     """Write the build and its lineups; return the build id, or None.
 
     Wrapped whole in try/except on purpose, the same way the volume context is:
@@ -497,13 +640,25 @@ def _record_build(db, lineups, *, season: int, week: int, slate_id: Optional[int
             exclude_players=",".join(excludes) if excludes else None,
             num_requested=int(num_requested),
             max_per_team=max_per_team, stack_qb=stack_qb, rb_with_qb=rb_with_qb,
-            ownership_weight=ownership_weight)
+            ownership_weight=ownership_weight,
+            player_rules=json.dumps(player_rules, sort_keys=True) if player_rules
+            else None,
+            pool_exposure=int(bool(pool_exposure)))
         # The vintage is recorded but is NOT part of what makes two builds the
         # same request: rebuilding after the board moves supersedes the older
         # lineups, which is the whole point of rebuilding.
-        _drop_superseded(db, settings)
+        #
+        # A build that AVOIDED lineups already entered is a different matter. It
+        # is additive by construction -- it returned the next-best set precisely
+        # because the first set exists -- so superseding would delete the better
+        # lineups it had just stepped around, leaving only the ones it settled
+        # for. Two clicks of Build then make the week worse than one.
+        if not deduped_against:
+            _drop_superseded(db, settings)
         build = LineupBuild(**settings, num_built=len(lineups),
                             built_at=datetime.utcnow(),
+                            deduped_against=int(deduped_against or 0),
+                            duplicates_skipped=int(duplicates_skipped or 0),
                             projection_computed_at=projection_computed_at)
         db.add(build)
         db.flush()
@@ -562,6 +717,19 @@ async def build_lineups(
     salary_cap: int = Form(60000),
     max_usage_percentage: int = Form(50),
     exclude: str = Form(""),
+    lock: str = Form("", description="Nicknames in EVERY lineup, comma-separated."),
+    pool: str = Form(
+        "", description="Per-player rules: 'Walker:lock, Allgeier:exclude, "
+                        "Hubbard:40, Gibbs:20-60'. A bare number is a target "
+                        "share of the lineups, not a cap."),
+    use_saved_rules: bool = Form(
+        True, description="Apply the pool saved against this slate "
+                          "(GET/POST /optimizer/pool). Request rules win."),
+    dedupe: bool = Form(
+        True, description="Never return a lineup already entered this week."),
+    pool_exposure: bool = Form(
+        False, description="Count lineups already entered toward the exposure "
+                           "percentages, making them a share of the week."),
     slate: str = Form("all"),
     one_kicker: bool = Form(True),
     max_per_team: int = Form(4),
@@ -594,6 +762,26 @@ async def build_lineups(
 
     `max_usage_percentage` caps how many of the returned lineups one player can
     appear in, which is what keeps five lineups from being one lineup five times.
+
+    It cannot, however, require a player, name a player, or outlive the request
+    — so `pool`, `lock` and the saved pool do that. They are one dial: 0% is an
+    exclusion, 100% is a lock, and `Hubbard:40` means he appears in about four
+    lineups in ten, enforced as a floor as well as a ceiling. A rule saved
+    against the slate (POST /optimizer/pool) applies to every later build
+    without being resent, and anything in this request wins over it.
+
+    `dedupe` is on because the builder is exact and deterministic: re-run with
+    the same settings it returns the same nine men. 2026 week 9 entered 45
+    lineups across six builds and held 31 distinct ones. With it on, the lineups
+    already recorded for the week are never returned again — the build steps
+    down to the next-best set instead — and such a build never supersedes the
+    earlier one, since it only exists because that one does.
+
+    `pool_exposure` is off by default because it changes what a percentage
+    means. On, the percentages count the whole week rather than this build,
+    which is the only thing that can hold a player down across builds: in week
+    9 six builds each honoured a 46-49% cap and pooled to 55.6% on seven
+    players, who then returned 66.54 points across seven of nine slots.
 
     The remaining three say how the nine picks may relate to each other, which
     is the one thing a board of per-player projections cannot express — it is
@@ -742,12 +930,57 @@ async def build_lineups(
                            "week yet", ownership_weight)
     if num_lineups is None:
         num_lineups = 5
+
+    # The pool: what is saved against this slate, then whatever this request
+    # said, which wins. `lock` and `exclude` are the same dial at its ends.
+    rules = {}
+    if use_saved_rules and slate_row is not None:
+        rules.update(_saved_rules(db, slate_row.id))
+    rules.update(_parse_pool_spec(pool))
+    for nickname in [n.strip() for n in lock.split(",") if n.strip()]:
+        rules[nickname] = "lock"
+    for nickname in excludes:
+        rules.setdefault(nickname, "exclude")
+
+    seen = _entered_lineups(db, season, week) if dedupe else []
+    report: dict = {}
+    pool_kwargs = {}
+    if not showdown:
+        # optimize_showdown takes neither, and sending them would be a
+        # TypeError rather than a quiet no-op on an older package in the image.
+        pool_kwargs = {"player_rules": rules or None, "seen_lineups": seen or None,
+                       "pool_exposure": bool(pool_exposure), "report": report}
+    elif rules or seen:
+        logger.info("pool rules and dedupe are classic-only; ignored for a "
+                    "showdown build")
+
     build = opt.optimize_showdown if showdown else opt.optimize_lineups
     try:
         lineups = build(
             merged, num_lineups=num_lineups, salary_cap=salary_cap,
             exclude_players=excludes or None,
-            max_usage_percentage=max_usage_percentage, objective=objective, **extra)
+            max_usage_percentage=max_usage_percentage, objective=objective,
+            **extra, **pool_kwargs)
+    except TypeError as exc:
+        # A pool rule the package in this image cannot take is worth saying
+        # plainly; silently building without it would hand back lineups that
+        # ignore a lock.
+        if pool_kwargs and ("player_rules" in str(exc) or "seen_lineups" in str(exc)
+                            or "pool_exposure" in str(exc) or "report" in str(exc)):
+            logger.exception("nfl_projections in this image has no player pool")
+            raise HTTPException(
+                status_code=503,
+                detail=("This build of the service cannot apply a player pool "
+                        "or dedupe lineups; its nfl_projections predates them. "
+                        "Rebuild the image."))
+        logger.exception("Lineup optimisation failed")
+        raise HTTPException(status_code=422, detail=f"Could not build lineups: {exc}")
+    except ValueError as exc:
+        # The pool's own refusals -- a misspelled lock, a locked player the
+        # slate says is out, locks over the cap -- are the user's to fix and
+        # say exactly what is wrong.
+        logger.info("player pool refused the build: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         logger.exception("Lineup optimisation failed")
         raise HTTPException(status_code=422, detail=f"Could not build lineups: {exc}")
@@ -757,6 +990,20 @@ async def build_lineups(
             detail=(f"No Showdown lineup fits. Five players at MVP pricing have to come in "
                     f"under ${salary_cap:,}, and {len(merged)} players are in this pool "
                     f"after exclusions."))
+    if not lineups and report.get("duplicates_skipped"):
+        # Dedupe emptied it, which is a different thing from nothing fitting:
+        # every lineup this slate and these settings can produce is already
+        # entered. "No lineup fits under the cap" would send the reader to the
+        # cap, which is innocent.
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Every lineup this build found is already entered for "
+                    f"{season} week {week} — {report['duplicates_skipped']} of "
+                    f"them, against the {len(seen)} lineups already recorded. "
+                    "This slate has no further distinct lineup at these "
+                    "settings: change the objective, the cap or the pool to "
+                    "open different ones up, or send `dedupe=false` to allow a "
+                    "repeat."))
     if not lineups:
         # Say WHICH slot could not be filled. The first real slate upload failed
         # with a generic version of this message and the cause — bare "RB" roster
@@ -817,7 +1064,11 @@ async def build_lineups(
             stack_qb=None if showdown else int(stack_qb),
             rb_with_qb=None if showdown else int(bool(rb_with_qb)),
             ownership_weight=None if showdown else float(ownership_weight or 0.0),
-            projection_computed_at=projections.attrs.get("computed_at"))
+            projection_computed_at=projections.attrs.get("computed_at"),
+            player_rules=report.get("rules_applied") or None,
+            pool_exposure=bool(pool_exposure) and not showdown,
+            deduped_against=len(seen),
+            duplicates_skipped=report.get("duplicates_skipped", 0))
 
     out = []
     for i, lineup in enumerate(lineups, start=1):
@@ -919,6 +1170,22 @@ async def build_lineups(
             "from_model": p["from_model"],
         } for lineup in out for p in lineup["players"]], len(out)),
         "exposure_cap": max_usage_percentage,
+        # What the pool asked for and what it got. A lock that silently did
+        # nothing is the failure mode worth designing against, so the rules in
+        # force are echoed rather than assumed.
+        "player_rules": report.get("rules_applied") or {},
+        "pool_exposure": bool(pool_exposure) and not showdown,
+        "deduped_against": len(seen),
+        "duplicates_skipped": report.get("duplicates_skipped", 0),
+        "pool_warnings": report.get("warnings") or [],
+        "dedupe_note": (
+            None if not dedupe else
+            (f"{len(seen)} lineup(s) already recorded for this week were held "
+             "out, so these are additional bets rather than the same roster "
+             "re-solved."
+             if seen else
+             "Nothing was entered for this week yet, so there was nothing to "
+             "dedupe against.")),
         "data": out,
     }
 
@@ -999,6 +1266,315 @@ def build_upload_csv(
     name = f"fanduel-week{build.week}-build{build_id}-{len(lineups)}-lineups.csv"
     return Response(content=text, media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/pool")
+def player_pool(
+    season: Optional[int] = Query(None),
+    week: Optional[int] = Query(None),
+    slate_id: Optional[int] = Query(None, description="A specific saved slate."),
+    position: Optional[str] = Query(
+        None, description="Comma-separated, e.g. 'RB,WR'. Omit for all."),
+    search: Optional[str] = Query(None, description="Substring of the name."),
+    only_rules: bool = Query(False, description="Only players with a rule set."),
+    history: bool = Query(True, description="Attach each player's own weekly range."),
+    db: Session = Depends(get_db),
+):
+    """The uploaded slate as a table: every player, what we think, what you said.
+
+    This is the thing the optimizer's settings could not express. The global
+    exposure cap applies to everyone equally and cannot require anybody, so
+    knowing you want a particular back left no way to say it. Here each row
+    carries its own rule — locked in, faded out, or held to a share of the
+    lineups — and the rule is stored against the slate, so every later build
+    obeys it without being told again.
+
+    `entered` is how much of the week that player already has, pooled across
+    every recorded build, because the decision being made here is usually a
+    reaction to it. `history` is what he has actually scored, which is
+    description and not prediction: as a band, a player's own low and high cover
+    71.0% of his next result against the model band's 81.7% (2026 weeks 5-9,
+    n=617), and both ends drift outward all season as the sample grows rather
+    than as the player changes. It is here because it reads well, not because it
+    ranks.
+    """
+    from nfl_projections import optimizer as opt
+
+    season = season or get_current_nfl_season()
+    if week is None:
+        weeks = [w for (w,) in db.query(FanduelSlate.week).filter(
+            FanduelSlate.season == season).distinct().all() if w is not None]
+        if not weeks:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No slate CSV saved for {season}. Upload a contest "
+                       "player list to /optimizer/lineups first.")
+        week = max(weeks)
+
+    slate_row = _stored_slate(db, season, week, slate_id)
+    if slate_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"No slate CSV saved for {season} week {week}. Salaries are "
+                    "the one thing here that cannot be derived, so the pool "
+                    "needs the uploaded contest player list."))
+    salaries = _csv_frame(slate_row.content or "", "The saved slate")
+    projections = _projection_frame(db, season, week)
+    merged = opt.merge_fanduel_salaries(salaries, projections) \
+        if not projections.empty else salaries.assign(fanduel_fantasy_points=np.nan)
+    merged = _attach_defense(merged, season, week)
+    merged = _attach_ownership(merged, season, week)
+
+    ranges = {}
+    if history:
+        frame = _player_history(db, season, week)
+        if not frame.empty:
+            points = pd.to_numeric(frame["fantasy_points"], errors="coerce")
+            keyed = pd.DataFrame({
+                "_key": frame["player_name"].map(opt.normalize_name),
+                "_p": points}).dropna()
+            stats = keyed.groupby("_key")["_p"].agg(["size", "min", "max", "median"])
+            ranges = {k: row for k, row in stats.iterrows()}
+
+    rules = {r.nickname: r for r in db.query(SlatePlayerRule).filter(
+        SlatePlayerRule.slate_id == slate_row.id).all()}
+    entered = Counter(n for names in _entered_lineups(db, season, week)
+                      for n in names)
+    lineups_entered = len(_entered_lineups(db, season, week))
+
+    wanted = None
+    if position:
+        wanted = {p.strip().upper() for p in position.split(",") if p.strip()}
+    needle = (search or "").strip().lower()
+
+    rows = []
+    for _, r in merged.iterrows():
+        nickname = str(r.get("Nickname") or "")
+        if not nickname:
+            continue
+        pos = str(r.get("Position") or "").upper()
+        if wanted and pos not in wanted:
+            continue
+        if needle and needle not in nickname.lower():
+            continue
+        rule = rules.get(nickname)
+        if only_rules and rule is None:
+            continue
+        salary = pd.to_numeric(r.get("Salary"), errors="coerce")
+        proj = pd.to_numeric(r.get("fanduel_fantasy_points"), errors="coerce")
+        fppg = pd.to_numeric(r.get("FPPG"), errors="coerce")
+        used = entered.get(nickname, 0)
+        row = {
+            "nickname": nickname,
+            "position": pos,
+            "roster_position": r.get("Roster Position"),
+            "team": r.get("Team"),
+            "opponent": r.get("Opponent"),
+            "game": r.get("Game"),
+            "salary": int(salary) if pd.notna(salary) else None,
+            "fppg": round(float(fppg), 2) if pd.notna(fppg) else None,
+            "injury_flag": (str(r.get("Injury Indicator") or "").strip().upper()
+                            or None),
+            "projected_points": round(float(proj), 2) if pd.notna(proj) else None,
+            # DEF is not projected by the model at all; its slot runs on
+            # FanDuel's own FPPG, which is why `from_model` is on the row.
+            "from_model": bool(pd.notna(proj)),
+            "rosterable": (str(r.get("Injury Indicator") or "").strip().upper()
+                           not in opt.EXCLUDED_INJURY_STATUSES),
+            "entered_lineups": used,
+            "entered_exposure": (round(100.0 * used / lineups_entered, 1)
+                                 if lineups_entered else None),
+            "rule": _rule_payload(rule) if rule is not None else None,
+        }
+        for key, column in (("floor", "floor"), ("ceiling", "ceiling"),
+                            ("median", "projection_median"),
+                            ("ownership", "ownership")):
+            value = pd.to_numeric(r.get(column), errors="coerce")
+            row[key] = round(float(value), 2) if pd.notna(value) else None
+        if pd.notna(proj) and pd.notna(salary) and salary:
+            row["value"] = round(float(proj) / (float(salary) / 1000.0), 3)
+        else:
+            row["value"] = None
+        stats = ranges.get(opt.normalize_name(nickname))
+        row["history"] = (None if stats is None else {
+            "games": int(stats["size"]), "low": round(float(stats["min"]), 1),
+            "high": round(float(stats["max"]), 1),
+            "median": round(float(stats["median"]), 1)})
+        rows.append(row)
+
+    rows.sort(key=lambda r: (r["position"], -(r["value"] or -1)))
+    return {
+        "status": "success",
+        "season": season,
+        "week": week,
+        "slate": _slate_summary(slate_row),
+        "count": len(rows),
+        "players_in_file": len(salaries),
+        "lineups_entered": lineups_entered,
+        "rules_set": len(rules),
+        "positions": sorted({r["position"] for r in rows}),
+        "note": ("A rule is a share of the lineups: 0 is an exclusion, 100 is a "
+                 "lock, 40 is about four in ten and binds as a floor as well as "
+                 "a ceiling. `entered_exposure` is what the week already holds, "
+                 "pooled across every build. `history` is what he has scored, "
+                 "for reading only -- it never enters a projection or a rank."),
+        "data": rows,
+    }
+
+
+@router.post("/pool")
+def set_player_rules(
+    season: Optional[int] = Query(None),
+    week: Optional[int] = Query(None),
+    slate_id: Optional[int] = Query(None),
+    rules: List[dict] = Body(
+        ..., description="One object per player: {nickname, min_exposure, "
+                         "max_exposure, note}, or {nickname, rule: 'lock'}. "
+                         "Nulls for both clear the rule."),
+    db: Session = Depends(get_db),
+):
+    """Set, change or clear the pool rules for one slate.
+
+    Stored against the slate rather than the week, because a re-upload replaces
+    the slate: prices move midweek and a rule set against Wednesday's file
+    should not silently attach itself to Saturday's different contest. Every
+    nickname is checked against the stored CSV first — FanDuel's spelling is the
+    one that counts, and a rule naming nobody would be a lock that quietly does
+    nothing.
+    """
+    from nfl_projections import optimizer as opt
+
+    season = season or get_current_nfl_season()
+    if week is None:
+        weeks = [w for (w,) in db.query(FanduelSlate.week).filter(
+            FanduelSlate.season == season).distinct().all() if w is not None]
+        if not weeks:
+            raise HTTPException(status_code=404,
+                                detail=f"No slate CSV saved for {season}.")
+        week = max(weeks)
+    slate_row = _stored_slate(db, season, week, slate_id)
+    if slate_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No slate CSV saved for {season} week {week}.")
+
+    salaries = _csv_frame(slate_row.content or "", "The saved slate")
+    on_slate = {str(n): str(f or "").strip().upper() for n, f in zip(
+        salaries["Nickname"],
+        salaries.get("Injury Indicator", pd.Series("", index=salaries.index)))}
+
+    parsed, cleared = {}, []
+    for item in rules:
+        nickname = str(item.get("nickname") or "").strip()
+        if not nickname:
+            raise HTTPException(status_code=400,
+                                detail="Every rule needs a `nickname`.")
+        if nickname not in on_slate:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"{nickname!r} is not on slate {slate_row.id}. FanDuel's "
+                        "spelling is the one that counts -- check it against "
+                        "GET /optimizer/pool."))
+        word = str(item.get("rule") or "").strip().lower()
+        if word in ("clear", "none", "free", ""):
+            low, high = item.get("min_exposure"), item.get("max_exposure")
+        elif word == "lock":
+            low, high = 100.0, 100.0
+        elif word == "exclude":
+            low, high = 0.0, 0.0
+        else:
+            try:
+                low = high = float(word)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"rule {word!r} for {nickname} is not a percentage, "
+                            "'lock', 'exclude' or 'clear'."))
+        for value, label in ((low, "min_exposure"), (high, "max_exposure")):
+            if value is not None and not 0 <= float(value) <= 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label} for {nickname} is {value}; it is a "
+                           "percentage, 0 to 100.")
+        if low is not None and high is not None and float(low) > float(high):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{nickname} would have a {low}% floor above its "
+                        f"{high}% ceiling."))
+        if (low is not None and float(low) > 0
+                and on_slate[nickname] in opt.EXCLUDED_INJURY_STATUSES):
+            raise HTTPException(
+                status_code=422,
+                detail=(f"{nickname} is marked {on_slate[nickname]} on this "
+                        "slate, so he cannot be required. FanDuel will not pay "
+                        "him."))
+        if low is None and high is None:
+            cleared.append(nickname)
+        parsed[nickname] = (low, high, item.get("note"))
+
+    for nickname, (low, high, note) in parsed.items():
+        row = db.query(SlatePlayerRule).filter(
+            SlatePlayerRule.slate_id == slate_row.id,
+            SlatePlayerRule.nickname == nickname).first()
+        if low is None and high is None:
+            if row is not None:
+                db.delete(row)
+            continue
+        if row is None:
+            row = SlatePlayerRule(slate_id=slate_row.id, season=season,
+                                  week=week, nickname=nickname)
+            db.add(row)
+        row.min_exposure = None if low is None else float(low)
+        row.max_exposure = None if high is None else float(high)
+        row.note = note
+        row.updated_at = datetime.utcnow()
+    db.commit()
+
+    kept = db.query(SlatePlayerRule).filter(
+        SlatePlayerRule.slate_id == slate_row.id).all()
+    return {
+        "status": "success",
+        "season": season,
+        "week": week,
+        "slate_id": slate_row.id,
+        "set": len([n for n in parsed if n not in cleared]),
+        "cleared": cleared,
+        "rules": {r.nickname: _rule_payload(r) for r in kept},
+        "note": ("Every build for this slate now applies these unless it sends "
+                 "`use_saved_rules=false`, and a rule in the request wins."),
+    }
+
+
+@router.delete("/pool")
+def clear_player_rules(
+    season: Optional[int] = Query(None),
+    week: Optional[int] = Query(None),
+    slate_id: Optional[int] = Query(None),
+    nickname: Optional[str] = Query(
+        None, description="One player. Omit to clear the whole pool."),
+    db: Session = Depends(get_db),
+):
+    """Clear one player's rule, or the whole pool for a slate."""
+    season = season or get_current_nfl_season()
+    if week is None:
+        weeks = [w for (w,) in db.query(FanduelSlate.week).filter(
+            FanduelSlate.season == season).distinct().all() if w is not None]
+        week = max(weeks) if weeks else None
+    slate_row = _stored_slate(db, season, week, slate_id) if week else None
+    if slate_row is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No slate CSV saved for {season} week {week}.")
+    query = db.query(SlatePlayerRule).filter(
+        SlatePlayerRule.slate_id == slate_row.id)
+    if nickname:
+        query = query.filter(SlatePlayerRule.nickname == nickname)
+    rows = query.all()
+    for row in rows:
+        db.delete(row)
+    db.commit()
+    return {"status": "success", "season": season, "week": week,
+            "slate_id": slate_row.id, "cleared": len(rows),
+            "nickname": nickname}
 
 
 @router.get("/slate-coverage")

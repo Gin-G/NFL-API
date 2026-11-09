@@ -8,6 +8,7 @@ import {
 import { getAvailableSeasons, getDefaultSeason, getCurrentNFLWeek } from '../utils/nflDate'
 import PageHeader from '../components/ui/PageHeader'
 import ErrorCard from '../components/ui/ErrorCard'
+import PlayerPoolTable from '../components/PlayerPoolTable'
 
 const SEASONS = getAvailableSeasons()
 const WEEKS = Array.from({ length: 18 }, (_, i) => i + 1)
@@ -43,6 +44,16 @@ export default function Optimizer() {
   const [contestType, setContestType] = useState('')
   const [aggression, setAggression] = useState(50)
   const [exclude, setExclude] = useState('')
+  // Never hand back a lineup already entered. On by default: the builder is
+  // exact and deterministic, so the same settings return the same nine men —
+  // 2026 week 9 entered 45 lineups across six builds and held 31 distinct.
+  const [dedupe, setDedupe] = useState(true)
+  // Count what is already entered toward the exposure percentages. Off by
+  // default because it changes what a percentage means; on, it is the only
+  // thing that holds a player down ACROSS builds — in week 9 six builds each
+  // honoured a 46-49% cap and pooled to 55.6% on seven players.
+  const [poolExposure, setPoolExposure] = useState(false)
+  const [showPool, setShowPool] = useState(false)
 
   const [exposureScope, setExposureScope] = useState<'build' | 'week'>('build')
   const [openLineups, setOpenLineups] = useState<Set<string>>(new Set())
@@ -288,6 +299,62 @@ export default function Optimizer() {
         </label>
       </div>
 
+      {/* Two settings about the WEEK rather than this build. The cap above is a
+          promise inside one build; neither of these can be expressed there. */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 mb-5 text-xs">
+        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+          <input
+            type="checkbox" checked={dedupe}
+            onChange={(e) => setDedupe(e.target.checked)}
+            className="accent-brand-green"
+          />
+          Never repeat a lineup already entered
+          <span
+            className="text-slate-500"
+            title="The builder is exact and deterministic, so the same settings return the same nine men. 2026 week 9 entered 45 lineups across six builds and held 31 distinct ones."
+          >
+            (?)
+          </span>
+        </label>
+        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+          <input
+            type="checkbox" checked={poolExposure}
+            onChange={(e) => setPoolExposure(e.target.checked)}
+            className="accent-brand-green"
+          />
+          Count the whole week toward the exposure cap
+          <span
+            className="text-slate-500"
+            title="Off, the cap is a share of this build. On, it is a share of everything entered for the week — the only thing that holds a player down across builds. In week 9 six builds each honoured a 46-49% cap and pooled to 55.6% on seven players."
+          >
+            (?)
+          </span>
+        </label>
+        <button
+          onClick={() => setShowPool((open) => !open)}
+          disabled={!saved}
+          title={saved
+            ? undefined
+            : 'The pool is the uploaded slate, so a CSV has to be on file first'}
+          className="text-slate-400 hover:text-slate-200 disabled:opacity-40 disabled:hover:text-slate-400 transition-colors"
+        >
+          {showPool ? 'Hide' : 'Lock, fade or set a share for one player'}
+        </button>
+      </div>
+
+      {showPool && saved && (
+        <div className="mb-6">
+          <h3 className="text-sm font-medium text-slate-200 mb-1">Player pool</h3>
+          <p className="text-xs text-slate-500 mb-3">
+            Everything above applies to the whole slate at once. This is where one
+            player gets an instruction — in every lineup, in none, or in a given
+            share of them — and it is kept with the slate, so every later build
+            obeys it without being set again.
+          </p>
+          <PlayerPoolTable season={season} week={week} />
+        </div>
+      )}
+
       {/* Upload + run */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <label className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm cursor-pointer transition-colors">
@@ -303,7 +370,7 @@ export default function Optimizer() {
             file, season, week, num_lineups: numLineups, objective,
             salary_cap: salaryCap, max_usage_percentage: maxUsage, exclude, slate,
             max_per_team: maxPerTeam, stack_qb: stackQb, rb_with_qb: rbWithQb,
-            ownership_weight: ownershipWeight,
+            ownership_weight: ownershipWeight, dedupe, pool_exposure: poolExposure,
             ...(contestType ? { contest_type: contestType, aggression } : {}),
           }, {
             // The file has been saved server-side now, so later builds should
@@ -382,6 +449,53 @@ export default function Optimizer() {
             </span>
           </p>
           {result.note && <p className="text-amber-400 text-xs mb-3">{result.note}</p>}
+
+          {/* What the pool and the dedupe actually did. A lock that silently
+              did nothing is the failure worth designing against, so the rules
+              in force are shown rather than assumed. */}
+          {(result.deduped_against > 0
+            || Object.keys(result.player_rules ?? {}).length > 0
+            || result.pool_warnings?.length > 0) && (
+            <div className="text-xs text-slate-400 mb-3 space-y-1">
+              {Object.keys(result.player_rules ?? {}).length > 0 && (
+                <p>
+                  Pool in force:{' '}
+                  {Object.entries(result.player_rules).map(([name, r], i) => (
+                    <span key={name}>
+                      {i > 0 && ', '}
+                      <span className="text-slate-200">{name}</span>{' '}
+                      {r.max === 0
+                        ? 'excluded'
+                        : r.min === 100
+                          ? 'in every lineup'
+                          : r.min === r.max && r.min !== null
+                            ? `${r.min}%`
+                            : `${r.min ?? 0}–${r.max ?? 100}%`}
+                    </span>
+                  ))}
+                  {result.pool_exposure && (
+                    <span className="text-slate-500">
+                      {' '}· counted across the whole week
+                    </span>
+                  )}
+                </p>
+              )}
+              {result.deduped_against > 0 && (
+                <p>
+                  Held out {result.deduped_against} lineup
+                  {result.deduped_against === 1 ? '' : 's'} already entered this week
+                  {result.duplicates_skipped > 0 && (
+                    <>, and skipped {result.duplicates_skipped} solved lineup
+                      {result.duplicates_skipped === 1 ? '' : 's'} that repeated one</>
+                  )}
+                  , so these are additional bets rather than the same roster re-solved.
+                </p>
+              )}
+              {result.pool_warnings?.map((warning) => (
+                <p key={warning} className="text-amber-400">{warning}</p>
+              ))}
+            </div>
+          )}
           {matchRate !== null && matchRate < 60 && (
             <div className="bg-slate-800 border border-amber-700/40 rounded-xl p-3 mb-4 flex gap-2 text-xs text-amber-200/80">
               <Info size={14} className="shrink-0 mt-0.5" />

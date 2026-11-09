@@ -857,6 +857,17 @@ export interface LineupResponse {
   /** Who these lineups lean on, bounded by exposure_cap within this build. */
   exposure: PlayerExposure[]
   exposure_cap: number
+  /** The pool rules actually in force, echoed back. A lock that silently did
+   *  nothing is the failure worth designing against. */
+  player_rules: Record<string, { min: number | null; max: number | null }>
+  /** True when the percentages counted the whole week, not just this build. */
+  pool_exposure: boolean
+  /** Lineups already recorded for the week that this build stepped around. */
+  deduped_against: number
+  /** Solved lineups dropped because they were already entered. */
+  duplicates_skipped: number
+  pool_warnings: string[]
+  dedupe_note: string | null
   data: Lineup[]
 }
 
@@ -1192,4 +1203,100 @@ export interface CoverageMatchupsResponse {
   bands: { from: number; to: number; label: string }[]
   lean_is_advisory: boolean
   matchups: CoverageMatchup[]
+}
+
+// ---------------------------------------------------------------------------
+// The player pool: lock, exclude, exposure
+//
+// One dial. 0% is an exclusion, 100% is a lock, and the cases in between are a
+// share of the lineups — a floor as well as a ceiling, because the point of
+// typing 40 is to get 40. The global exposure cap can do none of this: it
+// applies to everyone equally, and can neither require a player nor name one.
+
+export type PoolRuleKind =
+  | 'lock' | 'exclude' | 'target' | 'band' | 'floor' | 'cap'
+
+export interface PoolRule {
+  min_exposure: number | null
+  max_exposure: number | null
+  kind: PoolRuleKind
+  note: string | null
+  updated_at: string | null
+}
+
+/** What a player has actually scored this season.
+ *
+ *  Description, not a band: measured on 2026 weeks 5–9 (n=617) a low-to-high
+ *  band covers 71.0% of a player's next result against the model band's 81.7%,
+ *  and both ends drift outward all season as the sample grows rather than as
+ *  the player changes. Shown because it reads well, never used to rank. */
+export interface PlayerHistory {
+  games: number
+  low: number
+  high: number
+  median: number
+}
+
+export interface PoolPlayer {
+  nickname: string
+  position: string
+  roster_position: string | null
+  team: string | null
+  opponent: string | null
+  game: string | null
+  salary: number | null
+  fppg: number | null
+  injury_flag: string | null
+  projected_points: number | null
+  /** False for defenses: the model projects skill positions only, so that slot
+   *  runs on FanDuel's own FPPG from the uploaded file. */
+  from_model: boolean
+  rosterable: boolean
+  floor: number | null
+  ceiling: number | null
+  median: number | null
+  ownership: number | null
+  value: number | null
+  /** How many of the week's already-entered lineups hold him, pooled across
+   *  every recorded build — usually what the rule being set is reacting to. */
+  entered_lineups: number
+  entered_exposure: number | null
+  history: PlayerHistory | null
+  rule: PoolRule | null
+}
+
+export interface PlayerPoolResponse {
+  status: string
+  season: number
+  week: number
+  slate: SavedSlate
+  count: number
+  players_in_file: number
+  lineups_entered: number
+  rules_set: number
+  positions: string[]
+  note: string
+  data: PoolPlayer[]
+}
+
+/** One player's rule as the write endpoint takes it. `rule` is the shorthand
+ *  ("lock" / "exclude" / "40"); the two numbers are the long form, and both
+ *  null clears. */
+export interface PoolRuleWrite {
+  nickname: string
+  rule?: string
+  min_exposure?: number | null
+  max_exposure?: number | null
+  note?: string | null
+}
+
+export interface PoolRulesResponse {
+  status: string
+  season: number
+  week: number
+  slate_id: number
+  set: number
+  cleared: string[]
+  rules: Record<string, PoolRule>
+  note: string
 }

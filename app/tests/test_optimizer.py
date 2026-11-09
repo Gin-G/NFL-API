@@ -13,10 +13,34 @@ from datetime import datetime
 import numpy as np
 import pytest
 
-from database.models import LineupPlayer, PlayerProjection, Schedule
+from database.models import (FanduelSlate, LineupBuild, LineupEntry, LineupPlayer,
+                             PlayerProjection, Schedule, SlatePlayerRule)
 
 pytest.importorskip("nfl_projections.optimizer",
                     reason="optimizer comes from nfl_projections (installed --no-deps in the image)")
+
+
+@pytest.fixture(autouse=True)
+def _no_lineups_carried_over(_test_engine):
+    """Forget every recorded build between tests.
+
+    The engine is session-scoped and the endpoint COMMITS, so builds outlive
+    the per-test session's rollback. That was invisible until lineups began
+    being deduped against what the week already held: by the tenth test the
+    slate had no distinct lineup left and builds came back empty — a true
+    answer to a question no test meant to ask.
+    """
+    from sqlalchemy.orm import sessionmaker
+
+    session = sessionmaker(bind=_test_engine)()
+    try:
+        for model in (LineupPlayer, LineupEntry, LineupBuild, SlatePlayerRule,
+                      FanduelSlate):
+            session.query(model).delete()
+        session.commit()
+    finally:
+        session.close()
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -490,9 +514,11 @@ class TestOpportunityContext:
             "share_jump": [0.5] * len(rows),
             "prior_games": [5] * len(rows),
         })
-        without = _post(client).json()
+        # dedupe off: the point is that two builds of the SAME pool agree, and
+        # a deduped second build would differ for a reason that is not volume.
+        without = _post(client, dedupe=False).json()
         monkeypatch.setattr(api_opt, "_opportunity", lambda season, week: ctx)
-        withctx = _post(client).json()
+        withctx = _post(client, dedupe=False).json()
         for a, b in zip(without["data"], withctx["data"]):
             assert [p["player_name"] for p in a["players"]] \
                 == [p["player_name"] for p in b["players"]]
@@ -603,3 +629,259 @@ class TestContestPresets:
         _project(db_session, _board())
         body = _post(client, num_lineups=1).json()
         assert body["objective"] == "mean"
+
+
+class TestThePlayerPoolTable:
+    """GET /optimizer/pool — the uploaded CSV as a table you can act on.
+
+    The global exposure cap applies to everyone equally and can neither require
+    a player nor name one, so wanting a particular back left nothing to type.
+    """
+
+    @staticmethod
+    def _upload(client, db_session):
+        _project(db_session, _board())
+        assert _post(client, num_lineups=1).json()["status"] == "success"
+
+    def test_it_shows_every_player_in_the_file(self, client, db_session):
+        self._upload(client, db_session)
+        body = client.get("/optimizer/pool", params={"season": 2026, "week": 5}).json()
+        assert body["status"] == "success"
+        assert body["players_in_file"] == len(SLATE_ROWS)
+        assert {r["nickname"] for r in body["data"]} == {r[0] for r in SLATE_ROWS}
+
+    def test_a_row_carries_the_price_the_board_and_the_value(self, client, db_session):
+        self._upload(client, db_session)
+        body = client.get("/optimizer/pool", params={"season": 2026, "week": 5}).json()
+        row = next(r for r in body["data"] if r["nickname"] == "Jahmyr Gibbs")
+        assert row["salary"] == 4100
+        assert row["projected_points"] == pytest.approx(20.0)
+        assert row["value"] == pytest.approx(20.0 / 4.1, abs=1e-2)
+        assert row["team"] == "DET"
+
+    def test_an_out_player_is_shown_but_marked_unrosterable(self, client, db_session):
+        """Shown, not hidden: the reason he is missing from lineups is the
+        point of having a table."""
+        self._upload(client, db_session)
+        body = client.get("/optimizer/pool", params={"season": 2026, "week": 5}).json()
+        row = next(r for r in body["data"] if r["nickname"] == "Hurt Guy")
+        assert row["injury_flag"] == "O"
+        assert row["rosterable"] is False
+
+    def test_a_defense_says_it_is_not_from_the_model(self, client, db_session):
+        self._upload(client, db_session)
+        body = client.get("/optimizer/pool", params={"season": 2026, "week": 5}).json()
+        row = next(r for r in body["data"] if r["nickname"] == "Ravens")
+        assert row["from_model"] is False
+        assert row["fppg"] == pytest.approx(8.5)
+
+    def test_it_shows_what_the_week_already_holds(self, client, db_session):
+        self._upload(client, db_session)
+        body = client.get("/optimizer/pool", params={"season": 2026, "week": 5}).json()
+        assert body["lineups_entered"] == 1
+        used = [r for r in body["data"] if r["entered_lineups"]]
+        assert len(used) == 9
+        assert all(r["entered_exposure"] == 100.0 for r in used)
+
+    def test_it_can_be_filtered(self, client, db_session):
+        self._upload(client, db_session)
+        body = client.get("/optimizer/pool",
+                          params={"season": 2026, "week": 5, "position": "RB"}).json()
+        assert {r["position"] for r in body["data"]} == {"RB"}
+        body = client.get("/optimizer/pool",
+                          params={"season": 2026, "week": 5, "search": "gibbs"}).json()
+        assert [r["nickname"] for r in body["data"]] == ["Jahmyr Gibbs"]
+
+    def test_with_no_slate_it_says_the_upload_is_what_is_missing(self, client,
+                                                                db_session):
+        body = client.get("/optimizer/pool", params={"season": 2026, "week": 5})
+        assert body.status_code == 404
+        assert "cannot be derived" in body.json()["detail"]
+
+
+class TestSettingAPoolRule:
+    @staticmethod
+    def _upload(client, db_session):
+        _project(db_session, _board())
+        assert _post(client, num_lineups=1).json()["status"] == "success"
+
+    @staticmethod
+    def _set(client, rules):
+        return client.post("/optimizer/pool",
+                           params={"season": 2026, "week": 5}, json=rules)
+
+    def test_a_rule_is_stored_and_read_back(self, client, db_session):
+        self._upload(client, db_session)
+        body = self._set(client, [{"nickname": "Jahmyr Gibbs", "rule": "lock"}]).json()
+        assert body["status"] == "success"
+        assert body["rules"]["Jahmyr Gibbs"]["kind"] == "lock"
+
+        pool = client.get("/optimizer/pool",
+                          params={"season": 2026, "week": 5}).json()
+        row = next(r for r in pool["data"] if r["nickname"] == "Jahmyr Gibbs")
+        assert row["rule"]["min_exposure"] == 100.0
+
+    @pytest.mark.parametrize("rule,kind", [
+        ("lock", "lock"), ("exclude", "exclude"), ("40", "target")])
+    def test_the_three_shapes_a_rule_takes(self, client, db_session, rule, kind):
+        self._upload(client, db_session)
+        body = self._set(client, [{"nickname": "Puka Nacua", "rule": rule}]).json()
+        assert body["rules"]["Puka Nacua"]["kind"] == kind
+
+    def test_a_cap_without_a_floor_is_stored_as_one(self, client, db_session):
+        self._upload(client, db_session)
+        body = self._set(client, [{"nickname": "Puka Nacua",
+                                   "max_exposure": 30}]).json()
+        assert body["rules"]["Puka Nacua"] == {
+            "min_exposure": None, "max_exposure": 30.0, "kind": "cap",
+            "note": None, "updated_at": body["rules"]["Puka Nacua"]["updated_at"]}
+
+    def test_a_note_rides_along(self, client, db_session):
+        self._upload(client, db_session)
+        body = self._set(client, [{"nickname": "Puka Nacua", "rule": "lock",
+                                   "note": "starter confirmed"}]).json()
+        assert body["rules"]["Puka Nacua"]["note"] == "starter confirmed"
+
+    def test_a_misspelled_name_is_refused(self, client, db_session):
+        self._upload(client, db_session)
+        response = self._set(client, [{"nickname": "Puka Nakua", "rule": "lock"}])
+        assert response.status_code == 422
+        assert "not on slate" in response.json()["detail"]
+
+    def test_requiring_a_player_the_slate_says_is_out_is_refused(self, client,
+                                                                 db_session):
+        self._upload(client, db_session)
+        response = self._set(client, [{"nickname": "Hurt Guy", "rule": "lock"}])
+        assert response.status_code == 422
+        assert "marked O" in response.json()["detail"]
+
+    def test_excluding_an_out_player_is_fine(self, client, db_session):
+        """A fade is never contradicted by the injury report."""
+        self._upload(client, db_session)
+        assert self._set(client, [{"nickname": "Hurt Guy",
+                                   "rule": "exclude"}]).status_code == 200
+
+    def test_a_floor_above_its_ceiling_is_refused(self, client, db_session):
+        self._upload(client, db_session)
+        response = self._set(client, [{"nickname": "Puka Nacua",
+                                       "min_exposure": 80, "max_exposure": 20}])
+        assert response.status_code == 400
+        assert "above its" in response.json()["detail"]
+
+    def test_a_percentage_over_100_is_refused(self, client, db_session):
+        self._upload(client, db_session)
+        assert self._set(client, [{"nickname": "Puka Nacua",
+                                   "max_exposure": 140}]).status_code == 400
+
+    def test_nulls_clear_a_rule(self, client, db_session):
+        self._upload(client, db_session)
+        self._set(client, [{"nickname": "Puka Nacua", "rule": "lock"}])
+        body = self._set(client, [{"nickname": "Puka Nacua",
+                                   "min_exposure": None,
+                                   "max_exposure": None}]).json()
+        assert body["cleared"] == ["Puka Nacua"]
+        assert body["rules"] == {}
+
+    def test_the_whole_pool_can_be_cleared(self, client, db_session):
+        self._upload(client, db_session)
+        self._set(client, [{"nickname": "Puka Nacua", "rule": "lock"},
+                           {"nickname": "Chris Olave", "rule": "exclude"}])
+        body = client.delete("/optimizer/pool",
+                             params={"season": 2026, "week": 5}).json()
+        assert body["cleared"] == 2
+        pool = client.get("/optimizer/pool",
+                          params={"season": 2026, "week": 5}).json()
+        assert pool["rules_set"] == 0
+
+
+class TestASavedRuleSteersEveryBuild:
+    """The point of storing it: say it once, not on every request."""
+
+    @staticmethod
+    def _upload(client, db_session):
+        _project(db_session, _board())
+        assert _post(client, num_lineups=1).json()["status"] == "success"
+
+    def test_a_locked_player_turns_up_in_every_lineup(self, client, db_session):
+        self._upload(client, db_session)
+        # Kyren Williams is the cheapest, worst back the board rates: without a
+        # rule he is in no lineup at all.
+        before = _post(client, num_lineups=3, max_usage_percentage=100,
+                       dedupe=False).json()
+        assert not any(p["player_name"] == "Kyren Williams"
+                       for l in before["data"] for p in l["players"])
+
+        client.post("/optimizer/pool", params={"season": 2026, "week": 5},
+                    json=[{"nickname": "Kyren Williams", "rule": "lock"}])
+        after = _post(client, num_lineups=3, max_usage_percentage=100,
+                      dedupe=False).json()
+        assert all(any(p["player_name"] == "Kyren Williams" for p in l["players"])
+                   for l in after["data"])
+        assert after["player_rules"]["Kyren Williams"] == {"min": 100.0,
+                                                           "max": 100.0}
+
+    def test_an_excluded_player_turns_up_in_none(self, client, db_session):
+        self._upload(client, db_session)
+        client.post("/optimizer/pool", params={"season": 2026, "week": 5},
+                    json=[{"nickname": "Bijan Robinson", "rule": "exclude"}])
+        body = _post(client, num_lineups=3, max_usage_percentage=100,
+                     dedupe=False).json()
+        assert not any(p["player_name"] == "Bijan Robinson"
+                       for l in body["data"] for p in l["players"])
+
+    def test_a_percentage_is_delivered(self, client, db_session):
+        self._upload(client, db_session)
+        client.post("/optimizer/pool", params={"season": 2026, "week": 5},
+                    json=[{"nickname": "Kyren Williams", "min_exposure": 50,
+                           "max_exposure": 50}])
+        body = _post(client, num_lineups=4, max_usage_percentage=100,
+                     dedupe=False).json()
+        used = sum(1 for l in body["data"]
+                   if any(p["player_name"] == "Kyren Williams"
+                          for p in l["players"]))
+        assert used == 2
+
+    def test_the_saved_pool_can_be_ignored_for_one_build(self, client, db_session):
+        self._upload(client, db_session)
+        client.post("/optimizer/pool", params={"season": 2026, "week": 5},
+                    json=[{"nickname": "Kyren Williams", "rule": "lock"}])
+        body = _post(client, num_lineups=2, max_usage_percentage=100,
+                     dedupe=False, use_saved_rules=False).json()
+        assert body["player_rules"] == {}
+
+    def test_the_request_wins_over_the_saved_rule(self, client, db_session):
+        self._upload(client, db_session)
+        client.post("/optimizer/pool", params={"season": 2026, "week": 5},
+                    json=[{"nickname": "Kyren Williams", "rule": "lock"}])
+        body = _post(client, num_lineups=2, max_usage_percentage=100,
+                     dedupe=False, pool="Kyren Williams:exclude").json()
+        assert not any(p["player_name"] == "Kyren Williams"
+                       for l in body["data"] for p in l["players"])
+
+    def test_a_lock_in_the_request_alone_also_works(self, client, db_session):
+        self._upload(client, db_session)
+        body = _post(client, num_lineups=2, max_usage_percentage=100,
+                     dedupe=False, lock="Kyren Williams").json()
+        assert all(any(p["player_name"] == "Kyren Williams" for p in l["players"])
+                   for l in body["data"])
+
+    def test_a_misspelled_lock_refuses_the_build(self, client, db_session):
+        """Rather than quietly building without him."""
+        self._upload(client, db_session)
+        response = _post(client, num_lineups=1, lock="Kenneth Walker III")
+        assert response.status_code == 422
+        assert "not on this slate" in response.json()["detail"]
+
+    def test_an_unparseable_pool_spec_says_how_to_write_one(self, client,
+                                                            db_session):
+        self._upload(client, db_session)
+        response = _post(client, num_lineups=1, pool="Kyren Williams")
+        assert response.status_code == 400
+        assert "Name:lock" in response.json()["detail"]
+
+    def test_impossible_locks_are_refused_with_the_reason(self, client, db_session):
+        self._upload(client, db_session)
+        response = _post(client, num_lineups=1, lock="Josh Allen,Jared Goff")
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "no legal lineup" in detail or "contradictory" in detail
