@@ -668,6 +668,17 @@ class TestThePlayerPoolTable:
         assert row["injury_flag"] == "O"
         assert row["rosterable"] is False
 
+    def test_a_healthy_player_carries_no_flag_at_all(self, client, db_session):
+        """An empty injury cell is a float NaN out of read_csv, and NaN is
+        truthy -- so `str(value or "")` yielded the string "NAN" and every
+        healthy player on the slate was reported as carrying a flag."""
+        self._upload(client, db_session)
+        body = client.get("/optimizer/pool", params={"season": 2026, "week": 5}).json()
+        healthy = [r for r in body["data"] if r["nickname"] != "Hurt Guy"]
+        assert healthy
+        assert all(r["injury_flag"] is None for r in healthy)
+        assert all(r["rosterable"] for r in healthy)
+
     def test_a_defense_says_it_is_not_from_the_model(self, client, db_session):
         self._upload(client, db_session)
         body = client.get("/optimizer/pool", params={"season": 2026, "week": 5}).json()

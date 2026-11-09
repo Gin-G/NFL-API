@@ -469,6 +469,20 @@ def _float_or_none(value):
 # player, or survive the request that asked for it. They are one dial -- 0% is
 # an exclusion, 100% is a lock -- so they share a table and a parser.
 
+def _injury_flag(value) -> Optional[str]:
+    """The slate's injury cell as a flag, or None.
+
+    `str(value or "")` is the trap: an empty cell comes back from read_csv as a
+    float NaN, and NaN is TRUTHY -- so that expression yields the string "NAN"
+    and every healthy player on the slate was reported as carrying a flag. The
+    fixtures used empty strings, where real exports leave the cell blank.
+    """
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    text = str(value).strip().upper()
+    return text or None
+
+
 def _rule_kind(low, high) -> str:
     """The word for a rule, for a table a person reads."""
     if high is not None and high <= 0:
@@ -1373,13 +1387,12 @@ def player_pool(
             "game": r.get("Game"),
             "salary": int(salary) if pd.notna(salary) else None,
             "fppg": round(float(fppg), 2) if pd.notna(fppg) else None,
-            "injury_flag": (str(r.get("Injury Indicator") or "").strip().upper()
-                            or None),
+            "injury_flag": _injury_flag(r.get("Injury Indicator")),
             "projected_points": round(float(proj), 2) if pd.notna(proj) else None,
             # DEF is not projected by the model at all; its slot runs on
             # FanDuel's own FPPG, which is why `from_model` is on the row.
             "from_model": bool(pd.notna(proj)),
-            "rosterable": (str(r.get("Injury Indicator") or "").strip().upper()
+            "rosterable": (_injury_flag(r.get("Injury Indicator"))
                            not in opt.EXCLUDED_INJURY_STATUSES),
             "entered_lineups": used,
             "entered_exposure": (round(100.0 * used / lineups_entered, 1)
@@ -1459,7 +1472,7 @@ def set_player_rules(
             detail=f"No slate CSV saved for {season} week {week}.")
 
     salaries = _csv_frame(slate_row.content or "", "The saved slate")
-    on_slate = {str(n): str(f or "").strip().upper() for n, f in zip(
+    on_slate = {str(n): _injury_flag(f) for n, f in zip(
         salaries["Nickname"],
         salaries.get("Injury Indicator", pd.Series("", index=salaries.index)))}
 
