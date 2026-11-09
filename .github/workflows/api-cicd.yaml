@@ -135,9 +135,20 @@ jobs:
     needs: build-and-deploy
     runs-on: ubuntu-latest
     # Non-blocking: Cloudflare bot-challenges the GitHub runner's requests to the
-    # public API, so these curls fail from CI even when the API is healthy. Kept
-    # for visibility; does not gate the deploy. Re-enable gating once a Cloudflare
-    # WAF skip (secret header / IP allowlist) is in place for the API subdomain.
+    # public API, so these curls fail from CI even when the API is healthy.
+    #
+    # The wait step now tells the two apart. A run where every probe came back
+    # 403/503 from the edge was never a test, so it reports "could not reach"
+    # and the endpoint steps below SKIP rather than each failing with its own
+    # curl error. A job that goes red on every single deploy for the same
+    # reason is a signal nobody can read, and it would hide the deploy that
+    # genuinely broke.
+    #
+    # To make this actually test the deploy, the subdomain needs a Cloudflare
+    # WAF skip for the runner: a custom rule matching a header this job sends,
+    # or an IP allowlist. Either one, and `continue-on-error` can come off and
+    # this can gate the deploy. Note the no-secrets property below if adding a
+    # header token.
     continue-on-error: true
     steps:
       # 60 s was never enough. The deploy is GitOps: this workflow commits an
@@ -148,9 +159,15 @@ jobs:
       # that were fine -- on top of the Cloudflare challenge this job already
       # tolerates. Six minutes covers the sync; the job stays non-blocking.
       - name: Wait for API to be fully ready
+        id: wait
         run: |
           echo "curl: $(curl --version | head -1)"
           echo "Polling ${{ vars.API_URL }}/ until status == running (max 360 s)..."
+          # How many consecutive edge challenges before concluding that this
+          # runner simply cannot get through. Six is a minute: long enough that
+          # a brief 503 during the rollout does not trip it.
+          EDGE=0
+          EDGE_GIVE_UP=6
           for i in $(seq 1 36); do
             # No -f. With it, curl prints nothing and exits non-zero on a
             # 4xx, so a Cloudflare challenge page arrives as an empty body and
@@ -164,33 +181,58 @@ jobs:
             STATUS=$(printf '%s' "$BODY" | jq -r '.status' 2>/dev/null || echo "")
             if [ "$STATUS" = "running" ]; then
               echo "API is ready (attempt $i, ~$((i * 10)) s)"
+              echo "reachable=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             case "$CODE" in
               000) echo "  [$i/36] no response at all — retrying in 10 s..." ;;
-              403|503) echo "  [$i/36] HTTP $CODE from the edge — Cloudflare is challenging this runner" ;;
+              403|503)
+                echo "  [$i/36] HTTP $CODE from the edge — Cloudflare is challenging this runner"
+                EDGE=$((EDGE + 1)) ;;
               200) echo "  [$i/36] HTTP 200 but status='$STATUS' — old pod still serving?" ;;
               *)   echo "  [$i/36] HTTP $CODE — retrying in 10 s..." ;;
             esac
+            # Every probe so far has been the edge turning us away, and enough
+            # of them to rule out a blip. Nothing about this job reaches the
+            # API, so the remaining five minutes would buy the same answer --
+            # and on a GitOps deploy Argo CD has usually synced inside the
+            # first minute anyway.
+            if [ "$EDGE" -ge "$EDGE_GIVE_UP" ] && [ "$EDGE" -eq "$i" ]; then
+              echo
+              echo "Cloudflare challenged all $i probes. This runner cannot"
+              echo "reach the API, so there is nothing here to smoke-test:"
+              echo "reporting NOT REACHED rather than a failure, and skipping"
+              echo "the endpoint checks below."
+              echo "reachable=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             sleep 10
           done
-          echo "ERROR: API did not report status=running within 360 s."
-          echo "Either Argo CD has not synced the new image yet, or Cloudflare"
-          echo "is challenging this runner. This job does not gate the deploy."
+          if [ "$EDGE" -eq 36 ]; then
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "reachable=false" >> "$GITHUB_OUTPUT"
+          echo "ERROR: API did not report status=running within 360 s, and it"
+          echo "was NOT simply the edge turning us away ($EDGE of 36 probes"
+          echo "were challenged). Argo CD may not have synced the new image."
           curl -v --max-time 10 "${{ vars.API_URL }}/" || true
           exit 1
 
       - name: GET / — root
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           curl -sf --max-time 30 "${{ vars.API_URL }}/" \
             | jq -e '.status == "running"'
 
       - name: GET /health
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           curl -sf --max-time 30 "${{ vars.API_URL }}/health" \
             | jq -e '.status == "healthy"'
 
       - name: GET /teams/ — list
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           TOTAL=$(curl -sf --max-time 30 "${{ vars.API_URL }}/teams/" \
             | jq '.total_teams // 0')
@@ -198,11 +240,13 @@ jobs:
           [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /teams/KC — detail
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           curl -sf --max-time 30 "${{ vars.API_URL }}/teams/KC" \
             | jq -e '.data.team_abbr == "KC"'
 
       - name: GET /schedules/?season=2024&week=1
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           TOTAL=$(curl -sf --max-time 60 \
             "${{ vars.API_URL }}/schedules/?season=2024&week=1" \
@@ -211,6 +255,7 @@ jobs:
           [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /players/rosters?season=2024&team=KC
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           TOTAL=$(curl -sf --max-time 60 \
             "${{ vars.API_URL }}/players/rosters?season=2024&team=KC" \
@@ -219,6 +264,7 @@ jobs:
           [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /players/stats?season=2024&position=QB&week=1
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           TOTAL=$(curl -sf --max-time 60 \
             "${{ vars.API_URL }}/players/stats?season=2024&position=QB&week=1" \
@@ -227,12 +273,14 @@ jobs:
           [ "${TOTAL:-0}" -gt 0 ]
 
       - name: GET /players/00-0033873 — Mahomes
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           curl -sf --max-time 60 \
             "${{ vars.API_URL }}/players/00-0033873?season=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /coaches/?years=2024 — list + is_active split
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           BODY=$(curl -sf --max-time 180 "${{ vars.API_URL }}/coaches/?years=2024")
           TOTAL=$(echo "$BODY" | jq '.total_coaches // 0')
@@ -244,18 +292,21 @@ jobs:
           [ "${ACTIVE:-0}" -gt 0 ]
 
       - name: GET /coaches/Andy Reid/analysis?years=2024
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           curl -sf --max-time 180 \
             "${{ vars.API_URL }}/coaches/Andy%20Reid/analysis?years=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /coaches/Andy Reid/grades?years=2024
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           curl -sf --max-time 180 \
             "${{ vars.API_URL }}/coaches/Andy%20Reid/grades?years=2024" \
             | jq -e '.status == "success"'
 
       - name: GET /coaches/Andy Reid/breakdown?season=2024
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           # Breakdown is served from the coach_season_analytics cache (pre-computed
           # by the standalone analytics job). Accepts either:
@@ -285,11 +336,13 @@ jobs:
           exit 1
 
       - name: GET /dashboard/ — frontend loads
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           curl -sf --max-time 30 "${{ vars.API_URL }}/dashboard/" \
             | grep -q '<div id="root">'
 
       - name: GET /players/analytics/status — endpoint reachable
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           STATUS=$(curl -sf --max-time 30 "${{ vars.API_URL }}/players/analytics/status" \
             | jq -r '.status // "error"')
@@ -298,6 +351,7 @@ jobs:
           [ "$STATUS" != "error" ]
 
       - name: GET /players/00-0033873/breakdown?season=2024 — Mahomes breakdown
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           BODY=$(curl -sf --max-time 30 \
             "${{ vars.API_URL }}/players/00-0033873/breakdown?season=2024" || echo "{}")
@@ -307,6 +361,7 @@ jobs:
           [ "$STATUS" = "success" ] || [ "$STATUS" = "computing" ] || [ "$STATUS" = "no_data" ]
 
       - name: POST /chat/ — endpoint reachable (200 or 503 accepted)
+        if: steps.wait.outputs.reachable == 'true'
         run: |
           HTTP=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 \
             -X POST "${{ vars.API_URL }}/chat/" \
