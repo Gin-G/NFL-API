@@ -376,3 +376,184 @@ def _band_text(tier: str, premium_min: int, value_max: int) -> str:
     if tier == "value":
         return f"under ${value_max:,}"
     return f"${value_max:,}–${premium_min - 1:,}"
+
+
+def _consistency():
+    """The research module, or a 503 explaining what is missing."""
+    try:
+        from nfl_projections import consistency
+
+        return consistency
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"nfl_projections.consistency unavailable: {exc}")
+
+
+def _weekly_frame(db, season: int) -> pd.DataFrame:
+    """Every regular-season player-week we hold, in nflverse's own column names.
+
+    Read from our own `player_stats` rather than nflverse directly, so a
+    request does not depend on a network fetch -- the loader keeps this table
+    current and the consistency read is then a database query like every other
+    endpoint here.
+    """
+    rows = db.query(PlayerStat).filter(PlayerStat.season == season).all()
+    if not rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame([
+        {c.name: getattr(r, c.name) for c in r.__table__.columns}
+        for r in rows])
+    if "season_type" in frame.columns:
+        frame = frame[frame.season_type.fillna("REG") == "REG"]
+    # The package reads nflverse's spelling; our table keeps the API's.
+    return frame.rename(columns={"recent_team": "team",
+                                 "interceptions": "passing_interceptions"})
+
+
+@router.get("/consistency")
+def dfs_consistency(
+    season: Optional[int] = Query(None),
+    week: Optional[int] = Query(
+        None, description="Only weeks BEFORE this one are counted, so the "
+                          "table is usable before a slate rather than after."),
+    positions: str = Query("QB,RB,WR,TE"),
+    min_games: int = Query(4, ge=2, le=18),
+    min_opportunities: float = Query(
+        5.0, ge=0, description="Opportunities a game to be ranked. A player "
+                               "touching the ball twice a week has a tiny "
+                               "spread and is not what consistent means."),
+    limit: int = Query(60, ge=1, le=300),
+    slate_id: Optional[int] = Query(
+        None, description="Join salaries from a saved slate, if one is stored."),
+    db: Session = Depends(get_db),
+):
+    """Who gets the ball steadily — the only kind of consistency that measures.
+
+    Ranked on **volume** steadiness, never on scoring spread, because scoring
+    spread is not a property of a player. Split-half on 2025 (210 players, odd
+    weeks against even) a player's fantasy-point standard deviation correlates
+    +0.111 with his own other half, and **-0.047** once scoring level is
+    controlled, CI [-0.181, +0.089]; on 2026 through week 9, -0.096. The same
+    players' MEAN self-correlates +0.643, so this is not a shortage of signal
+    in the data, it is an absence of the property.
+
+    Raw standard deviation is worse than useless as a ranking, because
+    dispersion scales with scoring: it correlates +0.647 with the mean, and
+    2025's ten "steadiest" players by that measure averaged 5 to 6 points a
+    game. Their scores do not move because they do not score.
+
+    What does measure is usage. Opportunities per game self-correlate +0.943,
+    their dispersion +0.734, and +0.412 even after controlling for the volume
+    level itself, CI [+0.293, +0.518]. It transmits to the thing actually
+    wanted, weakly but measurably: opportunity CV in one half predicts fantasy
+    CV in the other at +0.231, CI [+0.099, +0.355].
+
+    One honest caveat in-season: dispersion needs games. Across 2026's nine
+    weeks the volume-dispersion reliability falls to +0.070, CI [-0.080,
+    +0.217] — four or five games a half cannot measure a spread. Early in a
+    season, read `games` before reading the rank.
+    """
+    consistency = _consistency()
+    season = season or get_current_nfl_season()
+    weekly = _weekly_frame(db, season)
+    if weekly.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No player stats stored for {season}.")
+
+    wanted = [p.strip().upper() for p in positions.split(",") if p.strip()]
+    table = consistency.player_consistency(
+        weekly, min_games=min_games, through_week=week)
+    if table.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"No player has {min_games} games in {season}"
+                    + (f" before week {week}" if week else "") + "."))
+    table = table[table.position.isin(wanted)]
+    ranked = table[table.opp_per_game >= min_opportunities].copy()
+
+    salaries = {}
+    if slate_id is not None or week is not None:
+        slate = _slate_row(db, season, week, slate_id) if week else None
+        if slate is not None:
+            try:
+                frame = pd.read_csv(io.StringIO(slate.content))
+                name_key = _name_key()
+                salaries = {name_key(n): s for n, s in
+                            zip(frame["Nickname"], frame["Salary"])}
+            except Exception as exc:                  # pragma: no cover
+                logger.warning("slate salaries unavailable: %s", exc)
+
+    name_key = _name_key()
+    rows = []
+    for _, r in ranked.nlargest(limit, "volume_steadiness").iterrows():
+        salary = salaries.get(name_key(r.player_name))
+        rows.append({
+            "player": r.player_name,
+            "position": r.position,
+            "team": r.team,
+            "games": int(r.games),
+            "salary": int(salary) if salary is not None and salary == salary
+            else None,
+            # Volume: the measurable half.
+            "opportunities_per_game": r.opp_per_game,
+            "opportunity_low": r.opp_low,
+            "opportunity_high": r.opp_high,
+            "opportunity_cv": r.opp_cv,
+            "volume_steadiness": r.volume_steadiness,
+            "steadiness_rank": int(r.steadiness_rank)
+            if pd.notna(r.steadiness_rank) else None,
+            "position_rank": int(r.position_rank)
+            if pd.notna(r.position_rank) else None,
+            # Trend: a steady 18 touches reads differently when it was 24 a
+            # month ago.
+            "opportunities_recent": r.opp_recent,
+            "opportunity_trend": None if pd.isna(r.opp_trend) else r.opp_trend,
+            # Scoring: description, and never part of the order above.
+            "points_per_game": r.points_per_game,
+            "points_low": r.points_low,
+            "points_high": r.points_high,
+            "points_median": r.points_median,
+            "points_sd": r.points_sd,
+            "points_cv": r.points_cv,
+            "points_recent": r.points_recent,
+            "hit_rate_10": r.hit_rate_10,
+            "hit_rate_15": r.hit_rate_15,
+            "summary": consistency.describe(r),
+        })
+
+    return {
+        "status": "success",
+        "season": season,
+        "through_week": week,
+        "count": len(rows),
+        "players_considered": int(len(table)),
+        "ranked_by": "volume steadiness — 100 x (1 - the coefficient of "
+                     "variation of opportunities per game)",
+        "why_not_scoring": (
+            "Scoring spread is not a property of a player. Split-half on 2025 "
+            "(n=210), a player's fantasy-point SD correlates +0.111 with his "
+            "own other half and -0.047 once scoring level is controlled, CI "
+            "[-0.181, +0.089]; the same players' mean self-correlates +0.643. "
+            "Ranking on it would be ranking on last month's noise, and ranking "
+            "on RAW SD is worse still: dispersion scales with scoring (+0.647 "
+            "with the mean), so it returns the players who do not score."),
+        "what_does_measure": (
+            "Opportunities per game self-correlate +0.943 across halves and "
+            "their dispersion +0.734, still +0.412 with the volume level "
+            "controlled, CI [+0.293, +0.518]. Opportunity CV in one half "
+            "predicts fantasy CV in the other at +0.231, CI [+0.099, +0.355] "
+            "— the only route to steady scoring that measures."),
+        "small_sample_warning": (
+            "Dispersion needs games. Over 2026's nine weeks the "
+            "volume-dispersion reliability falls to +0.070, CI [-0.080, "
+            "+0.217], so early in a season read `games` before the rank."),
+        "best_single_predictor": (
+            "A player's scoring LEVEL predicts his future scoring consistency "
+            "better than any spread does: fantasy mean against next-half "
+            "fantasy CV is -0.338 (2026: -0.317) against +0.235 for past CV. "
+            "The consistent player is mostly just the good player."),
+        "min_opportunities": min_opportunities,
+        "data": rows,
+    }

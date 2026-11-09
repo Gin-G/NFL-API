@@ -1300,3 +1300,57 @@ export interface PoolRulesResponse {
   rules: Record<string, PoolRule>
   note: string
 }
+
+// ---------------------------------------------------------------------------
+// Consistency
+//
+// Ranked on VOLUME steadiness, never on scoring spread. Split-half on 2025
+// (n=210), a player's fantasy-point SD correlates +0.111 with his own other
+// half and -0.047 once scoring level is controlled — the same players' mean
+// self-correlates +0.643, so the signal is not missing, the property is.
+// Opportunities per game self-correlate +0.943 and their dispersion +0.412
+// with the volume level controlled, which is the half that measures.
+
+export interface ConsistencyPlayer {
+  player: string
+  position: string
+  team: string | null
+  games: number
+  salary: number | null
+  opportunities_per_game: number
+  opportunity_low: number
+  opportunity_high: number
+  opportunity_cv: number | null
+  /** 100 × (1 − the CV of opportunities per game). High means steady. */
+  volume_steadiness: number
+  steadiness_rank: number | null
+  position_rank: number | null
+  opportunities_recent: number
+  opportunity_trend: number | null
+  /** Everything below is description. None of it enters the ranking. */
+  points_per_game: number
+  points_low: number
+  points_high: number
+  points_median: number
+  points_sd: number
+  points_cv: number | null
+  points_recent: number
+  hit_rate_10: number
+  hit_rate_15: number
+  summary: string
+}
+
+export interface ConsistencyResponse {
+  status: string
+  season: number
+  through_week: number | null
+  count: number
+  players_considered: number
+  ranked_by: string
+  why_not_scoring: string
+  what_does_measure: string
+  small_sample_warning: string
+  best_single_predictor: string
+  min_opportunities: number
+  data: ConsistencyPlayer[]
+}

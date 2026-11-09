@@ -181,7 +181,7 @@ def _played(db_session, name, weeks_points, player_id="p1"):
         yards = round((points - 0.5 * catches) * 10)
         db_session.add(PlayerStat(
             season=SEASON, week=week, season_type="REG",
-            player_id=f"{player_id}-{week}", player_name=name,
+            player_id=player_id, player_name=name,
             player_display_name=name, position="RB", recent_team="DET",
             receptions=catches, receiving_yards=yards))
     db_session.commit()
@@ -267,3 +267,123 @@ class TestAPositionWithNoGroup:
         body = _get(client, positions="QB,RB").json()
         assert body["positions_requested"] == ["QB", "RB"]
         assert body["positions_absent"] == []
+
+
+def _season_weeks(db_session, rows):
+    """Weekly stat lines for the consistency table."""
+    for name, pid, position, team, weeks in rows:
+        for week, (carries, targets, rec_yards) in enumerate(weeks, 1):
+            db_session.add(PlayerStat(
+                season=SEASON, week=week, season_type="REG",
+                player_id=pid, player_name=name,
+                player_display_name=name, position=position, recent_team=team,
+                carries=carries, rushing_yards=carries * 4.0,
+                targets=targets, receptions=targets,
+                receiving_yards=rec_yards))
+    db_session.commit()
+
+
+STEADY_WEEKS = [(18, 3, 20), (19, 2, 18), (17, 3, 22),
+                (18, 3, 19), (19, 2, 21), (18, 3, 20)]
+SPIKY_WEEKS = [(4, 1, 5), (28, 6, 60), (3, 0, 0),
+               (26, 5, 55), (2, 1, 8), (30, 4, 50)]
+
+
+class TestConsistency:
+    """Ranked on volume, because scoring spread does not persist."""
+
+    def _two_backs(self, db_session):
+        _season_weeks(db_session, [
+            ("Steady Back", "s1", "RB", "DET", STEADY_WEEKS),
+            ("Spiky Back", "s2", "RB", "CAR", SPIKY_WEEKS)])
+
+    def test_the_steady_back_comes_first(self, client, db_session):
+        self._two_backs(db_session)
+        body = client.get("/dfs/consistency",
+                          params={"season": SEASON, "min_games": 4}).json()
+        assert body["status"] == "success"
+        assert [r["player"] for r in body["data"]] == ["Steady Back", "Spiky Back"]
+        assert body["data"][0]["volume_steadiness"] > \
+            body["data"][1]["volume_steadiness"]
+
+    def test_a_row_carries_volume_trend_and_scoring(self, client, db_session):
+        self._two_backs(db_session)
+        row = client.get("/dfs/consistency",
+                         params={"season": SEASON}).json()["data"][0]
+        for key in ("opportunities_per_game", "opportunity_low", "opportunity_high",
+                    "opportunity_cv", "volume_steadiness", "opportunity_trend",
+                    "points_per_game", "points_low", "points_high", "points_cv",
+                    "hit_rate_15", "summary"):
+            assert key in row, key
+        assert row["games"] == 6
+        assert "opportunities a game" in row["summary"]
+
+    def test_it_says_why_it_does_not_rank_on_scoring(self, client, db_session):
+        self._two_backs(db_session)
+        body = client.get("/dfs/consistency", params={"season": SEASON}).json()
+        assert "volume steadiness" in body["ranked_by"]
+        assert "not a property of a player" in body["why_not_scoring"]
+        assert "+0.412" in body["what_does_measure"]
+        assert "read `games` before the rank" in body["small_sample_warning"]
+
+    def test_a_bit_part_is_not_the_steadiest_player_alive(self, client, db_session):
+        """Two targets every week is a tiny spread and a useless player."""
+        self._two_backs(db_session)
+        _season_weeks(db_session, [
+            ("Tiny Role", "s3", "WR", "ARI", [(0, 2, 10)] * 6)])
+        body = client.get("/dfs/consistency",
+                          params={"season": SEASON}).json()
+        assert "Tiny Role" not in [r["player"] for r in body["data"]]
+
+    def test_the_volume_floor_can_be_moved(self, client, db_session):
+        self._two_backs(db_session)
+        _season_weeks(db_session, [
+            ("Tiny Role", "s3", "WR", "ARI", [(0, 2, 10)] * 6)])
+        body = client.get("/dfs/consistency",
+                          params={"season": SEASON, "min_opportunities": 0}).json()
+        assert "Tiny Role" in [r["player"] for r in body["data"]]
+
+    def test_only_weeks_before_the_slate_are_counted(self, client, db_session):
+        self._two_backs(db_session)
+        body = client.get("/dfs/consistency",
+                          params={"season": SEASON, "week": 5,
+                                  "min_games": 4}).json()
+        assert all(r["games"] == 4 for r in body["data"])
+
+    def test_positions_can_be_narrowed(self, client, db_session):
+        self._two_backs(db_session)
+        _season_weeks(db_session, [
+            ("A Receiver", "s4", "WR", "LAR", STEADY_WEEKS)])
+        body = client.get("/dfs/consistency",
+                          params={"season": SEASON, "positions": "WR"}).json()
+        assert {r["position"] for r in body["data"]} == {"WR"}
+
+    def test_too_few_games_is_refused_with_the_reason(self, client, db_session):
+        _season_weeks(db_session, [
+            ("Short Back", "s5", "RB", "LV", STEADY_WEEKS[:2])])
+        response = client.get("/dfs/consistency",
+                              params={"season": SEASON, "min_games": 6})
+        assert response.status_code == 404
+        assert "games" in response.json()["detail"]
+
+    def test_a_season_with_no_stats_says_so(self, client, db_session):
+        response = client.get("/dfs/consistency", params={"season": 1999})
+        assert response.status_code == 404
+        assert "No player stats stored" in response.json()["detail"]
+
+    def test_scoring_noise_cannot_reorder_the_table(self, client, db_session):
+        """The whole design, end to end: change the scoring, keep the usage,
+        and the ranking must not move."""
+        self._two_backs(db_session)
+        before = [r["player"] for r in client.get(
+            "/dfs/consistency", params={"season": SEASON}).json()["data"]]
+        # Same carries and targets, wildly different yardage.
+        for row in db_session.query(PlayerStat).filter(
+                PlayerStat.player_name == "Steady Back").all():
+            row.receiving_yards = 0.0 if row.week % 2 else 220.0
+        db_session.commit()
+        after_body = client.get("/dfs/consistency",
+                                params={"season": SEASON}).json()
+        assert [r["player"] for r in after_body["data"]] == before
+        # ... and the scoring columns really did move.
+        assert after_body["data"][0]["points_sd"] > 0

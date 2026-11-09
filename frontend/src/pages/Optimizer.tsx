@@ -9,6 +9,7 @@ import { getAvailableSeasons, getDefaultSeason, getCurrentNFLWeek } from '../uti
 import PageHeader from '../components/ui/PageHeader'
 import ErrorCard from '../components/ui/ErrorCard'
 import PlayerPoolTable from '../components/PlayerPoolTable'
+import ConsistencyChart from '../components/ConsistencyChart'
 
 const SEASONS = getAvailableSeasons()
 const WEEKS = Array.from({ length: 18 }, (_, i) => i + 1)
@@ -54,6 +55,7 @@ export default function Optimizer() {
   // honoured a 46-49% cap and pooled to 55.6% on seven players.
   const [poolExposure, setPoolExposure] = useState(false)
   const [showPool, setShowPool] = useState(false)
+  const [showSteady, setShowSteady] = useState(false)
 
   const [exposureScope, setExposureScope] = useState<'build' | 'week'>('build')
   const [openLineups, setOpenLineups] = useState<Set<string>>(new Set())
@@ -340,7 +342,27 @@ export default function Optimizer() {
         >
           {showPool ? 'Hide' : 'Lock, fade or set a share for one player'}
         </button>
+        <button
+          onClick={() => setShowSteady((open) => !open)}
+          className="text-slate-400 hover:text-slate-200 transition-colors"
+        >
+          {showSteady ? 'Hide' : 'Who gets the ball every week'}
+        </button>
       </div>
+
+      {showSteady && (
+        <div className="mb-6">
+          <h3 className="text-sm font-medium text-slate-200 mb-1">Consistency</h3>
+          <p className="text-xs text-slate-500 mb-3">
+            Ranked on volume, not on scoring. A player's scoring spread does not
+            persist — split-half, his fantasy-point SD correlates −0.05 with his
+            own other half once scoring level is controlled, while his mean
+            correlates +0.64. His usage does: +0.94, and +0.41 for its spread.
+            Steady usage is the only route to a steady score that measures.
+          </p>
+          <ConsistencyChart season={season} week={week} />
+        </div>
+      )}
 
       {showPool && saved && (
         <div className="mb-6">

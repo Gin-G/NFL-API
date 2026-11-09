@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from './client'
 import type {
+  ConsistencyResponse,
   ExposureResponse,
   LineupPerformance,
   LineupResponse,
@@ -228,5 +229,29 @@ export function useClearPoolRules(season: number, week?: number) {
       return data
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['playerPool'] }),
+  })
+}
+
+/** Who gets the ball steadily — the only kind of consistency that measures. */
+export function useConsistency(
+  season: number, week?: number,
+  options: { positions?: string; minGames?: number; minOpportunities?: number } = {},
+) {
+  return useQuery({
+    queryKey: ['consistency', season, week, options.positions, options.minGames,
+               options.minOpportunities],
+    queryFn: async () => {
+      const params: Record<string, number | string> = { season, limit: 300 }
+      if (week !== undefined) params.week = week
+      if (options.positions) params.positions = options.positions
+      if (options.minGames !== undefined) params.min_games = options.minGames
+      if (options.minOpportunities !== undefined) {
+        params.min_opportunities = options.minOpportunities
+      }
+      const { data } = await apiClient.get<ConsistencyResponse>(
+        '/dfs/consistency', { params })
+      return data
+    },
+    staleTime: 1000 * 60 * 10,
   })
 }
