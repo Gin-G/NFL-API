@@ -42,6 +42,7 @@ _OPP_FIELDS = [
     "targets", "red_zone_targets", "end_zone_targets", "carries",
     "red_zone_carries", "goal_line_carries", "air_yards", "touches",
     "goal_line_touches", "third_down_targets", "deep_targets", "short_targets",
+    "pass_attempts",
 ]
 
 
@@ -54,7 +55,7 @@ def process_week_opportunities(week_data: pd.DataFrame, week, year) -> list[dict
             "carries": 0, "red_zone_carries": 0, "goal_line_carries": 0,
             "air_yards": 0, "touches": 0, "goal_line_touches": 0,
             "third_down_targets": 0, "deep_targets": 0, "short_targets": 0,
-            "team": "",
+            "pass_attempts": 0, "team": "",
         }
 
     opportunities: dict = defaultdict(_blank)
@@ -69,6 +70,15 @@ def process_week_opportunities(week_data: pd.DataFrame, week, year) -> list[dict
         if play_type == "pass":
             receiver_id = play.get("receiver_player_id")
             posteam = play.get("posteam")
+            # A sack is a dropback, not an attempt. Counted this way the
+            # attempts match nflverse's box score to within spikes and
+            # two-point tries (2026 weeks 1-9: 0.03 a game).
+            passer_id = play.get("passer_player_id")
+            if pd.notna(passer_id) and play.get("sack") != 1:
+                qb = opportunities[passer_id]
+                qb["player_id"] = passer_id
+                qb["pass_attempts"] += 1
+                qb["team"] = posteam
             if pd.notna(receiver_id):
                 opp = opportunities[receiver_id]
                 opp["player_id"] = receiver_id
@@ -258,12 +268,15 @@ def calculate_opportunity_trends(opp_df: pd.DataFrame, min_weeks: int = 2) -> pd
 # metric's own unit -- looks a game -- and refuses to call a direction the
 # player's own week-to-week spread does not support.
 
-#: The three series a chart is drawn for. `opportunities` is targets plus
-#: carries, the same thing the rest of this file calls `touches`.
+#: The series a chart is drawn for. `opportunities` is targets plus carries,
+#: or pass attempts plus carries for a quarterback -- the definition
+#: `nfl_projections.opportunity` uses, so the chart and the consistency
+#: rankings cannot disagree about who gets the ball.
 WEEKLY_METRICS = {
-    "opportunities": "touches",
+    "opportunities": "opportunities",
     "targets": "targets",
     "carries": "carries",
+    "pass_attempts": "pass_attempts",
 }
 
 #: Games that count as "lately" -- the same three `nfl_projections.consistency`
@@ -281,7 +294,8 @@ RECENT_SPAN_WEEKS = 5
 
 #: The smallest change worth a direction, in looks a game. Below this the
 #: arrow would be reporting a difference nobody would act on.
-MIN_CHANGE = {"opportunities": 2.0, "targets": 1.5, "carries": 1.5}
+MIN_CHANGE = {"opportunities": 2.0, "targets": 1.5, "carries": 1.5,
+              "pass_attempts": 3.0}
 
 
 def _direction(values: list, metric: str, *, recent_span: Optional[int] = None) -> dict:
@@ -340,6 +354,13 @@ def weekly_series(opp_df: pd.DataFrame) -> tuple[list, list]:
     if opp_df is None or opp_df.empty:
         return [], []
     weeks = sorted(int(w) for w in opp_df["week"].dropna().unique())
+    opp_df = opp_df.copy()
+    if "pass_attempts" not in opp_df.columns:
+        opp_df["pass_attempts"] = 0.0
+    is_qb = opp_df.get("position", pd.Series("", index=opp_df.index)) == "QB"
+    opp_df["opportunities"] = np.where(
+        is_qb, opp_df["pass_attempts"].fillna(0) + opp_df["carries"].fillna(0),
+        opp_df["touches"].fillna(0))
     players = []
     for player_id, rows in opp_df.groupby("player_id"):
         rows = rows.sort_values("week").drop_duplicates("week", keep="last")
@@ -373,6 +394,46 @@ def weekly_series(opp_df: pd.DataFrame) -> tuple[list, list]:
             "latest_week": int(latest["week"]),
             "metrics": metrics,
         })
+    return weeks, players
+
+
+#: The weekly series is a full season of play-by-play walked row by row --
+#: seconds per request. It only changes when the loader adds plays, so it is
+#: kept per season and thrown away when the table's row count or last week
+#: moves, or after WEEKLY_CACHE_SECONDS whatever happens.
+WEEKLY_CACHE_SECONDS = 6 * 3600
+_weekly_cache: dict = {}
+
+
+def _pbp_fingerprint(db: Session, season: int):
+    """(rows, last week) of the season's regular-season plays, or None."""
+    from sqlalchemy import text
+    try:
+        row = db.execute(text(
+            "SELECT COUNT(*), MAX(week) FROM play_by_play "
+            "WHERE season = :season AND season_type = 'REG'"),
+            {"season": season}).first()
+        return (int(row[0]), int(row[1]) if row[1] is not None else None)
+    except Exception:
+        db.rollback()
+        return None
+
+
+def cached_weekly_series(db: Session, season: int) -> tuple[list, list]:
+    """`weekly_series` for a season, recomputed only when the plays change."""
+    import time
+    fingerprint = _pbp_fingerprint(db, season)
+    hit = _weekly_cache.get(season)
+    now = time.time()
+    if (hit and fingerprint is not None and hit["fingerprint"] == fingerprint
+            and now - hit["at"] < WEEKLY_CACHE_SECONDS):
+        return hit["weeks"], hit["players"]
+    weeks, players = weekly_series(_enriched_opportunities(db, season))
+    # Nothing is kept without a fingerprint: then there is no way to know when
+    # it has gone stale, and a stale chart is worse than a slow one.
+    if fingerprint is not None and players:
+        _weekly_cache[season] = {"fingerprint": fingerprint, "at": now,
+                                 "weeks": weeks, "players": players}
     return weeks, players
 
 
@@ -480,7 +541,7 @@ def get_opportunity_weekly(
         "seeing one look a week has no trend to draw."),
     db: Session = Depends(get_db),
 ):
-    """Week-by-week opportunities, targets and carries per player, for charting.
+    """Week-by-week opportunities, targets, carries and pass attempts per player.
 
     Each player carries three series aligned to `weeks`, and for each one a
     direction: his last three games against the games before them. `up` and
@@ -497,11 +558,10 @@ def get_opportunity_weekly(
     empty = {"status": "no_data", "season": season, "weeks": [],
              "total_players": 0, "data": []}
     try:
-        opp_df = _enriched_opportunities(db, season)
+        weeks, players = cached_weekly_series(db, season)
     except Exception as e:
         logger.error("Error computing weekly opportunities: %s", e)
         return empty
-    weeks, players = weekly_series(opp_df)
 
     if team:
         players = [p for p in players if (p["team"] or "").upper() == team.upper()]

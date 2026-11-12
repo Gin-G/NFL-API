@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import api.opportunities as opp_mod
 from api.opportunities import (
     process_week_opportunities,
     compute_opportunities,
@@ -319,7 +320,7 @@ class TestWeeklyEndpoint:
         body = opp_client.get("/opportunities/weekly/?season=2024&min_per_game=0").json()
         assert body["status"] == "success"
         assert body["weeks"] == [1, 2]
-        assert body["metrics"] == ["opportunities", "targets", "carries"]
+        assert body["metrics"] == ["opportunities", "targets", "carries", "pass_attempts"]
         rec = next(p for p in body["data"] if p["player_id"] == "REC_A")
         assert rec["metrics"]["targets"]["values"] == [2.0, 1.0]
         assert rec["metrics"]["targets"]["direction"] == "too_few_games"
@@ -335,3 +336,87 @@ class TestWeeklyEndpoint:
         body = opp_client.get(
             "/opportunities/weekly/?season=2024&team=buf&min_per_game=0").json()
         assert body["status"] == "no_data"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_weekly_cache():
+    opp_mod._weekly_cache.clear()
+    yield
+    opp_mod._weekly_cache.clear()
+
+
+class TestQuarterbacks:
+    PLAYS = [
+        {"play_type": "pass", "posteam": "KC", "passer_player_id": "QB_1",
+         "receiver_player_id": "REC_A", "sack": 0, "down": 1, "yardline_100": 50,
+         "air_yards": 8.0, "rusher_player_id": None},
+        {"play_type": "pass", "posteam": "KC", "passer_player_id": "QB_1",
+         "receiver_player_id": None, "sack": 0, "down": 2, "yardline_100": 50,
+         "air_yards": 15.0, "rusher_player_id": None},          # incompletion, no target
+        {"play_type": "pass", "posteam": "KC", "passer_player_id": "QB_1",
+         "receiver_player_id": None, "sack": 1, "down": 3, "yardline_100": 50,
+         "air_yards": None, "rusher_player_id": None},          # a sack: not an attempt
+        {"play_type": "run", "posteam": "KC", "passer_player_id": None,
+         "receiver_player_id": None, "sack": 0, "down": 1, "yardline_100": 40,
+         "air_yards": None, "rusher_player_id": "QB_1"},        # a scramble is a carry
+    ]
+
+    def test_attempts_count_throws_not_sacks(self):
+        recs = {r["player_id"]: r for r in
+                process_week_opportunities(pd.DataFrame(self.PLAYS), 1, 2024)}
+        assert recs["QB_1"]["pass_attempts"] == 2
+        assert recs["QB_1"]["carries"] == 1
+        # The receiver's numbers are untouched by the passer being counted.
+        assert recs["REC_A"]["targets"] == 1 and recs["REC_A"]["pass_attempts"] == 0
+
+    def test_a_table_without_passer_columns_still_counts_everyone_else(self):
+        plays = pd.DataFrame(self.PLAYS).drop(columns=["passer_player_id", "sack"])
+        recs = {r["player_id"]: r for r in process_week_opportunities(plays, 1, 2024)}
+        assert recs["REC_A"]["targets"] == 1
+        assert recs["QB_1"]["pass_attempts"] == 0 and recs["QB_1"]["carries"] == 1
+
+    def test_a_quarterback_opportunity_is_an_attempt_or_a_carry(self):
+        frame = _weekly_frame({"QB_1": {1: (0, 4), 2: (0, 6)}}, position="QB")
+        frame["pass_attempts"] = [30, 35]
+        _, (qb,) = weekly_series(frame)
+        assert qb["metrics"]["opportunities"]["values"] == [34.0, 41.0]
+        assert qb["metrics"]["pass_attempts"]["values"] == [30.0, 35.0]
+        # Everyone else is still targets plus carries.
+        _, (wr,) = weekly_series(_weekly_frame({"W": {1: (7, 1)}}))
+        assert wr["metrics"]["opportunities"]["values"] == [8.0]
+        assert wr["metrics"]["pass_attempts"]["values"] == [0.0]
+
+
+class TestWeeklyCache:
+    def test_a_second_request_does_not_walk_the_plays_again(self, opp_client, monkeypatch):
+        calls = []
+        real = opp_mod._enriched_opportunities
+        monkeypatch.setattr(opp_mod, "_enriched_opportunities",
+                            lambda db, season, week=None: calls.append(season) or real(db, season))
+        url = "/opportunities/weekly/?season=2024&min_per_game=0"
+        first = opp_client.get(url).json()
+        second = opp_client.get(url).json()
+        assert calls == [2024]
+        assert first["data"] == second["data"]
+
+    def test_new_plays_throw_the_cache_away(self, opp_client, monkeypatch):
+        calls = []
+        real = opp_mod._enriched_opportunities
+        monkeypatch.setattr(opp_mod, "_enriched_opportunities",
+                            lambda db, season, week=None: calls.append(season) or real(db, season))
+        prints = iter([(5, 2), (6, 3)])
+        monkeypatch.setattr(opp_mod, "_pbp_fingerprint", lambda db, season: next(prints))
+        url = "/opportunities/weekly/?season=2024&min_per_game=0"
+        opp_client.get(url)
+        opp_client.get(url)
+        assert calls == [2024, 2024]
+
+    def test_nothing_is_kept_without_a_fingerprint(self, opp_client, monkeypatch):
+        monkeypatch.setattr(opp_mod, "_pbp_fingerprint", lambda db, season: None)
+        opp_client.get("/opportunities/weekly/?season=2024&min_per_game=0")
+        assert opp_mod._weekly_cache == {}
+
+    def test_a_filter_does_not_shrink_what_is_cached(self, opp_client):
+        opp_client.get("/opportunities/weekly/?season=2024&team=BUF&min_per_game=0")
+        body = opp_client.get("/opportunities/weekly/?season=2024&min_per_game=0").json()
+        assert {p["player_id"] for p in body["data"]} >= {"REC_A", "RUSH_B"}

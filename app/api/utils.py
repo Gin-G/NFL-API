@@ -226,6 +226,10 @@ _PBP_OPP_COLUMNS = [
     "play_type", "down", "yardline_100", "air_yards",
     "receiver_player_id", "rusher_player_id", "posteam", "week",
 ]
+# Read when the table has them, which production's does: a quarterback's pass
+# attempts are his opportunities. An older or hand-built table without them
+# still serves everything else rather than falling through to a network fetch.
+_PBP_OPP_OPTIONAL = ["passer_player_id", "sack"]
 
 
 def load_pbp_df(db, season: int, week: Optional[int] = None) -> pd.DataFrame:
@@ -242,11 +246,20 @@ def load_pbp_df(db, season: int, week: Optional[int] = None) -> pd.DataFrame:
             conditions.append("week = :week")
             params["week"] = week
         where = " AND ".join(conditions)
-        cols = ", ".join(_PBP_OPP_COLUMNS)
-        sql = f"SELECT {cols} FROM play_by_play WHERE {where}"
-        rows = db.execute(text(sql), params).mappings().all()
-        if rows:
-            return pd.DataFrame([dict(r) for r in rows])
+        for columns in (_PBP_OPP_COLUMNS + _PBP_OPP_OPTIONAL, _PBP_OPP_COLUMNS):
+            sql = f"SELECT {', '.join(columns)} FROM play_by_play WHERE {where}"
+            try:
+                rows = db.execute(text(sql), params).mappings().all()
+            except Exception as e:
+                db.rollback()
+                if columns is _PBP_OPP_COLUMNS:
+                    raise
+                logger.info("play_by_play lacks %s (%s); reading without them",
+                            _PBP_OPP_OPTIONAL, e)
+                continue
+            if rows:
+                return pd.DataFrame([dict(r) for r in rows])
+            break
     except Exception as e:
         logger.warning("DB PBP unavailable, falling back to nflreadpy: %s", e)
     import nflreadpy as nfl
@@ -255,7 +268,7 @@ def load_pbp_df(db, season: int, week: Optional[int] = None) -> pd.DataFrame:
         df = df[df["season_type"] == "REG"]
     if week is not None:
         df = df[df["week"] == week]
-    keep = [c for c in _PBP_OPP_COLUMNS if c in df.columns]
+    keep = [c for c in _PBP_OPP_COLUMNS + _PBP_OPP_OPTIONAL if c in df.columns]
     return df[keep].copy()
 
 
