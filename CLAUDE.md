@@ -63,6 +63,15 @@ and ships against the old package.
 The image pins `pandas==2.1.4`, which is why pandas-3 behaviour differences
 surface in nfl-data-py's CI but never in production here.
 
+### `k8s/` is not deployed by anything
+
+Only `helm/nfl-api/` is synced by ArgoCD. The manifests in `k8s/` (the Tue/Wed
+projections cron, the accuracy and roster-sync crons, the model-cache claim)
+exist in the cluster only if someone ran `kubectl apply` on them, and a change
+there does nothing until someone does again. The weekend projection refresh
+sat in `k8s/` for two weeks without ever running for exactly this reason. A new
+scheduled job belongs in `helm/nfl-api/templates/`.
+
 ### The smoke-test job
 
 Cloudflare bot-challenges the GitHub runner, so the job often cannot reach the

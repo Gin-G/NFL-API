@@ -25,13 +25,27 @@
 # One schedule covers all three, so it also fires Fri/Sat 06:00 and Sun 17:00.
 # Those extra runs are harmless: cached model, minutes each, and Sunday 17:00
 # still refreshes the night games before their kickoff.
+#
+# In the CHART rather than in k8s/, where this file sat from 2026-10-28 until
+# 2026-11-10 without ever running: k8s/ waits on a hand `kubectl apply`, and
+# GET /projections/refresh on 2026-11-09 still gave the Wednesday run as the
+# last one, a full Fri/Sat/Sun later. Here it deploys itself on sync, like the
+# db-loader and the lineup scoring. The object keeps the name the k8s/ copy
+# had, so if that copy was ever applied this adopts it instead of starting a
+# second job beside it.
+#
+# It still leans on two things that live outside the chart: the
+# `nfl-api-model-cache` claim (k8s/model-cache-pvc.yaml) and the `cpu-avx`
+# node label. Both already exist, since the Tuesday/Wednesday job and the
+# refresh button use them.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: nfl-api-projections-refresh
-  namespace: nfl-api
+  name: {{ .Values.webapp.name }}-projections-refresh
+  namespace: {{ .Release.Namespace }}
   labels:
-    app: nfl-api-projections-refresh
+    app: {{ .Values.webapp.name }}-projections-refresh
+    group: {{ .Values.webapp.group }}
 spec:
   schedule: "0 6,17 * * 0,5,6"
   timeZone: "America/Denver"
@@ -48,7 +62,7 @@ spec:
       template:
         metadata:
           labels:
-            app: nfl-api-projections
+            app: {{ .Values.webapp.name }}-projections
         spec:
           restartPolicy: Never
           # TensorFlow needs AVX, and gingmachine's CPU does not have it: a run
@@ -64,8 +78,8 @@ spec:
             cpu-avx: "true"
           containers:
             - name: projections
-              image: docker.io/ncging/nfl-api:latest
-              imagePullPolicy: Always
+              image: {{ .Values.webapp.container.image }}
+              imagePullPolicy: {{ .Values.webapp.container.imagePullPolicy }}
               workingDir: /app
               command:
                 - /bin/sh
@@ -90,15 +104,15 @@ spec:
                 - name: PGUSER
                   valueFrom:
                     secretKeyRef:
-                      name: nfl-api-db-app-user
+                      name: {{ .Values.db.appUserSecret }}
                       key: username
                 - name: PGPASSWORD
                   valueFrom:
                     secretKeyRef:
-                      name: nfl-api-db-app-user
+                      name: {{ .Values.db.appUserSecret }}
                       key: password
                 - name: DATABASE_URL
-                  value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api-db"
+                  value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.{{ .Release.Namespace }}.svc.cluster.local:5432/nfl-api-db"
               resources:
                 requests:
                   memory: "2Gi"
