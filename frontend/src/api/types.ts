@@ -917,7 +917,10 @@ export interface LineupWeekPerformance {
   lineups: number
   scored_lineups: number
   projected: number | null
+  /** The objective `projected` is a total of; "mixed" when builds differ. */
+  projected_scale?: string | null
   actual: number | null
+  /** Only drawn for mean builds: a sum of ceilings minus a score is not an error. */
   error: number | null
   best_lineup_actual: number | null
   /** What FanDuel's own FPPG would have built from the same pool, scored. */
@@ -1012,6 +1015,25 @@ export interface LineupPerformance {
     worst: string | null
     spread: number | null
     one_week_only: boolean
+    /** "pooled": the ranking also measures how deep each objective was built. */
+    basis?: string
+  }
+  /** Objectives compared only inside one week at one requested depth. */
+  matched_depth?: {
+    cells: { week: number; contest: string; requested: number; top_k: number
+             actual: Record<string, number> }[]
+    pairs: { contest: string; first: string; second: string; cells: number
+             gaps: number[]; mean_gap: number; first_ahead: number }[]
+    note: string
+  }
+  /** A build's top five against its lineups ranked eleventh and below, per week. */
+  depth?: {
+    weeks: { week: number; builds: number; top_5: number; rank_11_plus: number
+             gap: number }[]
+    weeks_counted: number
+    mean_gap: number | null
+    weeks_top_ahead: number
+    note: string
   }
   /** Present only when a single week was asked for. */
   builds?: LineupBuildRecord[]

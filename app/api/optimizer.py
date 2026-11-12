@@ -1672,7 +1672,7 @@ def _perf_bucket(**fields) -> dict:
     return {**fields, "builds": 0, "lineups": 0, "complete": 0,
             "projected": [], "actual": [], "best_actual": None, "worst_actual": None,
             "fppg_points": [], "best_points": [], "beat_fppg": 0, "compared": 0,
-            "weeks": set()}
+            "weeks": set(), "objectives": set()}
 
 
 def _perf_add(bucket: dict, build, rows) -> None:
@@ -1691,6 +1691,7 @@ def _perf_add(bucket: dict, build, rows) -> None:
         # average is a season's evidence or one slate's. A build with nothing
         # scored yet does not buy its objective a week.
         bucket["weeks"].add(build.week)
+        bucket["objectives"].add(build.objective or "unknown")
     bucket["projected"].extend(e.projected_points for e in complete)
     bucket["actual"].extend(e.actual_points for e in complete)
     for entry in complete:
@@ -1709,15 +1710,26 @@ def _perf_add(bucket: dict, build, rows) -> None:
 
 def _perf_summary(bucket: dict) -> dict:
     projected, actual = _mean(bucket["projected"]), _mean(bucket["actual"])
+    # A lineup's stored total is the sum of whatever column its objective
+    # ranked on, so only a mean build's total is a forecast of its score. A
+    # ceiling build's is a sum of nine 90th percentiles -- week 9 of 2026 read
+    # "projected 217, actual 87, error 130", which was the word "ceiling" and
+    # not a miss. `projected` is still reported, labelled with its scale; the
+    # error is only drawn where subtracting the two means something.
+    objectives = bucket["objectives"]
+    scale = (next(iter(objectives)) if len(objectives) == 1
+             else "mixed" if objectives else None)
     return {
         "builds": bucket["builds"],
         "lineups": bucket["lineups"],
         "scored_lineups": bucket["complete"],
         "weeks_scored": len(bucket["weeks"]),
         "projected": projected,
+        "projected_scale": scale,
         "actual": actual,
         "error": (round(projected - actual, 2)
-                  if projected is not None and actual is not None else None),
+                  if scale == "mean" and projected is not None and actual is not None
+                  else None),
         "best_lineup_actual": bucket["best_actual"],
         "worst_lineup_actual": bucket["worst_actual"],
         "fppg_baseline": _mean(bucket["fppg_points"]),
@@ -1726,6 +1738,118 @@ def _perf_summary(bucket: dict) -> dict:
         "compared_to_fppg": bucket["compared"],
         "beat_fppg_rate": (round(bucket["beat_fppg"] / bucket["compared"], 3)
                            if bucket["compared"] else None),
+    }
+
+
+def _complete_ranked(rows):
+    """A build's fully scored lineups, best-projected first.
+
+    Inside one build every total is on the same scale, so the stored total is
+    a fair ranking there whatever the objective was.
+    """
+    complete = [e for e in rows
+                if e.actual_points is not None and not (e.unscored_players or 0)]
+    return sorted(complete, key=lambda e: (-(e.projected_points or 0.0),
+                                           e.lineup_index or 0))
+
+
+def _matched_depth(builds, entries) -> dict:
+    """Objectives compared only where they were built to the same depth.
+
+    A 25-lineup build reaches further down the pool than a 5-lineup one --
+    lineup 25 is worse than lineup 1 by construction -- so the pooled
+    `by_objective` average measures how many lineups each objective was asked
+    for as much as which objective asked. Here a cell is one (week, contest,
+    lineups requested); inside it every build is cut to its top k, k being the
+    fewest scored lineups any build in the cell has, and an objective built
+    twice counts once. Only cells holding two or more objectives appear.
+    """
+    cells: dict = {}
+    for build in builds:
+        ranked = _complete_ranked(entries.get(build.id, []))
+        if not ranked:
+            continue
+        key = (build.week, build.contest or "unknown",
+               build.num_requested or build.num_built or len(ranked))
+        cells.setdefault(key, []).append((build.objective or "unknown", ranked))
+
+    out_cells, pairs = [], {}
+    for (week, contest, depth), members in sorted(
+            cells.items(), key=lambda kv: (kv[0][0] or 0, kv[0][1], kv[0][2])):
+        if len({objective for objective, _ in members}) < 2:
+            continue
+        k = min(len(ranked) for _, ranked in members)
+        per_objective: dict = {}
+        for objective, ranked in members:
+            per_objective.setdefault(objective, []).append(
+                sum(e.actual_points for e in ranked[:k]) / k)
+        scores = {o: round(sum(v) / len(v), 2) for o, v in per_objective.items()}
+        out_cells.append({"week": week, "contest": contest, "requested": depth,
+                          "top_k": k, "actual": scores})
+        names = sorted(scores)
+        for i, first in enumerate(names):
+            for second in names[i + 1:]:
+                pairs.setdefault((contest, first, second), []).append(
+                    round(scores[first] - scores[second], 2))
+
+    return {
+        "cells": out_cells,
+        "pairs": [{
+            "contest": contest, "first": first, "second": second,
+            "cells": len(gaps), "gaps": gaps,
+            "mean_gap": round(sum(gaps) / len(gaps), 2),
+            "first_ahead": sum(1 for g in gaps if g > 0),
+        } for (contest, first, second), gaps in sorted(pairs.items())],
+        "note": ("Each cell is one week at one requested depth, every build cut to "
+                 "its top_k lineups. A gap is first minus second. The spread between "
+                 "two builds of the SAME objective has run larger than these gaps, "
+                 "so a pair needs many cells with one sign before it means anything."),
+    }
+
+
+DEPTH_HEAD = 5       # the lineups a small entry would actually play
+DEPTH_TAIL_FROM = 11  # where week 6 of 2026 crossed under the FPPG baseline
+
+
+def _depth_record(builds, entries) -> dict:
+    """What going further down a build has cost, week by week.
+
+    The one lineup-level regularity the record has is that a build's own
+    projected rank orders its lineups. This is the readback of that: the mean
+    actual of each build's top five against its lineups ranked eleventh and
+    below, classic builds deep enough to have both, averaged inside a week so
+    a week is one observation -- its builds share a slate, a board and most of
+    their players.
+    """
+    by_week: dict = {}
+    for build in builds:
+        if (build.contest or "classic") != "classic":
+            continue
+        ranked = _complete_ranked(entries.get(build.id, []))
+        if len(ranked) < DEPTH_TAIL_FROM:
+            continue
+        head = ranked[:DEPTH_HEAD]
+        tail = ranked[DEPTH_TAIL_FROM - 1:]
+        by_week.setdefault(build.week, []).append((
+            sum(e.actual_points for e in head) / len(head),
+            sum(e.actual_points for e in tail) / len(tail)))
+
+    weeks = []
+    for week in sorted(by_week, key=lambda w: w or 0):
+        rows = by_week[week]
+        head = sum(h for h, _ in rows) / len(rows)
+        tail = sum(t for _, t in rows) / len(rows)
+        weeks.append({"week": week, "builds": len(rows), "top_5": round(head, 2),
+                      "rank_11_plus": round(tail, 2), "gap": round(head - tail, 2)})
+    gaps = [w["gap"] for w in weeks]
+    return {
+        "weeks": weeks,
+        "weeks_counted": len(weeks),
+        "mean_gap": round(sum(gaps) / len(gaps), 2) if gaps else None,
+        "weeks_top_ahead": sum(1 for g in gaps if g > 0),
+        "note": ("top_5 minus rank_11_plus, per build, averaged within the week. A "
+                 "week is one observation however many lineups it holds; read the "
+                 "count of weeks before the mean."),
     }
 
 
@@ -2002,6 +2126,10 @@ def lineup_performance(
         "one_week_only": (len(scored) <= 1
                           or (best_weeks is not None and best_weeks <= 1)
                           or (worst_weeks is not None and worst_weeks <= 1)),
+        # This ranking pools every lineup an objective produced, so it also
+        # measures how deep each objective was built. `matched_depth` is the
+        # same question with that taken out.
+        "basis": "pooled",
     }
 
     detail = []
@@ -2057,6 +2185,8 @@ def lineup_performance(
         "totals": totals,
         "by_objective": objectives,
         "objective_verdict": verdict,
+        "matched_depth": _matched_depth(builds, entries),
+        "depth": _depth_record(builds, entries),
         **({"builds": detail} if week is not None else {}),
         "note": ("fppg_baseline is the lineup FanDuel's own FPPG would have built from "
                  "the same pool under the same cap, scored on what happened — the "

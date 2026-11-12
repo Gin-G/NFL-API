@@ -597,3 +597,118 @@ class TestTheRecordIsReadable:
         for value in numbers:
             if value is not None:
                 assert round(value, 2) == value, f"{value} is not display-ready"
+
+
+def _ns_build(build_id, week, objective, requested, contest="classic"):
+    from types import SimpleNamespace
+    return SimpleNamespace(id=build_id, week=week, objective=objective,
+                           contest=contest, num_requested=requested, num_built=requested)
+
+
+def _ns_lineups(actuals, unscored=()):
+    """Lineups already in projected order: the first is the build's best."""
+    from types import SimpleNamespace
+    return [SimpleNamespace(lineup_index=i + 1, projected_points=200.0 - i,
+                            actual_points=a, unscored_players=int(i in unscored))
+            for i, a in enumerate(actuals)]
+
+
+class TestTheRecordSeparatesObjectiveFromDepth:
+    """A 25-lineup build reaches further down the pool than a 5-lineup one, so
+    pooling them measures how many lineups were asked for. The live record put
+    "floor" top and "ceiling" bottom on exactly that."""
+
+    def test_a_ceiling_total_is_not_reported_as_an_error(self, client, db_session):
+        _build(client, db_session, objective="ceiling")
+        _stats(db_session)
+        score_lineups.run(db_session, SEASON, week=WEEK)
+
+        (week,) = client.get("/optimizer/performance",
+                             params={"season": SEASON}).json()["weeks"]
+        assert week["projected_scale"] == "ceiling"
+        assert week["projected"] is not None     # still shown, now labelled
+        assert week["error"] is None             # a sum of ceilings minus a score
+
+    def test_a_mean_total_still_is(self, client, db_session):
+        _build(client, db_session, objective="mean")
+        _stats(db_session)
+        score_lineups.run(db_session, SEASON, week=WEEK)
+
+        (week,) = client.get("/optimizer/performance",
+                             params={"season": SEASON}).json()["weeks"]
+        assert week["projected_scale"] == "mean"
+        assert week["error"] == pytest.approx(week["projected"] - week["actual"], abs=0.02)
+
+    def test_objectives_are_compared_at_the_same_depth(self):
+        from api.optimizer import _matched_depth
+        builds = [_ns_build(1, 7, "mean", 5), _ns_build(2, 7, "ceiling", 5),
+                  # Deeper, so it belongs to a different cell and cannot drag
+                  # ceiling's number down in the five-lineup comparison.
+                  _ns_build(3, 7, "ceiling", 25)]
+        entries = {1: _ns_lineups([120, 110, 100, 90, 80]),
+                   2: _ns_lineups([110, 100, 90, 80, 70]),
+                   3: _ns_lineups([60] * 25)}
+
+        matched = _matched_depth(builds, entries)
+        (cell,) = matched["cells"]
+        assert (cell["week"], cell["requested"], cell["top_k"]) == (7, 5, 5)
+        assert cell["actual"] == {"mean": 100.0, "ceiling": 90.0}
+        (pair,) = matched["pairs"]
+        assert (pair["first"], pair["second"]) == ("ceiling", "mean")
+        assert pair["gaps"] == [-10.0] and pair["first_ahead"] == 0
+
+    def test_a_build_pressed_twice_counts_once(self):
+        """The builder is deterministic: the same settings return the same
+        lineups, and counting both weights whichever objective was rebuilt."""
+        from api.optimizer import _matched_depth
+        builds = [_ns_build(1, 7, "mean", 2), _ns_build(2, 7, "ceiling", 2),
+                  _ns_build(3, 7, "ceiling", 2)]
+        entries = {1: _ns_lineups([100, 100]), 2: _ns_lineups([80, 80]),
+                   3: _ns_lineups([80, 80])}
+        (cell,) = _matched_depth(builds, entries)["cells"]
+        assert cell["actual"]["ceiling"] == 80.0
+
+    def test_the_cut_is_the_shallowest_scored_build(self):
+        from api.optimizer import _matched_depth
+        builds = [_ns_build(1, 7, "mean", 4), _ns_build(2, 7, "floor", 4)]
+        # One of floor's four could not be scored, so both are read three deep.
+        entries = {1: _ns_lineups([90, 80, 70, 10]),
+                   2: _ns_lineups([60, 60, 60, 60], unscored={3})}
+        (cell,) = _matched_depth(builds, entries)["cells"]
+        assert cell["top_k"] == 3
+        assert cell["actual"] == {"mean": 80.0, "floor": 60.0}
+
+    def test_one_objective_at_a_depth_is_no_comparison(self):
+        from api.optimizer import _matched_depth
+        matched = _matched_depth([_ns_build(1, 7, "mean", 5)],
+                                 {1: _ns_lineups([100] * 5)})
+        assert matched["cells"] == [] and matched["pairs"] == []
+
+    def test_depth_is_read_one_week_at_a_time(self):
+        from api.optimizer import _depth_record
+        builds = [_ns_build(1, 6, "mean", 15), _ns_build(2, 6, "ceiling", 15),
+                  _ns_build(3, 7, "mean", 12),
+                  _ns_build(4, 7, "mean", 5)]            # too shallow to have a tail
+        entries = {1: _ns_lineups([130] * 5 + [110] * 5 + [90] * 5),
+                   2: _ns_lineups([110] * 5 + [100] * 5 + [70] * 5),
+                   3: _ns_lineups([80] * 5 + [90] * 5 + [100] * 2),
+                   4: _ns_lineups([150] * 5)}
+
+        depth = _depth_record(builds, entries)
+        assert [w["week"] for w in depth["weeks"]] == [6, 7]
+        first, second = depth["weeks"]
+        assert (first["builds"], first["top_5"], first["rank_11_plus"]) == (2, 120.0, 80.0)
+        assert second["gap"] == -20.0
+        # Two weeks, not 27 lineups: one each way.
+        assert depth["weeks_counted"] == 2 and depth["weeks_top_ahead"] == 1
+        assert depth["mean_gap"] == 10.0
+
+    def test_the_endpoint_carries_both(self, client, db_session):
+        _build(client, db_session, objective="mean")
+        _stats(db_session)
+        score_lineups.run(db_session, SEASON, week=WEEK)
+
+        body = client.get("/optimizer/performance", params={"season": SEASON}).json()
+        assert body["matched_depth"]["cells"] == []      # one objective, one lineup
+        assert body["depth"]["weeks_counted"] == 0 and body["depth"]["mean_gap"] is None
+        assert body["objective_verdict"]["basis"] == "pooled"
