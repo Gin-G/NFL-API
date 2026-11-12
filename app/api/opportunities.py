@@ -249,6 +249,133 @@ def calculate_opportunity_trends(opp_df: pd.DataFrame, min_weeks: int = 2) -> pd
     return pd.DataFrame(trend_records)
 
 
+# ── Weekly series and a direction call, for charting ─────────────────────────
+#
+# `calculate_opportunity_trends` above reports a PERCENT change, which is what
+# the NickKnows tables were ported with and what makes them hard to read: a
+# player going from one target to three is "+200%" and sorts above a starter
+# going from six to nine. The chart endpoint below states the change in the
+# metric's own unit -- looks a game -- and refuses to call a direction the
+# player's own week-to-week spread does not support.
+
+#: The three series a chart is drawn for. `opportunities` is targets plus
+#: carries, the same thing the rest of this file calls `touches`.
+WEEKLY_METRICS = {
+    "opportunities": "touches",
+    "targets": "targets",
+    "carries": "carries",
+}
+
+#: Games that count as "lately" -- the same three `nfl_projections.consistency`
+#: uses for its usage trend, so the two screens cannot disagree about a player.
+RECENT_GAMES = 3
+
+#: Games needed BEFORE those three. One earlier game is not a baseline.
+MIN_EARLIER_GAMES = 2
+
+#: The recent games have to sit inside this many calendar weeks, counted back
+#: from the last week in the data: three games, a bye and one missed game.
+#: Beyond that the "last three" straddle an absence -- two games in September
+#: and one last Sunday -- and their average is not a current role.
+RECENT_SPAN_WEEKS = 5
+
+#: The smallest change worth a direction, in looks a game. Below this the
+#: arrow would be reporting a difference nobody would act on.
+MIN_CHANGE = {"opportunities": 2.0, "targets": 1.5, "carries": 1.5}
+
+
+def _direction(values: list, metric: str, *, recent_span: Optional[int] = None) -> dict:
+    """Recent games against the earlier ones, for one player and one metric.
+
+    `values` are his games in week order, weeks he did not appear in left out.
+    The call is `up` or `down` only when the change clears BOTH bars: the
+    metric's minimum, and the standard error of the difference between two
+    means drawn from his own games. Three games against five is a small
+    sample, so most real players come back `steady`, which is the honest
+    answer and the reason the label means something when it is not.
+
+    `recent_span` is how many calendar weeks back the oldest of the recent
+    games sits. Past `RECENT_SPAN_WEEKS` the call is `interrupted`: the numbers
+    are still reported, the direction is withheld.
+    """
+    games = len(values)
+    out = {"games": games, "per_game": None, "recent": None, "earlier": None,
+           "change": None, "noise": None, "direction": "too_few_games"}
+    if not games:
+        return out
+    out["per_game"] = round(float(np.mean(values)), 2)
+    if games < RECENT_GAMES + MIN_EARLIER_GAMES:
+        return out
+
+    recent = np.asarray(values[-RECENT_GAMES:], dtype=float)
+    earlier = np.asarray(values[:-RECENT_GAMES], dtype=float)
+    change = float(recent.mean() - earlier.mean())
+    # Spread inside each window, pooled, so a step change between the windows
+    # does not inflate the noise it is being judged against.
+    within = (((recent - recent.mean()) ** 2).sum()
+              + ((earlier - earlier.mean()) ** 2).sum())
+    sd = float(np.sqrt(within / (games - 2)))
+    noise = sd * float(np.sqrt(1.0 / len(recent) + 1.0 / len(earlier)))
+    bar = max(MIN_CHANGE[metric], noise)
+    out.update(
+        recent=round(float(recent.mean()), 2),
+        earlier=round(float(earlier.mean()), 2),
+        change=round(change, 2),
+        noise=round(noise, 2),
+        direction="up" if change >= bar else "down" if change <= -bar else "steady",
+    )
+    if recent_span is not None and recent_span > RECENT_SPAN_WEEKS:
+        out["direction"] = "interrupted"
+    return out
+
+
+def weekly_series(opp_df: pd.DataFrame) -> tuple[list, list]:
+    """(weeks, players): every player's week-by-week series with its direction.
+
+    A week the player has no row for is `None`, never 0. The records come from
+    play-by-play, so a missing week is a bye, an inactive or a game without a
+    look, and those cannot be told apart from here; drawing it as a zero would
+    turn every bye into a collapse and every injury into a downtrend.
+    """
+    if opp_df is None or opp_df.empty:
+        return [], []
+    weeks = sorted(int(w) for w in opp_df["week"].dropna().unique())
+    players = []
+    for player_id, rows in opp_df.groupby("player_id"):
+        rows = rows.sort_values("week").drop_duplicates("week", keep="last")
+        latest = rows.iloc[-1]
+        name = None
+        for col in ("player_display_name", "player_name"):
+            if col in rows.columns and pd.notna(latest.get(col)):
+                name = latest.get(col)
+                break
+        by_week = {int(r["week"]): r for _, r in rows.iterrows()}
+        metrics = {}
+        played_weeks = [w for w in weeks if w in by_week]
+        # Inclusive: a player whose last three games are weeks 7, 8 and 9 of a
+        # nine-week record has a span of three.
+        span = (weeks[-1] - played_weeks[-RECENT_GAMES] + 1
+                if len(played_weeks) >= RECENT_GAMES else None)
+        for metric, column in WEEKLY_METRICS.items():
+            played = [float(by_week[w][column]) for w in played_weeks]
+            metrics[metric] = {
+                "values": [float(by_week[w][column]) if w in by_week else None
+                           for w in weeks],
+                **_direction(played, metric, recent_span=span),
+            }
+        position = latest.get("position") if "position" in rows.columns else None
+        players.append({
+            "player_id": player_id,
+            "player_name": name or player_id,
+            "position": position if pd.notna(position) else "Unknown",
+            "team": latest.get("team") if pd.notna(latest.get("team")) else None,
+            "games": len(by_week),
+            "latest_week": int(latest["week"]),
+            "metrics": metrics,
+        })
+    return weeks, players
+
+
 def _enriched_opportunities(db: Session, season: int, week: Optional[int] = None) -> pd.DataFrame:
     """Load PBP + rosters and return enriched opportunity records."""
     pbp_df = load_pbp_df(db, season, week=week)
@@ -340,4 +467,76 @@ def get_opportunity_trends(
         "season": season,
         "total_players": len(data),
         "data": data,
+    }
+
+
+@router.get("/weekly/")
+def get_opportunity_weekly(
+    season: Optional[int] = Query(None, description="Season year (default: current)"),
+    team: Optional[str] = Query(None, description="Filter to a team abbreviation"),
+    position: Optional[str] = Query(None, description="QB, RB, WR or TE"),
+    min_per_game: float = Query(
+        3.0, ge=0, description="Opportunities a game to be included. A player "
+        "seeing one look a week has no trend to draw."),
+    db: Session = Depends(get_db),
+):
+    """Week-by-week opportunities, targets and carries per player, for charting.
+
+    Each player carries three series aligned to `weeks`, and for each one a
+    direction: his last three games against the games before them. `up` and
+    `down` are only called when the change is at least `trend_rule.min_change`
+    looks a game AND larger than the noise in his own weekly numbers; everyone
+    else is `steady`, a player with fewer than five games is `too_few_games`,
+    and one whose last three games straddle a long absence is `interrupted`
+    rather than guessed at.
+
+    The direction describes what has happened. It is not a projection and
+    nothing here feeds one.
+    """
+    season = season or get_current_nfl_season()
+    empty = {"status": "no_data", "season": season, "weeks": [],
+             "total_players": 0, "data": []}
+    try:
+        opp_df = _enriched_opportunities(db, season)
+    except Exception as e:
+        logger.error("Error computing weekly opportunities: %s", e)
+        return empty
+    weeks, players = weekly_series(opp_df)
+
+    if team:
+        players = [p for p in players if (p["team"] or "").upper() == team.upper()]
+    if position:
+        players = [p for p in players
+                   if (p["position"] or "").upper() == position.upper()]
+    players = [p for p in players
+               if (p["metrics"]["opportunities"]["per_game"] or 0.0) >= min_per_game]
+    if not players:
+        return empty
+    players.sort(key=lambda p: -(p["metrics"]["opportunities"]["per_game"] or 0.0))
+
+    return {
+        "status": "success",
+        "season": season,
+        "weeks": weeks,
+        "metrics": list(WEEKLY_METRICS),
+        "total_players": len(players),
+        "trend_rule": {
+            "recent_games": RECENT_GAMES,
+            "min_games": RECENT_GAMES + MIN_EARLIER_GAMES,
+            "min_change": MIN_CHANGE,
+            "recent_span_weeks": RECENT_SPAN_WEEKS,
+            "note": ("change = mean of his last %d games minus the mean of the "
+                     "games before them, in looks a game. up/down needs the "
+                     "change to clear both min_change and `noise`, the "
+                     "standard error of that difference from his own games. "
+                     "`interrupted` means his last %d games reach back more "
+                     "than %d weeks, across an absence, so no direction is "
+                     "called. A "
+                     "week with no row is null, not zero: a bye, an inactive "
+                     "and a game without a look are indistinguishable in "
+                     "play-by-play." % (RECENT_GAMES, RECENT_GAMES,
+                                        RECENT_SPAN_WEEKS)),
+        },
+        "min_per_game": min_per_game,
+        "data": players,
     }

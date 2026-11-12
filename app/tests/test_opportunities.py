@@ -28,6 +28,8 @@ from api.opportunities import (
     compute_opportunities,
     add_roster_info,
     calculate_opportunity_trends,
+    weekly_series,
+    _direction,
 )
 
 
@@ -207,3 +209,129 @@ class TestTrendsEndpoint:
         assert body["total_players"] == 1  # only REC_A has >= 2 weeks
         assert body["data"][0]["player_id"] == "REC_A"
         assert body["data"][0]["targets_trend"] == pytest.approx(-50.0)
+
+
+# ── Weekly series and the direction call ──────────────────────────────────────
+
+def _weekly_frame(series: dict, team="KC", position="WR") -> pd.DataFrame:
+    """{player: {week: (targets, carries)}} as opportunity rows."""
+    rows = []
+    for player, weeks in series.items():
+        for week, (targets, carries) in weeks.items():
+            rows.append({"player_id": player, "player_display_name": player,
+                         "position": position, "team": team, "season": 2024,
+                         "week": week, "targets": targets, "carries": carries,
+                         "touches": targets + carries})
+    return pd.DataFrame(rows)
+
+
+class TestDirection:
+    def test_a_clear_step_up_is_called(self):
+        d = _direction([4, 5, 4, 5, 9, 10, 9], "targets")
+        assert d["direction"] == "up"
+        assert d["earlier"] == 4.5 and d["recent"] == pytest.approx(9.33, abs=0.01)
+        assert d["change"] == pytest.approx(4.83, abs=0.01)
+
+    def test_and_a_step_down(self):
+        assert _direction([18, 20, 19, 21, 9, 8, 10], "carries")["direction"] == "down"
+
+    def test_a_small_change_is_steady_however_clean(self):
+        """One more target a game is under the bar even with no noise at all."""
+        d = _direction([6, 6, 6, 6, 7, 7, 7], "targets")
+        assert d["change"] == 1.0 and d["direction"] == "steady"
+
+    def test_a_big_change_inside_his_own_noise_is_steady(self):
+        """Up three a game, on a player who swings by ten week to week."""
+        d = _direction([2, 14, 3, 15, 2, 16, 15], "targets")
+        assert d["change"] >= 1.5
+        assert d["noise"] > d["change"]
+        assert d["direction"] == "steady"
+
+    def test_four_games_is_not_a_trend(self):
+        d = _direction([2, 3, 9, 10], "targets")
+        assert d["direction"] == "too_few_games"
+        assert d["per_game"] == 6.0 and d["change"] is None
+
+    def test_the_same_change_can_clear_one_bar_and_not_the_other(self):
+        """Opportunities need two a game, targets one and a half."""
+        values = [5, 5, 5, 5, 6.8, 6.8, 6.8]
+        assert _direction(values, "targets")["direction"] == "up"
+        assert _direction(values, "opportunities")["direction"] == "steady"
+
+
+class TestWeeklySeries:
+    def test_a_missing_week_is_a_gap_not_a_zero(self):
+        frame = _weekly_frame({
+            "A": {1: (5, 0), 2: (6, 0), 4: (7, 0)},        # week 3: bye or out
+            "B": {1: (1, 9), 2: (0, 11), 3: (2, 10), 4: (1, 12)},
+        })
+        weeks, players = weekly_series(frame)
+        assert weeks == [1, 2, 3, 4]
+        a = next(p for p in players if p["player_id"] == "A")
+        assert a["metrics"]["targets"]["values"] == [5.0, 6.0, None, 7.0]
+        assert a["games"] == 3
+        # Averaged over the games he played, not over the calendar.
+        assert a["metrics"]["targets"]["per_game"] == 6.0
+
+    def test_opportunities_are_targets_plus_carries(self):
+        frame = _weekly_frame({"B": {1: (1, 9), 2: (0, 11)}})
+        _, (b,) = weekly_series(frame)
+        assert b["metrics"]["opportunities"]["values"] == [10.0, 11.0]
+        assert b["metrics"]["carries"]["values"] == [9.0, 11.0]
+
+    def test_a_gap_does_not_break_the_recent_window(self):
+        """His last three GAMES, not the last three weeks on the calendar."""
+        frame = _weekly_frame({"A": {1: (4, 0), 2: (5, 0), 3: (4, 0),
+                                     4: (9, 0), 6: (10, 0), 7: (9, 0)}})
+        _, (a,) = weekly_series(frame)
+        targets = a["metrics"]["targets"]
+        assert targets["recent"] == pytest.approx(9.33, abs=0.01)
+        assert targets["direction"] == "up"
+
+    def test_three_games_either_side_of_an_absence_are_not_a_trend(self):
+        """Two games in September and one last week is not a current role."""
+        frame = _weekly_frame({
+            "BACK": {1: (3, 0), 2: (4, 0), 3: (9, 0), 4: (9, 0), 9: (9, 0)},
+            "HERE": {w: (4 if w < 7 else 9, 0) for w in range(1, 10)},
+        })
+        _, players = weekly_series(frame)
+        back = next(p for p in players if p["player_id"] == "BACK")
+        here = next(p for p in players if p["player_id"] == "HERE")
+        assert back["metrics"]["targets"]["direction"] == "interrupted"
+        # The numbers are still there to draw; only the call is withheld.
+        assert back["metrics"]["targets"]["change"] == 5.5
+        assert here["metrics"]["targets"]["direction"] == "up"
+
+    def test_a_bye_and_one_missed_game_do_not_interrupt(self):
+        frame = _weekly_frame({
+            "A": {1: (4, 0), 2: (4, 0), 3: (4, 0), 4: (4, 0), 5: (9, 0),
+                  7: (9, 0), 9: (9, 0)},
+        })
+        _, (a,) = weekly_series(frame)
+        assert a["metrics"]["targets"]["direction"] == "up"
+
+    def test_empty_in_empty_out(self):
+        assert weekly_series(pd.DataFrame()) == ([], [])
+
+
+class TestWeeklyEndpoint:
+    def test_shape(self, opp_client):
+        body = opp_client.get("/opportunities/weekly/?season=2024&min_per_game=0").json()
+        assert body["status"] == "success"
+        assert body["weeks"] == [1, 2]
+        assert body["metrics"] == ["opportunities", "targets", "carries"]
+        rec = next(p for p in body["data"] if p["player_id"] == "REC_A")
+        assert rec["metrics"]["targets"]["values"] == [2.0, 1.0]
+        assert rec["metrics"]["targets"]["direction"] == "too_few_games"
+        rush = next(p for p in body["data"] if p["player_id"] == "RUSH_B")
+        assert rush["metrics"]["carries"]["values"] == [2.0, None]
+        assert body["trend_rule"]["min_games"] == 5
+
+    def test_the_volume_floor_drops_the_bit_parts(self, opp_client):
+        body = opp_client.get("/opportunities/weekly/?season=2024&min_per_game=50").json()
+        assert body["status"] == "no_data" and body["data"] == []
+
+    def test_team_filter(self, opp_client):
+        body = opp_client.get(
+            "/opportunities/weekly/?season=2024&team=buf&min_per_game=0").json()
+        assert body["status"] == "no_data"
