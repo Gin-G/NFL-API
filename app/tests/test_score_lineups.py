@@ -712,3 +712,36 @@ class TestTheRecordSeparatesObjectiveFromDepth:
         assert body["matched_depth"]["cells"] == []      # one objective, one lineup
         assert body["depth"]["weeks_counted"] == 0 and body["depth"]["mean_gap"] is None
         assert body["objective_verdict"]["basis"] == "pooled"
+
+
+
+class TestRescoreUnderANewRule:
+    def test_a_frozen_build_on_an_old_rule_is_rescored(self, client, db_session):
+        build = _build(client, db_session)
+        _stats(db_session)
+        score_lineups.run(db_session, SEASON, week=WEEK)
+        db_session.refresh(build)
+        assert build.scored_at is not None
+        assert build.scoring_rule == score_lineups.SCORING_RULE
+        entry = _entry(db_session, build)
+        right = entry.actual_points
+
+        # As if it had been scored before the rule changed.
+        build.scoring_rule = None
+        entry.actual_points = right - 4.0
+        projected = entry.projected_points
+        db_session.commit()
+
+        assert [b.id for b in score_lineups.pending_builds(db_session, SEASON)] == [build.id]
+        score_lineups.run(db_session, SEASON, week=WEEK)
+        db_session.refresh(entry)
+        db_session.refresh(build)
+        assert entry.actual_points == pytest.approx(right)
+        assert entry.projected_points == projected        # never moves
+        assert build.scoring_rule == score_lineups.SCORING_RULE
+
+    def test_a_build_on_the_current_rule_stays_frozen(self, client, db_session):
+        _build(client, db_session)
+        _stats(db_session)
+        score_lineups.run(db_session, SEASON, week=WEEK)
+        assert score_lineups.pending_builds(db_session, SEASON) == []

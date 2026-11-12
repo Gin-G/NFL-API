@@ -39,6 +39,9 @@ NAIVE_WINDOW = 5   # games in the trailing-average baseline
 _CHUNK = 400       # player ids per IN (...) clause; SQLite caps bound parameters
 
 
+from api.utils import SCORING_RULE  # noqa: E402  (the rule each row is stamped with)
+
+
 def _fp(stat) -> float:
     from api.utils import fanduel_points
 
@@ -173,6 +176,7 @@ def score_week(db, season: int, week: int, rescore: bool = False) -> dict:
                              if naive_points is not None else None),
             prediction_type=proj.prediction_type, model_version=proj.model_version,
             projected_at=proj.computed_at, scored_at=datetime.utcnow(),
+            scoring_rule=SCORING_RULE,
         ))
         scored += 1
 
@@ -193,6 +197,63 @@ def score_week(db, season: int, week: int, rescore: bool = False) -> dict:
             summary["naive_mae"] = round(
                 sum(r.naive_abs_error for r in naive_rows) / len(naive_rows), 3)
     return summary
+
+
+def rescore_actuals(db, season: int, week: int = None) -> int:
+    """Re-score the ACTUAL side of rows stamped with an older scoring rule.
+
+    The frozen-row promise is about the projection: what was said before the
+    game never changes. The actual is a fact about the game scored by a rule,
+    and when the rule is corrected the record should be corrected with it --
+    otherwise every accuracy number mixes two scales. So this rewrites
+    actual_points, error, abs_error, in_band and the naive baseline (itself
+    scored by the rule), and leaves projected_points, floor, median and
+    ceiling exactly as they were. Rows whose player has no stat line any more
+    are left alone rather than deleted. Returns how many rows were updated.
+    """
+    from sqlalchemy import or_
+
+    from database.models import PlayerStat, ProjectionAccuracy
+
+    q = db.query(ProjectionAccuracy).filter(
+        ProjectionAccuracy.season == season,
+        or_(ProjectionAccuracy.scoring_rule.is_(None),
+            ProjectionAccuracy.scoring_rule != SCORING_RULE))
+    if week is not None:
+        q = q.filter(ProjectionAccuracy.week == week)
+    stale = q.all()
+    by_week: dict = {}
+    for row in stale:
+        by_week.setdefault(row.week, []).append(row)
+
+    updated = 0
+    for wk, rows in sorted(by_week.items()):
+        stats_q = db.query(PlayerStat).filter(
+            PlayerStat.season == season, PlayerStat.week == wk)
+        actuals = {s.player_id: s for s in _regular(stats_q, PlayerStat).all()}
+        naive = _naive_baselines(db, season, wk, {r.player_id for r in rows})
+        for row in rows:
+            stat = actuals.get(row.player_id)
+            if stat is None or row.projected_points is None:
+                continue
+            actual = _fp(stat)
+            error = float(row.projected_points) - actual
+            row.actual_points = round(actual, 2)
+            row.error = round(error, 2)
+            row.abs_error = round(abs(error), 2)
+            if row.floor is not None and row.ceiling is not None:
+                row.in_band = int(row.floor <= actual <= row.ceiling)
+            naive_points = naive.get(row.player_id)
+            row.naive_points = round(naive_points, 2) if naive_points is not None else None
+            row.naive_abs_error = (round(abs(naive_points - actual), 2)
+                                   if naive_points is not None else None)
+            row.scoring_rule = SCORING_RULE
+            updated += 1
+        db.commit()
+    if updated:
+        logger.info("Re-scored the actuals of %d %s row(s) under %s",
+                    updated, season, SCORING_RULE)
+    return updated
 
 
 def scorable_weeks(db, season: int):
@@ -224,6 +285,12 @@ def run(db, season: int, week: int = None, rescore: bool = False) -> list:
 
     summaries = []
     try:
+        # Before anything new: rows scored under an older rule get the current
+        # one, so a day's run leaves the whole table on a single scale.
+        rescored = rescore_actuals(db, season, week=week)
+        if rescored:
+            summaries.append({"season": season, "status": "rescored_actuals",
+                              "scored": 0, "rescored": rescored})
         for wk in weeks:
             summary = score_week(db, season, wk, rescore=rescore)
             summaries.append(summary)

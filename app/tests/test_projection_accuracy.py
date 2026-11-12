@@ -69,10 +69,47 @@ class TestFanduelScoring:
             "rushing_yards": 100, "receptions": 4, "receiving_yards": 50,
         }) == pytest.approx(20.0)
 
-    def test_fumbles_cost_two_each(self):
+    def test_a_lost_fumble_costs_two(self):
         from api.utils import fanduel_points
 
-        assert fanduel_points({"rushing_yards": 50, "rushing_fumbles": 1}) == pytest.approx(3.0)
+        assert fanduel_points({"rushing_yards": 50, "rushing_fumbles": 1,
+                               "rushing_fumbles_lost": 1}) == pytest.approx(3.0)
+        assert fanduel_points({"sack_fumbles": 1, "sack_fumbles_lost": 1}) == pytest.approx(-2.0)
+
+    def test_a_fumble_the_offense_recovers_costs_nothing(self):
+        """FanDuel charges fumbles LOST. This used to charge every fumble."""
+        from api.utils import fanduel_points
+
+        assert fanduel_points({"rushing_yards": 50, "rushing_fumbles": 1,
+                               "rushing_fumbles_lost": 0}) == pytest.approx(5.0)
+        # And no fallback to the all-fumbles column when the lost one is absent:
+        # that would quietly bring the old rule back.
+        assert fanduel_points({"rushing_yards": 50, "rushing_fumbles": 2}) == pytest.approx(5.0)
+
+    def test_a_two_point_conversion_pays_two_to_each_side_of_it(self):
+        from api.utils import fanduel_points
+
+        assert fanduel_points({"passing_2pt_conversions": 1}) == pytest.approx(2.0)
+        assert fanduel_points({"receiving_2pt_conversions": 1}) == pytest.approx(2.0)
+        assert fanduel_points({"rushing_2pt_conversions": 1}) == pytest.approx(2.0)
+
+    def test_agrees_with_the_projection_package(self):
+        """One rule on both sides, or projections and actuals sit on two scales."""
+        scoring = pytest.importorskip("nfl_projections.scoring")
+        if not hasattr(scoring, "fanduel_points_from_stats"):
+            pytest.skip("installed nfl_projections predates the shared rule")
+        import pandas as pd
+        from api.utils import fanduel_points
+
+        row = {"passing_yards": 312, "passing_tds": 2, "interceptions": 1,
+               "passing_interceptions": 1, "rushing_yards": 104, "rushing_tds": 1,
+               "receptions": 3, "receiving_yards": 22, "receiving_tds": 0,
+               "rushing_fumbles": 2, "rushing_fumbles_lost": 1, "sack_fumbles": 1,
+               "sack_fumbles_lost": 0, "passing_2pt_conversions": 1,
+               "rushing_2pt_conversions": 1}
+        ours = fanduel_points(row)
+        theirs = float(scoring.fanduel_points_from_stats(pd.DataFrame([row])).iloc[0])
+        assert ours == pytest.approx(theirs)
 
     def test_accepts_either_interception_column_name(self):
         from api.utils import fanduel_points
@@ -201,6 +238,52 @@ class TestScoreWeek:
         _project(db_session)
         _stat(db_session, season_type="POST")
         assert scorer.score_week(db_session, 2025, 3)["status"] == "no_actuals"
+
+
+class TestRescoreUnderANewRule:
+    """A corrected rule re-scores the actual side; the projection never moves."""
+
+    def _old_row(self, db):
+        _project(db, projected_points=15.0, floor=6.0, ceiling=30.0)
+        _stat(db, rushing_fumbles=1.0, rushing_fumbles_lost=0.0,
+              rushing_2pt_conversions=1.0)
+        scorer.score_week(db, 2025, 3)
+        row = db.query(ProjectionAccuracy).one()
+        # As the old rule would have stored it: -2 for the fumble, 0 for the 2pt.
+        row.actual_points -= 4.0
+        row.error += 4.0
+        row.abs_error = abs(row.error)
+        row.scoring_rule = None
+        db.commit()
+        return row
+
+    def test_stale_rows_get_the_current_rule(self, db_session):
+        row = self._old_row(db_session)
+        before_projected, stale_actual = row.projected_points, row.actual_points
+
+        assert scorer.rescore_actuals(db_session, 2025) == 1
+        row = db_session.query(ProjectionAccuracy).one()
+        assert row.actual_points == pytest.approx(stale_actual + 4.0)
+        assert row.error == pytest.approx(before_projected - row.actual_points)
+        assert row.projected_points == before_projected
+        assert row.scoring_rule == scorer.SCORING_RULE
+
+    def test_current_rows_are_left_alone(self, db_session):
+        self._old_row(db_session)
+        scorer.rescore_actuals(db_session, 2025)
+        assert scorer.rescore_actuals(db_session, 2025) == 0
+
+    def test_new_rows_are_stamped(self, db_session):
+        _project(db_session)
+        _stat(db_session)
+        scorer.score_week(db_session, 2025, 3)
+        assert db_session.query(ProjectionAccuracy).one().scoring_rule == scorer.SCORING_RULE
+
+    def test_the_daily_run_does_it_first(self, db_session):
+        self._old_row(db_session)
+        summaries = scorer.run(db_session, 2025)
+        assert summaries[0]["status"] == "rescored_actuals"
+        assert summaries[0]["rescored"] == 1
 
 
 class TestRun:

@@ -130,15 +130,31 @@ def _orm_to_dict(obj) -> dict:
     return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
 
 
+#: Which version of the scoring rule a stored score was computed under. The
+#: lineup and accuracy records carry it, and the daily scoring jobs re-score
+#: anything stamped with an older one -- actuals only, never a frozen
+#: projection. Change it whenever `fanduel_points` changes what it pays.
+#:   (none)                 -2 per fumble whether lost or not; 2pt paid 0
+#:   fanduel-2026-11-12     FanDuel's rule: -2 per fumble LOST, +2 per 2pt
+SCORING_RULE = "fanduel-2026-11-12"
+
+
 def fanduel_points(row) -> float:
     """FanDuel fantasy points for one player-game from its component stats.
 
-    ``row`` is anything with a ``.get`` (dict, pandas Series). Mirrors what
-    nfl_projections scores its training target on (config.FANDUEL_SCORING, with
-    the same -2 per fumble) — kept here so DB-only code paths can score without
-    importing that package, which drags in TensorFlow. Anything compared
-    against a projection must use THIS function: score the actual on a
+    ``row`` is anything with a ``.get`` (dict, pandas Series). Mirrors
+    ``nfl_projections.scoring.fanduel_points_from_stats``, which is what the
+    training target is scored on -- kept here so DB-only code paths can score
+    without importing that package, which drags in TensorFlow. Anything
+    compared against a projection must use THIS function: score the actual on a
     different scale and the difference shows up as model error.
+
+    FanDuel charges -2 for a fumble LOST and pays +2 for a two-point
+    conversion. Until 2026-11-12 this charged every fumble and paid nothing
+    for a conversion; 166 of 2,872 scored 2026 player-weeks moved, mostly by 2.
+    The lost-fumble columns are read and nothing else: falling back to the
+    all-fumbles columns when they are missing would quietly restore the old
+    rule.
 
     Accepts either ``interceptions`` (the API stats schema) or
     ``passing_interceptions`` (the nflverse/projection name). Note
@@ -153,14 +169,18 @@ def fanduel_points(row) -> float:
         return 0.0
 
     py, ry, recy = v("passing_yards"), v("rushing_yards"), v("receiving_yards")
-    fumbles = v("rushing_fumbles") + v("receiving_fumbles") + v("sack_fumbles")
+    fumbles_lost = (v("rushing_fumbles_lost") + v("receiving_fumbles_lost")
+                    + v("sack_fumbles_lost"))
+    two_point = (v("passing_2pt_conversions") + v("rushing_2pt_conversions")
+                 + v("receiving_2pt_conversions"))
     return (
         py * 0.04 + v("passing_tds") * 4 + v("interceptions", "passing_interceptions") * -1
         + (3 if py >= 300 else 0)
         + ry * 0.1 + v("rushing_tds") * 6 + (3 if ry >= 100 else 0)
         + v("receptions") * 0.5 + recy * 0.1 + v("receiving_tds") * 6
         + (3 if recy >= 100 else 0)
-        + fumbles * -2
+        + fumbles_lost * -2
+        + two_point * 2
     )
 
 

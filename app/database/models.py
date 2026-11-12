@@ -618,6 +618,9 @@ class ProjectionAccuracy(Base):
     error            = Column(Float)   # projected - actual (sign = bias direction)
     abs_error        = Column(Float)
     in_band          = Column(Integer) # 1 when floor <= actual <= ceiling (band coverage)
+    # api.utils.SCORING_RULE when the actual was scored. A row on an older rule
+    # has its actual side re-scored by the daily job; the projection never moves.
+    scoring_rule     = Column(String)
 
     naive_points     = Column(Float)   # trailing-5-game average FanDuel points
     naive_abs_error  = Column(Float)
@@ -761,6 +764,9 @@ class LineupBuild(Base):
     # trades expected points for a tilt against the field, so a build's score
     # cannot be read without knowing whether it paid that.
     ownership_weight     = Column(Float)
+    # api.utils.SCORING_RULE the lineups' actuals and baselines were scored
+    # under. A frozen build on an older rule is re-scored, actuals only.
+    scoring_rule         = Column(String)
 
     # WHEN the board it read was computed. 2026 week 7 was built twice, once
     # against a board that turned out to be the preseason projection still
@@ -946,7 +952,9 @@ def apply_light_migrations(engine) -> None:
               ("lineup_builds", "player_rules"): "TEXT",
               ("lineup_builds", "deduped_against"): "INTEGER",
               ("lineup_builds", "duplicates_skipped"): "INTEGER",
-              ("lineup_builds", "pool_exposure"): "INTEGER"}
+              ("lineup_builds", "pool_exposure"): "INTEGER",
+              ("lineup_builds", "scoring_rule"): "VARCHAR",
+              ("projection_accuracy", "scoring_rule"): "VARCHAR"}
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
     for (table, col), coltype in wanted.items():

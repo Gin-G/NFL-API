@@ -71,6 +71,9 @@ PA_TIERS = ((0, 0, 10), (1, 6, 7), (7, 13, 4), (14, 20, 1),
             (21, 27, 0), (28, 34, -1), (35, 999, -4))
 
 
+from api.utils import SCORING_RULE  # noqa: E402  (the rule each build is stamped with)
+
+
 def _fp(stat) -> float:
     """FanDuel points for a stat row, on the same scale as the projections."""
     from api.utils import fanduel_points
@@ -389,9 +392,14 @@ def score_build(db, build, actuals) -> dict:
         slate = db.query(FanduelSlate).filter(
             FanduelSlate.id == build.slate_id).one_or_none()
     baselines = _baselines(db, build, slate, actuals)
-    build.fppg_points = baselines["fppg_points"]
-    build.fppg_projected = baselines["fppg_projected"]
-    build.best_points = baselines["best_points"]
+    # A frozen build re-scored after its slate was deleted cannot rebuild its
+    # baselines. Keep the ones it has rather than overwrite them with nothing:
+    # an old-rule baseline is a few points off, a missing one is no record.
+    for key in ("fppg_points", "fppg_projected", "best_points"):
+        if baselines[key] is None and slate is None and getattr(build, key) is not None:
+            continue
+        setattr(build, key, baselines[key])
+    build.scoring_rule = SCORING_RULE
 
     # Frozen only when there is nothing left to learn about it. A partial score
     # is written (it is correct as far as it goes) but not frozen, so the next
@@ -426,14 +434,24 @@ def _mean(values):
 
 
 def pending_builds(db, season: int, week: int = None, rescore: bool = False):
-    """Builds worth scoring: unfrozen, and for a week that has been played."""
+    """Builds worth scoring: unfrozen, or frozen under an older scoring rule,
+    and for a week that has been played.
+
+    A frozen build's lineups and projections never change; re-scoring it only
+    recomputes the actuals and the two baselines, which are facts about the
+    games scored by a rule. When the rule is corrected they follow it.
+    """
+    from sqlalchemy import or_
+
     from database.models import LineupBuild, PlayerStat
 
     q = db.query(LineupBuild).filter(LineupBuild.season == season)
     if week is not None:
         q = q.filter(LineupBuild.week == week)
     if not rescore:
-        q = q.filter(LineupBuild.scored_at.is_(None))
+        q = q.filter(or_(LineupBuild.scored_at.is_(None),
+                         LineupBuild.scoring_rule.is_(None),
+                         LineupBuild.scoring_rule != SCORING_RULE))
     builds = q.order_by(LineupBuild.week, LineupBuild.id).all()
 
     played = {w for (w,) in db.query(PlayerStat.week).filter(
