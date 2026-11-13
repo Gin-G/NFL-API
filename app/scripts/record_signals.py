@@ -137,17 +137,9 @@ def score(db, season, week):
         logger.info("no stats for %s wk%s yet", season, week)
         return 0
 
-    get = lambda c: stats[c].fillna(0) if c in stats.columns else 0
-    fumbles = sum(get(c) for c in ("sack_fumbles_lost", "rushing_fumbles_lost",
-                                   "receiving_fumbles_lost"))
-    two = sum(get(c) for c in ("passing_2pt_conversions", "rushing_2pt_conversions",
-                               "receiving_2pt_conversions"))
-    points = scoring.fanduel_points(
-        passing_yards=get("passing_yards"), passing_tds=get("passing_tds"),
-        interceptions=get("passing_interceptions"), rushing_yards=get("rushing_yards"),
-        rushing_tds=get("rushing_tds"), receptions=get("receptions"),
-        receiving_yards=get("receiving_yards"), receiving_tds=get("receiving_tds"),
-        fumbles=fumbles, two_point_conversions=two)
+    # The package's one FanDuel rule, so a signal's actual sits on the same
+    # scale as the board it is measured against.
+    points = scoring.fanduel_points_from_stats(stats)
     actual = dict(zip(stats["player_id"], points))
 
     now, done = datetime.utcnow(), 0

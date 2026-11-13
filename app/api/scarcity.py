@@ -45,14 +45,14 @@ _cache: dict = {}
 # Exactly the columns api.utils.fanduel_points reads, and no others. Scarcity
 # baselines are compared against projections, so they have to be scored by the
 # same function the projections are scored by: lost fumbles, not all of them,
-# and two-point conversions.
+# two-point conversions, and return and fumble-recovery touchdowns.
 _STAT_COLUMNS = [
     "season", "week", "player_id", "player_display_name", "player_name",
     "position", "recent_team", "passing_yards", "passing_tds", "interceptions",
     "rushing_yards", "rushing_tds", "receptions", "receiving_yards",
     "receiving_tds", "rushing_fumbles_lost", "receiving_fumbles_lost",
     "sack_fumbles_lost", "passing_2pt_conversions", "rushing_2pt_conversions",
-    "receiving_2pt_conversions",
+    "receiving_2pt_conversions", "special_teams_tds", "fumble_recovery_tds",
 ]
 
 

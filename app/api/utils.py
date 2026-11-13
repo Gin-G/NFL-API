@@ -136,7 +136,8 @@ def _orm_to_dict(obj) -> dict:
 #: projection. Change it whenever `fanduel_points` changes what it pays.
 #:   (none)                 -2 per fumble whether lost or not; 2pt paid 0
 #:   fanduel-2026-11-12     FanDuel's rule: -2 per fumble LOST, +2 per 2pt
-SCORING_RULE = "fanduel-2026-11-12"
+#:   fanduel-2026-11-13     ...and +6 per return TD or offensive fumble-recovery TD
+SCORING_RULE = "fanduel-2026-11-13"
 
 
 def fanduel_points(row) -> float:
@@ -155,6 +156,10 @@ def fanduel_points(row) -> float:
     The lost-fumble columns are read and nothing else: falling back to the
     all-fumbles columns when they are missing would quietly restore the old
     rule.
+
+    It also pays +6 for a return touchdown (``special_teams_tds``) and for an
+    offensive fumble recovery touchdown (``fumble_recovery_tds``); nflverse
+    never puts one play in both. Neither was counted before 2026-11-13.
 
     Accepts either ``interceptions`` (the API stats schema) or
     ``passing_interceptions`` (the nflverse/projection name). Note
@@ -181,6 +186,7 @@ def fanduel_points(row) -> float:
         + (3 if recy >= 100 else 0)
         + fumbles_lost * -2
         + two_point * 2
+        + (v("special_teams_tds") + v("fumble_recovery_tds")) * 6
     )
 
 

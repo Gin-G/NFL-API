@@ -93,6 +93,12 @@ class TestFanduelScoring:
         assert fanduel_points({"receiving_2pt_conversions": 1}) == pytest.approx(2.0)
         assert fanduel_points({"rushing_2pt_conversions": 1}) == pytest.approx(2.0)
 
+    def test_pays_return_and_fumble_recovery_touchdowns(self):
+        from api.utils import fanduel_points
+
+        assert fanduel_points({"special_teams_tds": 1}) == pytest.approx(6.0)
+        assert fanduel_points({"fumble_recovery_tds": 1}) == pytest.approx(6.0)
+
     def test_agrees_with_the_projection_package(self):
         """One rule on both sides, or projections and actuals sit on two scales."""
         scoring = pytest.importorskip("nfl_projections.scoring")
@@ -106,7 +112,8 @@ class TestFanduelScoring:
                "receptions": 3, "receiving_yards": 22, "receiving_tds": 0,
                "rushing_fumbles": 2, "rushing_fumbles_lost": 1, "sack_fumbles": 1,
                "sack_fumbles_lost": 0, "passing_2pt_conversions": 1,
-               "rushing_2pt_conversions": 1}
+               "rushing_2pt_conversions": 1, "special_teams_tds": 1,
+               "fumble_recovery_tds": 1}
         ours = fanduel_points(row)
         theirs = float(scoring.fanduel_points_from_stats(pd.DataFrame([row])).iloc[0])
         assert ours == pytest.approx(theirs)

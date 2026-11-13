@@ -179,6 +179,7 @@ class PlayerStat(Base):
 
     # Special teams / other
     special_teams_tds = Column(Float)
+    fumble_recovery_tds = Column(Float)   # scored by FanDuel; see utils.fanduel_points
     fantasy_points = Column(Float)
     fantasy_points_ppr = Column(Float)
 
@@ -954,7 +955,8 @@ def apply_light_migrations(engine) -> None:
               ("lineup_builds", "duplicates_skipped"): "INTEGER",
               ("lineup_builds", "pool_exposure"): "INTEGER",
               ("lineup_builds", "scoring_rule"): "VARCHAR",
-              ("projection_accuracy", "scoring_rule"): "VARCHAR"}
+              ("projection_accuracy", "scoring_rule"): "VARCHAR",
+              ("player_stats", "fumble_recovery_tds"): "FLOAT"}
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
     for (table, col), coltype in wanted.items():

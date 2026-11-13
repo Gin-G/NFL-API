@@ -280,6 +280,7 @@ def load_player_stats(db: Session, season: int, force: bool = False) -> int:
             air_yards_share=_col(row, "air_yards_share"),
             wopr=_col(row, "wopr"),
             special_teams_tds=_col(row, "special_teams_tds"),
+            fumble_recovery_tds=_col(row, "fumble_recovery_tds"),
             fantasy_points=_col(row, "fantasy_points"),
             fantasy_points_ppr=_col(row, "fantasy_points_ppr"),
         ))
