@@ -42,7 +42,6 @@ import argparse
 import io
 import logging
 import os
-import re
 import sys
 from datetime import datetime
 
@@ -82,13 +81,6 @@ def _fp(stat) -> float:
                            for c in stat.__table__.columns})
 
 
-def _norm(name) -> str:
-    """Letters only, lower case — for the players whose name never joined to the
-    board, who therefore have no player_id to look up."""
-    name = re.sub(r"\s+(Jr\.?|Sr\.?|I{2,}|IV|V)$", "", str(name or "").strip())
-    return re.sub(r"[^a-z]", "", name.lower())
-
-
 def _team(code) -> str:
     code = str(code or "").strip().upper()
     return TEAM_ALIASES.get(code, code)
@@ -108,7 +100,8 @@ def _played_teams(db, season: int, week: int) -> set:
 
 
 def _player_actuals(db, season: int, week: int):
-    """``(by player_id, by normalized name)`` of FanDuel points for the week."""
+    """``(by player_id, who)``: FanDuel points for the week, and a frame of
+    who each stat line belongs to (id, name, team, position) for matching."""
     from sqlalchemy import or_
 
     from database.models import PlayerStat
@@ -117,15 +110,22 @@ def _player_actuals(db, season: int, week: int):
         PlayerStat.season == season, PlayerStat.week == week
     ).filter(or_(PlayerStat.season_type == "REG",
                  PlayerStat.season_type.is_(None))).all()
-    by_id, by_name = {}, {}
+    import pandas as pd
+
+    by_id, who = {}, []
     for row in rows:
-        points = _fp(row)
-        by_id[row.player_id] = points
-        for name in (row.player_name, row.player_display_name):
-            key = _norm(name)
-            if key:
-                by_name.setdefault(key, points)
-    return by_id, by_name
+        by_id[row.player_id] = _fp(row)
+        who.append({"player_id": row.player_id,
+                    "player_name": row.player_display_name or row.player_name,
+                    "team": _team(row.recent_team), "position": row.position})
+    # Names are matched by the package's one slate matcher (name + team, a
+    # unique name, then a unique last name at the position on the team). This
+    # used to take the first stat line for a bare normalised name: a namesake
+    # could lend his line, and a FanDuel spelling ("Joshua Palmer" for "Josh
+    # Palmer") missed, fell to "his team played, so he scored 0", and put a
+    # false zero into the FPPG and best-possible baselines.
+    frame = pd.DataFrame(who, columns=["player_id", "player_name", "team", "position"])
+    return by_id, frame.set_index("player_id", drop=False)
 
 
 def _dst_actuals(db, season: int, week: int) -> dict:
@@ -208,7 +208,10 @@ class Actuals:
     """Everything one week's scoring needs, loaded once for all its builds."""
 
     def __init__(self, db, season: int, week: int):
-        self.by_id, self.by_name = _player_actuals(db, season, week)
+        from nfl_projections.names import Matcher
+
+        self.by_id, who = _player_actuals(db, season, week)
+        self.matcher = Matcher(who)
         self.dst = _dst_actuals(db, season, week) if self.by_id else {}
         self.played = _played_teams(db, season, week)
 
@@ -224,9 +227,9 @@ class Actuals:
             return (points, True) if points is not None else (None, False)
         if player_id and player_id in self.by_id:
             return self.by_id[player_id], True
-        key = _norm(player_name)
-        if key and key in self.by_name:
-            return self.by_name[key], True
+        hit = self.matcher.match(player_name, team, position)
+        if hit is not None and hit in self.by_id:
+            return self.by_id[hit], True
         if team in self.played:
             # On the slate, his team has played, and he has no stat line: he did
             # not play. In a lineup that is a real zero, not a missing value.

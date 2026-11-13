@@ -609,7 +609,7 @@ def _player_history(db, season: int, week: int) -> pd.DataFrame:
         if not name:
             continue
         records.append({
-            "player_name": name, "week": row.week,
+            "player_name": name, "player_id": row.player_id, "week": row.week,
             "fantasy_points": fanduel_points(
                 {c.name: getattr(row, c.name) for c in row.__table__.columns}),
         })
@@ -1344,9 +1344,9 @@ def player_pool(
         frame = _player_history(db, season, week)
         if not frame.empty:
             points = pd.to_numeric(frame["fantasy_points"], errors="coerce")
-            keyed = pd.DataFrame({
-                "_key": frame["player_name"].map(opt.normalize_name),
-                "_p": points}).dropna()
+            # By player id: the slate row carries the board's id once matched,
+            # and a name two players share would pool their games.
+            keyed = pd.DataFrame({"_key": frame["player_id"], "_p": points}).dropna()
             stats = keyed.groupby("_key")["_p"].agg(["size", "min", "max", "median"])
             ranges = {k: row for k, row in stats.iterrows()}
 
@@ -1408,7 +1408,8 @@ def player_pool(
             row["value"] = round(float(proj) / (float(salary) / 1000.0), 3)
         else:
             row["value"] = None
-        stats = ranges.get(opt.normalize_name(nickname))
+        pid = r.get("player_id")
+        stats = ranges.get(pid) if isinstance(pid, str) else None
         row["history"] = (None if stats is None else {
             "games": int(stats["size"]), "low": round(float(stats["min"]), 1),
             "high": round(float(stats["max"]), 1),

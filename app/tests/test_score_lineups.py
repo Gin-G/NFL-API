@@ -745,3 +745,35 @@ class TestRescoreUnderANewRule:
         _stats(db_session)
         score_lineups.run(db_session, SEASON, week=WEEK)
         assert score_lineups.pending_builds(db_session, SEASON) == []
+
+
+class TestNamesOnTheSlate:
+    """A FanDuel spelling must find its stat line, and a shared name must not
+    lend one. Before 2026-11-13 a missed spelling fell through to "his team
+    played, so he scored 0" and went into both baselines as a zero."""
+
+    def _two(self, db):
+        rows = [("00-pal", "Josh Palmer", "WR", "BUF", 60.0),
+                ("00-jj1", "Justin Jefferson", "WR", "MIN", 90.0),
+                ("00-jj2", "Justin Jefferson", "LB", "CLE", 0.0)]
+        for pid, name, pos, team, yards in rows:
+            db.add(PlayerStat(player_id=pid, season=SEASON, week=WEEK, player_name=name,
+                              player_display_name=name, position=pos, recent_team=team,
+                              season_type="REG", receiving_yards=yards))
+        db.add(Schedule(game_id="g", season=SEASON, week=WEEK, game_type="REG",
+                        home_team="BUF", away_team="MIN", home_score=20, away_score=17))
+        db.commit()
+
+    def test_a_fanduel_spelling_finds_the_line(self, db_session):
+        self._two(db_session)
+        actuals = score_lineups.Actuals(db_session, SEASON, WEEK)
+        points, ok = actuals.points(position="WR", player_id=None,
+                                    player_name="Joshua Palmer", team="BUF")
+        assert ok and points == pytest.approx(6.0)
+
+    def test_a_shared_name_goes_by_team(self, db_session):
+        self._two(db_session)
+        actuals = score_lineups.Actuals(db_session, SEASON, WEEK)
+        points, ok = actuals.points(position="WR", player_id=None,
+                                    player_name="Justin Jefferson", team="MIN")
+        assert ok and points == pytest.approx(9.0)

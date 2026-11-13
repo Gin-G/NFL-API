@@ -102,6 +102,7 @@ def _history(db, season: int, week: int) -> pd.DataFrame:
             continue
         records.append({
             "player_name": name,
+            "player_id": row.player_id,
             "week": row.week,
             "fantasy_points": fanduel_points(
                 {c.name: getattr(row, c.name) for c in row.__table__.columns}),
@@ -473,22 +474,27 @@ def dfs_consistency(
     table = table[table.position.isin(wanted)]
     ranked = table[table.opp_per_game >= min_opportunities].copy()
 
-    salaries = {}
+    salaries, slate_matcher = {}, None
     if slate_id is not None or week is not None:
         slate = _slate_row(db, season, week, slate_id) if week else None
         if slate is not None:
             try:
                 frame = pd.read_csv(io.StringIO(slate.content))
-                name_key = _name_key()
-                salaries = {name_key(n): s for n, s in
-                            zip(frame["Nickname"], frame["Salary"])}
+                # The slate is the "board" here: each ranked player is looked up
+                # in it by name + team (names.Matcher), not by a bare name.
+                from nfl_projections.names import Matcher
+
+                slate_matcher = Matcher(frame, name="Nickname", team="Team",
+                                        pos="Position")
+                salaries = {i: s for i, s in zip(frame.index, frame["Salary"])}
             except Exception as exc:                  # pragma: no cover
                 logger.warning("slate salaries unavailable: %s", exc)
 
-    name_key = _name_key()
     rows = []
     for _, r in ranked.nlargest(limit, "volume_steadiness").iterrows():
-        salary = salaries.get(name_key(r.player_name))
+        hit = (slate_matcher.match(r.player_name, r.team, r.position)
+               if salaries else None)
+        salary = salaries.get(hit) if hit is not None else None
         rows.append({
             "player": r.player_name,
             "position": r.position,
