@@ -34,6 +34,7 @@ from api.trenches import router as trenches_router
 from api.scarcity import router as scarcity_router
 from api.external import router as external_router
 from api.dfs import router as dfs_router
+from api.targets import router as targets_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -118,6 +119,7 @@ app.include_router(coverage_router, prefix="/coverage", tags=["coverage"])
 app.include_router(scarcity_router, prefix="/scarcity", tags=["scarcity"])
 app.include_router(external_router, prefix="/external", tags=["external"])
 app.include_router(dfs_router, prefix="/dfs", tags=["dfs"])
+app.include_router(targets_router, prefix="/targets", tags=["targets"])
 
 @app.get("/")
 async def root():

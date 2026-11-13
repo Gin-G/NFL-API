@@ -356,6 +356,43 @@ class PlayerProjectionVintage(Base):
     )
 
 
+class ExpertPick(Base):
+    """One player an expert article recommended for a week, as the user read it.
+
+    The Players to Target page sets these beside our own board: the ones we
+    agree on, and the ones we are skeptical of. **Personal use only and
+    nothing fetches them**: the user exports the articles he subscribes to,
+    the picks are extracted into a CSV he checks, and he uploads it. Only the
+    pick is kept -- player, the article's tags (cash, gpp, punt, favorite) and
+    where it came from -- never the article's text.
+
+    **Nothing here feeds /projections or the optimizer's objective.** Whether
+    a pick knows something the board does not is exactly what the record is
+    for: scored after the games, the skeptical pile is where one of us was
+    wrong, and which one is the result.
+    """
+    __tablename__ = "expert_picks"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    season      = Column(Integer)
+    week        = Column(Integer)
+    source      = Column(String)            # fantasyguru
+    article     = Column(String)            # e.g. "RB Coach"
+    author      = Column(String, nullable=True)
+    published   = Column(String, nullable=True)
+    player_name = Column(String)            # as the article wrote it
+    player_id   = Column(String, nullable=True, index=True)   # gsis, matched on upload
+    position    = Column(String)
+    team        = Column(String, nullable=True)
+    salary_fd   = Column(Integer, nullable=True)   # the article's FanDuel price
+    tags        = Column(String, nullable=True)    # "cash;gpp", "punt", ...
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_expert_picks_week", "season", "week"),
+    )
+
+
 class ExternalSnapshot(Base):
     """One hand-exported third-party matchup table, kept verbatim.
 

@@ -1,6 +1,7 @@
 import {
   Award,
   Briefcase,
+  Crosshair,
   Calendar,
   Gauge,
   LayoutDashboard,
@@ -32,6 +33,7 @@ export const navItems: NavItem[] = [
   { to: '/player-grades', label: 'Player Grades', short: 'Grades', icon: Award },
   { to: '/projections', label: 'Season Projections', short: 'Proj', icon: TrendingUp },
   { to: '/optimizer', label: 'Lineup Optimizer', short: 'Lineups', icon: ListOrdered },
+  { to: '/targets', label: 'Players to Target', short: 'Targets', icon: Crosshair },
   { to: '/trenches', label: 'Trench Report', short: 'Trench', icon: Shield },
   { to: '/coverage', label: 'Coverage Report', short: 'Coverage', icon: Radar },
   { to: '/coaches', label: 'Coaches', short: 'Coaches', icon: Briefcase },

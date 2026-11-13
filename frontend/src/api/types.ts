@@ -1376,3 +1376,52 @@ export interface ConsistencyResponse {
   min_opportunities: number
   data: ConsistencyPlayer[]
 }
+
+/** One expert pick set beside our board (GET /targets/). Display only. */
+export interface TargetRow {
+  player_id: string | null
+  player: string
+  position: 'QB' | 'RB' | 'WR' | 'TE'
+  team: string | null
+  tags: string[]
+  articles: string[]
+  pile: 'agree' | 'skeptical' | 'no_board'
+  why: string
+  projected: number | null
+  floor: number | null
+  ceiling: number | null
+  proj_rank: number | null
+  salary: number | null
+  value: number | null
+  value_rank: number | null
+  actual: number | null
+  vs_board: number | null
+}
+
+export interface TargetPileScore {
+  n: number
+  mean_actual: number
+  mean_projected: number
+  mean_vs_board: number
+  beat_board: number
+}
+
+export interface TargetsResponse {
+  season: number
+  week: number
+  count: number
+  agree: TargetRow[]
+  skeptical: TargetRow[]
+  no_board: TargetRow[]
+  scored: { agree?: TargetPileScore; skeptical?: TargetPileScore } | null
+  depth: Record<string, number>
+  articles: string[]
+  rule?: string
+}
+
+export interface PicksUploadResponse {
+  stored: number
+  articles: string[]
+  unmatched: string[]
+  note: string | null
+}
