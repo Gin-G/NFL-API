@@ -356,6 +356,33 @@ class PlayerProjectionVintage(Base):
     )
 
 
+class ExperimentRun(Base):
+    """One run of an nfl-data-py experiment script on the cluster.
+
+    The experiments that train models are too heavy for a workstation (two
+    were killed for memory on 2026-11-13), and the cluster already runs the
+    projection job on AVX nodes with a cache volume. POST /experiments/run
+    records a row here and starts a Job from the suspended experiments
+    CronJob; the Job (scripts.run_experiment) streams the script's output into
+    `log` and sets `status`, so a run is read over HTTPS like everything else
+    -- nobody needs cluster access to see a result.
+    """
+    __tablename__ = "experiment_runs"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    name         = Column(String)            # script in nfl-data-py/experiments, no .py
+    env          = Column(Text, nullable=True)   # JSON of the overrides asked for
+    status       = Column(String, default="queued")  # queued|running|completed|failed
+    job_name     = Column(String, nullable=True)
+    exit_code    = Column(Integer, nullable=True)
+    git_ref      = Column(String, nullable=True)     # what the job downloaded
+    log          = Column(Text, nullable=True)       # tail of stdout+stderr
+    error        = Column(Text, nullable=True)
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    started_at   = Column(DateTime, nullable=True)
+    finished_at  = Column(DateTime, nullable=True)
+
+
 class ExpertPick(Base):
     """One player an expert article recommended for a week, as the user read it.
 

@@ -1,0 +1,86 @@
+# A template, not a schedule: `suspend: true`, so it never fires on its own.
+# POST /experiments/run (app/api/experiments.py) creates a Job from it with the
+# run's settings added as env vars, the same way POST /projections/refresh uses
+# the projections CronJob. The Job runs scripts.run_experiment, which downloads
+# nfl-data-py, runs one script from its experiments/ directory, and writes the
+# output to the experiment_runs table, readable at GET /experiments/runs/<id>.
+#
+# Same image, AVX nodes and database as the projection job; its own volume for
+# experiment caches and the built dataset, so the production model cache is
+# never touched. Heavier limits than the projection job: the multi-seed
+# backtests are what outgrew the workstation.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Values.webapp.name }}-experiments
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.webapp.name }}-experiments
+    group: {{ .Values.webapp.group }}
+spec:
+  schedule: "0 0 1 1 *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 28800   # 8 h, matching the API's stale-run cutoff
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: {{ .Values.webapp.name }}-experiments
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            cpu-avx: "true"
+          containers:
+            - name: experiment
+              image: {{ .Values.webapp.container.image }}
+              imagePullPolicy: {{ .Values.webapp.container.imagePullPolicy }}
+              workingDir: /app
+              command: ["python", "-m", "scripts.run_experiment"]
+              volumeMounts:
+                - name: experiments
+                  mountPath: /experiments
+              env:
+                - name: EXPERIMENT_VOLUME
+                  value: /experiments
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.db.appUserSecret }}
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.db.appUserSecret }}
+                      key: password
+                - name: DATABASE_URL
+                  value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.{{ .Release.Namespace }}.svc.cluster.local:5432/nfl-api-db"
+              resources:
+                requests:
+                  memory: "4Gi"
+                  cpu: "2"
+                limits:
+                  memory: {{ .Values.experiments.memoryLimit | quote }}
+                  cpu: {{ .Values.experiments.cpuLimit | quote }}
+          volumes:
+            - name: experiments
+              persistentVolumeClaim:
+                claimName: {{ .Values.webapp.name }}-experiments
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.webapp.name }}-experiments
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: {{ .Values.experiments.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.experiments.storage }}

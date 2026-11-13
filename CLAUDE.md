@@ -114,3 +114,15 @@ overlapping, illegible labels.
   the uploaded slate. Anything listing positions should say so rather than
   quietly omitting DEF.
 - Commit and push **only when asked**.
+
+## Experiments run on the cluster, not the workstation
+
+Heavy nfl-data-py experiments (anything that trains) run as Jobs:
+`POST /experiments/run` with header `X-Experiment-Token` and a body like
+`{"name": "train_window_expanding", "env": {"SEEDS": "3"}}` starts
+`experiments/<name>.py` from nfl-data-py main on an AVX node
+(`helm/nfl-api/templates/experiments-cronjob.yaml`, suspended, template only).
+Read the result at `GET /experiments/runs/<id>` (`?tail=N` for the end of the
+log). One run at a time; caches and the built dataset live on the
+`nfl-api-experiments` volume. The token comes from OpenBao
+(`nfl-api` / `experiment_token`); without it the endpoint refuses.

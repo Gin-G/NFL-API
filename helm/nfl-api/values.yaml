@@ -24,6 +24,10 @@ webapp:
         secretKey: password
       - name: DATABASE_URL
         value: "postgresql+psycopg2://$(PGUSER):$(PGPASSWORD)@nfl-api-db-rw.nfl-api.svc.cluster.local:5432/nfl-api-db"
+      # Gate for POST /experiments/run. Optional: absent, the endpoint refuses.
+      - name: EXPERIMENT_TOKEN
+        secretName: nfl-api-experiments
+        secretKey: token
   secrets:
     path: nfl-api
     anthropicKeyProperty: anthropic_api_key
@@ -31,3 +35,14 @@ webapp:
 
 db:
   appUserSecret: nfl-api-db-app-user
+
+# Experiment runner (POST /experiments/run, templates/experiments-*.yaml).
+experiments:
+  # OpenBao path and property holding the token; its own ExternalSecret, so a
+  # missing value cannot break the chat secret's sync.
+  secretPath: nfl-api
+  tokenProperty: experiment_token
+  storage: 20Gi
+  storageClassName: rook-cephfs
+  memoryLimit: "12Gi"
+  cpuLimit: "4"

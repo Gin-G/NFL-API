@@ -108,3 +108,43 @@ def start_projection_job(cronjob: str = None, namespace: str = None) -> str:
         raise JobStartError(f"could not create job: {exc}") from exc
     logger.info("Started projections job %s in %s", name, namespace)
     return name
+
+
+def start_job_from_cronjob(cronjob: str, *, env: dict = None, suffix: str = "run",
+                           namespace: str = None, labels: dict = None) -> str:
+    """Create a Job from any CronJob's template, adding env vars to its first
+    container. Used by /experiments, whose CronJob is suspended and exists only
+    to be a template."""
+    namespace = namespace or current_namespace()
+    try:
+        from kubernetes import client, config
+    except ImportError as exc:                      # pragma: no cover - import guard
+        raise JobStartError(f"kubernetes client not installed: {exc}") from exc
+    try:
+        config.load_incluster_config()
+    except Exception as exc:
+        raise JobStartError(f"not running in a cluster: {exc}") from exc
+    batch = client.BatchV1Api()
+    try:
+        template = batch.read_namespaced_cron_job(cronjob, namespace).spec.job_template
+    except Exception as exc:
+        raise JobStartError(f"could not read cronjob {cronjob}: {exc}") from exc
+
+    spec = template.spec
+    container = spec.template.spec.containers[0]
+    container.env = list(container.env or []) + [
+        client.V1EnvVar(name=k, value=str(v)) for k, v in (env or {}).items()]
+    name = f"{cronjob}-{suffix}-{datetime.utcnow():%Y%m%d-%H%M%S}"[:63].rstrip("-")
+    job_labels = dict(getattr(template.metadata, "labels", None) or {})
+    job_labels.update(labels or {})
+    job_labels["triggered-by"] = "api"
+    job = client.V1Job(
+        metadata=client.V1ObjectMeta(name=name, namespace=namespace, labels=job_labels,
+                                     annotations={"cronjob.kubernetes.io/instantiate": "manual"}),
+        spec=spec)
+    try:
+        batch.create_namespaced_job(namespace, job)
+    except Exception as exc:
+        raise JobStartError(f"could not create job: {exc}") from exc
+    logger.info("Started job %s from %s in %s", name, cronjob, namespace)
+    return name
