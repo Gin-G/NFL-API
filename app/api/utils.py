@@ -137,7 +137,11 @@ def _orm_to_dict(obj) -> dict:
 #:   (none)                 -2 per fumble whether lost or not; 2pt paid 0
 #:   fanduel-2026-11-12     FanDuel's rule: -2 per fumble LOST, +2 per 2pt
 #:   fanduel-2026-11-13     ...and +6 per return TD or offensive fumble-recovery TD
-SCORING_RULE = "fanduel-2026-11-13"
+#:   fanduel-2026-11-13b    same points; slate names now matched by
+#:                          nfl_projections.names (a missed FanDuel spelling
+#:                          had scored as a played zero in the lineup
+#:                          baselines), so every build re-scores once
+SCORING_RULE = "fanduel-2026-11-13b"
 
 
 def fanduel_points(row) -> float:
