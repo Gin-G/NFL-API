@@ -375,7 +375,7 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         proj_kwargs.update(rosters=rosters, depth_charts=depth, use_injuries=False)
 
     logger.info("Projecting season %d week %d...", season, week)
-    base = svc.project(season, week, as_frame=True, **proj_kwargs)
+    base = _one_row_per_player(svc.project(season, week, as_frame=True, **proj_kwargs))
     if base is None or base.empty:
         _update_job(db, job, status="completed", total_entries=0, processed_entries=0)
         logger.warning("No projections produced for %d week %d", season, week)
@@ -518,7 +518,7 @@ def _run_shadow(db, df, season: int, week: int, model_version: str, *,
                                     n_seeds=seeds, min_season=min_season)
             if shadow_cache:
                 _save_model(shadow_cache, key, svc)
-        frame = svc.project(season, week, as_frame=True, **proj_kwargs)
+        frame = _one_row_per_player(svc.project(season, week, as_frame=True, **proj_kwargs))
         if frame is None or getattr(frame, "empty", False):
             logger.warning("Shadow run %s produced nothing", variant)
             return 0
@@ -953,6 +953,33 @@ def _apply_shares(frame, share_pred, blend: float = 0.2) -> None:
             frame[col] = frame[col].astype(float).to_numpy() * scale
 
 
+def _one_row_per_player(frame):
+    """Keep one projection per player_id, and say which players were doubled.
+
+    The projector de-duplicates by NAME, so one player reaching it under two
+    names (a roster that adds a suffix the stats feed lacks) comes out as two
+    rows with one player_id. Every step after this assumes the id is unique:
+    the simulator's `float(sm.loc[pid, ...])` gets a Series instead of a number
+    and the whole run dies -- "cannot convert the series to <class 'float'>",
+    the 2026-11-13 Friday refresh, which left Wednesday's board standing
+    through the injury news it exists to pick up. Losing a duplicate row costs
+    nothing; losing the run costs the weekend.
+    """
+    if frame is None or getattr(frame, "empty", True) or "player_id" not in frame.columns:
+        return frame
+    dup = frame["player_id"].notna() & frame["player_id"].duplicated(keep=False)
+    if not dup.any():
+        return frame
+    cols = [c for c in ("player_id", "player_name", "team", "position",
+                        "fanduel_fantasy_points") if c in frame.columns]
+    logger.warning("Projection had %d rows sharing %d player_ids; keeping the first "
+                   "of each:\n%s", int(dup.sum()),
+                   frame.loc[dup, "player_id"].nunique(),
+                   frame.loc[dup, cols].to_string(index=False))
+    keep = frame["player_id"].isna() | ~frame["player_id"].duplicated(keep="first")
+    return frame[keep].copy()
+
+
 def _apply_simulator(frame, history, week: int) -> None:
     """Replace floor/median/ceiling with Monte-Carlo simulator distributions (anchored to
     the model mean) for players with enough history — better early-season ranges than the
@@ -965,7 +992,8 @@ def _apply_simulator(frame, history, week: int) -> None:
     summ, _ = nflp_sim.project_distributions(frame, history, n_sims=1000, seed=week)
     if summ.empty:
         return
-    sm = summ.set_index("player_id")
+    # One row per id, or .loc hands back a Series and float() raises.
+    sm = summ.drop_duplicates("player_id").set_index("player_id")
     n = 0
     for i, r in frame.iterrows():
         pid = r.get("player_id")
