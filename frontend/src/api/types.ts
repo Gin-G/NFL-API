@@ -1285,6 +1285,8 @@ export interface PoolPlayer {
   entered_exposure: number | null
   history: PlayerHistory | null
   rule: PoolRule | null
+  /** Expert articles' calls this week (Players to Target). Display only. */
+  expert: { tags: string[]; articles: string[] } | null
 }
 
 export interface PlayerPoolResponse {

@@ -616,6 +616,23 @@ def _player_history(db, season: int, week: int) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def _expert_tags(db, season: int, week: int) -> dict:
+    """``{player_id: {"tags", "articles"}}`` from the week's uploaded expert
+    picks (api.targets). For reading beside the pool; the optimizer's
+    objective never sees it."""
+    from database.models import ExpertPick
+
+    out = {}
+    for p in db.query(ExpertPick).filter_by(season=season, week=week).all():
+        if not p.player_id:
+            continue
+        e = out.setdefault(p.player_id, {"tags": [], "articles": []})
+        e["tags"] += [t for t in (p.tags or "").split(";") if t and t not in e["tags"]]
+        if p.article not in e["articles"]:
+            e["articles"].append(p.article)
+    return out
+
+
 def _drop_superseded(db, settings: dict) -> None:
     """Forget an earlier UNSCORED build with exactly these settings.
 
@@ -1352,6 +1369,7 @@ def player_pool(
 
     rules = {r.nickname: r for r in db.query(SlatePlayerRule).filter(
         SlatePlayerRule.slate_id == slate_row.id).all()}
+    experts = _expert_tags(db, season, week)
     entered = Counter(n for names in _entered_lineups(db, season, week)
                       for n in names)
     lineups_entered = len(_entered_lineups(db, season, week))
@@ -1409,6 +1427,9 @@ def player_pool(
         else:
             row["value"] = None
         pid = r.get("player_id")
+        # Expert articles' calls (Players to Target). Display only: shown so a
+        # rule can be set by hand, never read by the builder.
+        row["expert"] = experts.get(pid) if isinstance(pid, str) else None
         stats = ranges.get(pid) if isinstance(pid, str) else None
         row["history"] = (None if stats is None else {
             "games": int(stats["size"]), "low": round(float(stats["min"]), 1),

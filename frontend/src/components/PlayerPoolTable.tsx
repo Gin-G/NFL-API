@@ -3,6 +3,14 @@ import { Lock, Ban, RotateCcw, Search } from 'lucide-react'
 import { usePlayerPool, useSetPoolRules, useClearPoolRules } from '../api/optimizer'
 import type { PoolPlayer, PoolRuleWrite } from '../api/types'
 
+const EXPERT_TAG: Record<string, string> = {
+  cash: 'Cash',
+  gpp: 'GPP',
+  punt: 'Punt',
+  favorite_cash: '★ Cash',
+  favorite_gpp: '★ GPP',
+}
+
 /** The uploaded slate as a table you can act on.
  *
  *  The build settings apply to everyone at once: the exposure cap holds the
@@ -154,6 +162,12 @@ export default function PlayerPoolTable({
                 Has scored
               </th>
               <th
+                className="text-left py-2 px-2 font-medium whitespace-nowrap"
+                title="What this week's expert articles said about him (Players to Target). For reading only — the builder never uses it; set a rule if you agree."
+              >
+                Experts
+              </th>
+              <th
                 className="text-right py-2 px-2 font-medium whitespace-nowrap"
                 title="His share of every lineup already entered this week, pooled across builds"
               >
@@ -222,6 +236,29 @@ export default function PlayerPoolTable({
                       : 'No games on record before this week'}
                   >
                     {p.history ? `${p.history.low}–${p.history.high}` : '—'}
+                  </td>
+                  <td
+                    className="py-1.5 px-2 whitespace-nowrap"
+                    title={p.expert ? p.expert.articles.join(', ') : 'No expert pick this week'}
+                  >
+                    {p.expert && p.expert.tags.length ? (
+                      <span className="flex gap-1">
+                        {p.expert.tags.filter((t) => t !== 'mention').map((t) => (
+                          <span
+                            key={t}
+                            className={`rounded px-1 py-0.5 text-[0.65rem] ${
+                              t.startsWith('favorite')
+                                ? 'bg-sky-500/20 text-sky-200'
+                                : 'bg-slate-700 text-slate-300'
+                            }`}
+                          >
+                            {EXPERT_TAG[t] ?? t}
+                          </span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="text-slate-600">{p.expert ? 'noted' : '—'}</span>
+                    )}
                   </td>
                   <td className="py-1.5 px-2 text-right tabular-nums whitespace-nowrap">
                     {p.entered_exposure === null ? (

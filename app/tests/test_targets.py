@@ -136,3 +136,16 @@ class TestThePage:
     def test_an_empty_week(self, client):
         body = client.get("/targets/", params={"season": SEASON, "week": 3}).json()
         assert body["count"] == 0 and body["agree"] == []
+
+
+class TestThePoolShowsThem:
+    def test_tags_by_player_id_merged_across_articles(self, client, db_session):
+        from api.optimizer import _expert_tags
+        _board(db_session)
+        _upload(client)
+        _upload(client, "player,team,position,tags,article\n"
+                        "James Cook,BUF,RB,cash;favorite_cash,Cash Breakdown\n")
+        tags = _expert_tags(db_session, SEASON, WEEK)
+        assert tags["cook"]["tags"] == ["cash", "gpp", "favorite_cash"]
+        assert tags["cook"]["articles"] == ["RB Coach", "Cash Breakdown"]
+        assert "nobody" not in str(tags)            # unmatched picks carry no id
