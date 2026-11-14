@@ -71,8 +71,24 @@ def validate_request(req: RunRequest) -> dict:
     return env
 
 
+TOKEN_FILE = os.getenv("EXPERIMENT_TOKEN_FILE", "/var/run/secrets/experiments/token")
+
+
+def _expected_token() -> str:
+    """The token from the mounted secret (read per request, so a rotation or a
+    secret created after the pod started is seen), else the env var."""
+    try:
+        with open(TOKEN_FILE) as f:
+            token = f.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    return os.getenv("EXPERIMENT_TOKEN", "").strip()
+
+
 def _authorised(token: Optional[str]) -> None:
-    expected = os.getenv("EXPERIMENT_TOKEN", "")
+    expected = _expected_token()
     if not expected:
         raise HTTPException(503, "Experiments are not configured: no EXPERIMENT_TOKEN.")
     if not token or not hmac.compare_digest(token, expected):

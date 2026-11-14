@@ -47,3 +47,16 @@ spec:
         {{- end }}
         ports:
         - containerPort: {{ .Values.webapp.container.port }}
+        # The experiments token as a file: a mounted secret is updated in place
+        # when OpenBao rotates it, where an env var is fixed at pod start (and
+        # is absent for good if the secret appeared after the pod did, which is
+        # exactly how the first POST /experiments/run was refused).
+        volumeMounts:
+        - name: experiments-token
+          mountPath: /var/run/secrets/experiments
+          readOnly: true
+      volumes:
+      - name: experiments-token
+        secret:
+          secretName: {{ .Values.webapp.name }}-experiments
+          optional: true

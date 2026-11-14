@@ -14,6 +14,9 @@ def _clean(db_session, monkeypatch):
     db_session.query(ExperimentRun).delete()
     db_session.commit()
     monkeypatch.setenv("EXPERIMENT_TOKEN", "s3cret")
+    monkeypatch.setenv("EXPERIMENT_TOKEN_FILE", "/nonexistent/token")
+    import api.experiments as ex
+    monkeypatch.setattr(ex, "TOKEN_FILE", "/nonexistent/token")
     yield
 
 
@@ -58,6 +61,18 @@ class TestGate:
     def test_refused_inputs(self, client, started, body):
         assert _post(client, body).status_code == 400
         assert started == []
+
+
+def test_the_mounted_file_wins_and_is_read_per_request(client, monkeypatch, tmp_path,
+                                                       started):
+    import api.experiments as ex
+    f = tmp_path / "token"
+    f.write_text("from-file\n")
+    monkeypatch.setattr(ex, "TOKEN_FILE", str(f))
+    monkeypatch.delenv("EXPERIMENT_TOKEN")
+    assert _post(client, {"name": "selection_tax"}, token="from-file").status_code == 200
+    f.write_text("rotated")
+    assert _post(client, {"name": "lineup_depth"}, token="from-file").status_code == 401
 
 
 class TestRun:
