@@ -287,6 +287,9 @@ class PlayerProjection(Base):
     # Null on rows written before this column existed, and on the in-season path
     # where no availability discount is applied.
     exp_games        = Column(Float, nullable=True)
+    # Where the projection run had him on the depth chart, so a late scratch
+    # can promote his backups without rerunning the model (api.optimizer).
+    depth_rank       = Column(Integer, nullable=True)
     prediction_type  = Column(String)  # veteran_ml / rookie_ml / injured_out
     model_version    = Column(String)
     computed_at      = Column(DateTime, default=datetime.utcnow)
@@ -343,6 +346,9 @@ class PlayerProjectionVintage(Base):
     receptions           = Column(Float)
     receiving_tds        = Column(Float)
     exp_games        = Column(Float, nullable=True)
+    # Where the projection run had him on the depth chart, so a late scratch
+    # can promote his backups without rerunning the model (api.optimizer).
+    depth_rank       = Column(Integer, nullable=True)
     prediction_type  = Column(String)
     model_version    = Column(String)
     computed_at      = Column(DateTime, default=datetime.utcnow)
@@ -888,6 +894,9 @@ class SlatePlayerRule(Base):
     nickname     = Column(String, index=True)
     min_exposure = Column(Float)            # null = no floor
     max_exposure = Column(Float)            # null = no ceiling
+    # Ruled out after the board was built: 0% exposure AND his backups are
+    # promoted on the stored board (api.optimizer._apply_scratches).
+    ruled_out    = Column(Boolean, nullable=True)
     note         = Column(Text)             # why, in the user's own words
     updated_at   = Column(DateTime, default=datetime.utcnow,
                           onupdate=datetime.utcnow)
@@ -1020,7 +1029,10 @@ def apply_light_migrations(engine) -> None:
               ("lineup_builds", "pool_exposure"): "INTEGER",
               ("lineup_builds", "scoring_rule"): "VARCHAR",
               ("projection_accuracy", "scoring_rule"): "VARCHAR",
-              ("player_stats", "fumble_recovery_tds"): "FLOAT"}
+              ("player_stats", "fumble_recovery_tds"): "FLOAT",
+              ("player_projections", "depth_rank"): "INTEGER",
+              ("player_projection_vintages", "depth_rank"): "INTEGER",
+              ("slate_player_rules", "ruled_out"): "BOOLEAN"}
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
     for (table, col), coltype in wanted.items():

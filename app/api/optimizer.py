@@ -116,6 +116,7 @@ def _projection_frame(db, season: int, week: int) -> pd.DataFrame:
         "player_name": r.player_name,
         "position": r.position,
         "team": r.team,
+        "depth_rank": getattr(r, "depth_rank", None),
         **{dest: getattr(r, src) for src, dest in PROJECTION_COLUMNS.items()},
     } for r in rows])
     # Stamped on the frame, not a column: the build records WHEN the board it
@@ -498,9 +499,78 @@ def _rule_kind(low, high) -> str:
 
 def _rule_payload(row: SlatePlayerRule) -> dict:
     return {"min_exposure": row.min_exposure, "max_exposure": row.max_exposure,
-            "kind": _rule_kind(row.min_exposure, row.max_exposure),
+            "kind": ("out" if getattr(row, "ruled_out", False)
+                     else _rule_kind(row.min_exposure, row.max_exposure)),
             "note": row.note,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+
+
+def _ruled_out(db, slate_id: Optional[int]) -> list:
+    """Nicknames marked ruled out on this slate (rule 'out')."""
+    if slate_id is None:
+        return []
+    return [r.nickname for r in db.query(SlatePlayerRule).filter(
+        SlatePlayerRule.slate_id == slate_id).all() if getattr(r, "ruled_out", False)]
+
+
+SCRATCH_COLUMNS = ("fanduel_fantasy_points", "projection_median", "floor", "ceiling")
+
+
+def _apply_scratches(merged: pd.DataFrame, out_nicknames) -> tuple:
+    """Zero the players ruled out after the board was built and promote their
+    backups, on the stored board, with production's own arithmetic.
+
+    The projection job reacts to an absence only when it runs; on 2026 week 10
+    Kenneth Walker was ruled out and the weekend refresh never ran, so Emmett
+    Johnson stayed a 6.0-point backup in every build (he scored 35.1). This is
+    the same `roles.promotion_multiplier` the weekly path applies, done as a
+    multiplication on the rows already stored -- no model, no cluster job.
+
+    Depth rank is the one the projection run stored; for a board written before
+    that column existed, the order of the board itself within team and
+    position stands in. Returns ``(merged, notes)``; ``notes`` maps nickname to
+    a sentence for the pool table.
+    """
+    outs = {str(n) for n in (out_nicknames or [])}
+    if not outs or merged is None or merged.empty or "Nickname" not in merged:
+        return merged, {}
+    from nfl_projections import roles
+
+    m = merged.copy()
+    pos = m["Position"].astype(str).str.split("/").str[0].str.upper()
+    team = m["Team"].astype(str).str.upper()
+    pts = pd.to_numeric(m["fanduel_fantasy_points"], errors="coerce")
+    stored = pd.to_numeric(m["depth_rank"], errors="coerce") if "depth_rank" in m \
+        else pd.Series(float("nan"), index=m.index)
+    by_board = pts.groupby([team, pos]).rank(ascending=False, method="first")
+    rank = stored.where(stored.notna(), by_board)
+    is_out = m["Nickname"].astype(str).isin(outs)
+    notes = {}
+    for (t, p), idx in m.groupby([team, pos]).groups.items():
+        gone = [i for i in idx if is_out[i]]
+        if not gone or p not in ("QB", "RB", "WR", "TE"):
+            continue
+        out_ranks = tuple(rank[i] for i in gone if rank[i] == rank[i])
+        names = ", ".join(str(m.at[i, "Nickname"]) for i in gone)
+        for i in idx:
+            if is_out[i]:
+                continue
+            mult = roles.promotion_multiplier(p, rank[i], out_ranks)
+            if mult == 1.0 or not pts[i] == pts[i]:
+                continue
+            for col in SCRATCH_COLUMNS:
+                if col in m.columns:
+                    v = pd.to_numeric(m.at[i, col], errors="coerce")
+                    if v == v:
+                        m.at[i, col] = float(v) * mult
+            notes[str(m.at[i, "Nickname"])] = (
+                f"promoted x{mult:.2f} with {names} ruled out")
+    for i in m.index[is_out]:
+        for col in SCRATCH_COLUMNS:
+            if col in m.columns:
+                m.at[i, col] = 0.0
+        notes[str(m.at[i, "Nickname"])] = "ruled out"
+    return m, notes
 
 
 def _saved_rules(db, slate_id: Optional[int]) -> dict:
@@ -540,7 +610,7 @@ def _parse_pool_spec(spec: str) -> dict:
         if not name:
             raise HTTPException(status_code=400,
                                 detail=f"{part!r} names no player.")
-        if value in ("lock", "exclude"):
+        if value in ("lock", "exclude", "out"):
             rules[name] = value
             continue
         if "-" in value:
@@ -916,6 +986,11 @@ async def build_lineups(
                         f"is for a different week, or its team codes do not match ours."))
 
     merged = opt.merge_fanduel_salaries(salaries, projections)
+    # Late scratches, saved on the slate or sent with this build ('Name:out'):
+    # zeroed, and their backups promoted on the stored board.
+    scratched = _ruled_out(db, slate_row.id) if (use_saved_rules and slate_row is not None) else []
+    scratched += [n for n, v in _parse_pool_spec(pool).items() if v == "out"]
+    merged, _ = _apply_scratches(merged, scratched)
     matched = int(merged["fanduel_fantasy_points"].notna().sum())
     merged = _attach_opportunity(merged, season, week)
     merged = _attach_defense(merged, season, week)
@@ -967,7 +1042,10 @@ async def build_lineups(
     rules = {}
     if use_saved_rules and slate_row is not None:
         rules.update(_saved_rules(db, slate_row.id))
-    rules.update(_parse_pool_spec(pool))
+    rules.update({n: ("exclude" if v == "out" else v)
+                  for n, v in _parse_pool_spec(pool).items()})
+    for nickname in scratched:
+        rules[nickname] = "exclude"
     for nickname in [n.strip() for n in lock.split(",") if n.strip()]:
         rules[nickname] = "lock"
     for nickname in excludes:
@@ -1353,6 +1431,7 @@ def player_pool(
     projections = _projection_frame(db, season, week)
     merged = opt.merge_fanduel_salaries(salaries, projections) \
         if not projections.empty else salaries.assign(fanduel_fantasy_points=np.nan)
+    merged, scratch_notes = _apply_scratches(merged, _ruled_out(db, slate_row.id))
     merged = _attach_defense(merged, season, week)
     merged = _attach_ownership(merged, season, week)
 
@@ -1430,6 +1509,7 @@ def player_pool(
         # Expert articles' calls (Players to Target). Display only: shown so a
         # rule can be set by hand, never read by the builder.
         row["expert"] = experts.get(pid) if isinstance(pid, str) else None
+        row["scratch"] = scratch_notes.get(str(nickname))
         stats = ranges.get(pid) if isinstance(pid, str) else None
         row["history"] = (None if stats is None else {
             "games": int(stats["size"]), "low": round(float(stats["min"]), 1),
@@ -1515,7 +1595,7 @@ def set_player_rules(
             low, high = item.get("min_exposure"), item.get("max_exposure")
         elif word == "lock":
             low, high = 100.0, 100.0
-        elif word == "exclude":
+        elif word in ("exclude", "out"):
             low, high = 0.0, 0.0
         else:
             try:
@@ -1524,7 +1604,7 @@ def set_player_rules(
                 raise HTTPException(
                     status_code=400,
                     detail=(f"rule {word!r} for {nickname} is not a percentage, "
-                            "'lock', 'exclude' or 'clear'."))
+                            "'lock', 'exclude', 'out' or 'clear'."))
         for value, label in ((low, "min_exposure"), (high, "max_exposure")):
             if value is not None and not 0 <= float(value) <= 100:
                 raise HTTPException(
@@ -1545,9 +1625,9 @@ def set_player_rules(
                         "him."))
         if low is None and high is None:
             cleared.append(nickname)
-        parsed[nickname] = (low, high, item.get("note"))
+        parsed[nickname] = (low, high, item.get("note"), word == "out")
 
-    for nickname, (low, high, note) in parsed.items():
+    for nickname, (low, high, note, out) in parsed.items():
         row = db.query(SlatePlayerRule).filter(
             SlatePlayerRule.slate_id == slate_row.id,
             SlatePlayerRule.nickname == nickname).first()
@@ -1561,6 +1641,7 @@ def set_player_rules(
             db.add(row)
         row.min_exposure = None if low is None else float(low)
         row.max_exposure = None if high is None else float(high)
+        row.ruled_out = bool(out)
         row.note = note
         row.updated_at = datetime.utcnow()
     db.commit()

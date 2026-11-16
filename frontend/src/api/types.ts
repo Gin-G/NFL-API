@@ -1236,7 +1236,7 @@ export interface CoverageMatchupsResponse {
 // applies to everyone equally, and can neither require a player nor name one.
 
 export type PoolRuleKind =
-  | 'lock' | 'exclude' | 'target' | 'band' | 'floor' | 'cap'
+  | 'lock' | 'exclude' | 'out' | 'target' | 'band' | 'floor' | 'cap'
 
 export interface PoolRule {
   min_exposure: number | null
@@ -1287,6 +1287,9 @@ export interface PoolPlayer {
   rule: PoolRule | null
   /** Expert articles' calls this week (Players to Target). Display only. */
   expert: { tags: string[]; articles: string[] } | null
+  /** Set when a teammate (or he) was ruled out after the board was built:
+   *  "ruled out", or "promoted x1.78 with X ruled out". */
+  scratch: string | null
 }
 
 export interface PlayerPoolResponse {

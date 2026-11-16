@@ -611,6 +611,7 @@ def _write_week(db, frame, season: int, week: int, model_version: str,
             receiving_tds=_f(r.get("receiving_tds")),
             # 1.0 on the in-season path, which applies no availability discount
             exp_games=_f(r.get("exp_games")) if r.get("exp_games") is not None else 1.0,
+            depth_rank=_rank(r.get("depth_rank")),
             prediction_type=str(r.get("prediction_type") or ""),
             model_version=model_version, computed_at=datetime.utcnow(),
         )
@@ -1003,6 +1004,15 @@ def _apply_simulator(frame, history, week: int) -> None:
             frame.at[i, "ceiling"] = float(sm.loc[pid, "ceiling"])
             n += 1
     logger.info("Applied simulator distributions to %d players", n)
+
+
+def _rank(v):
+    """A depth rank as an int, or None ('N/A', NaN, missing)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return int(f) if f == f and f >= 1 else None
 
 
 def _f(v):

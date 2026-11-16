@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Lock, Ban, RotateCcw, Search } from 'lucide-react'
+import { Lock, Ban, RotateCcw, Search, UserX } from 'lucide-react'
 import { usePlayerPool, useSetPoolRules, useClearPoolRules } from '../api/optimizer'
 import type { PoolPlayer, PoolRuleWrite } from '../api/types'
 
@@ -38,6 +38,7 @@ function num(value: number | null, digits = 1) {
 function ruleLabel(player: PoolPlayer) {
   const rule = player.rule
   if (!rule) return null
+  if (rule.kind === 'out') return 'Ruled out'
   if (rule.kind === 'lock') return 'Every lineup'
   if (rule.kind === 'exclude') return 'Excluded'
   if (rule.kind === 'target') return `${rule.min_exposure}% of lineups`
@@ -201,6 +202,14 @@ export default function PlayerPoolTable({
                         {' '}*
                       </span>
                     )}
+                    {p.scratch && p.scratch !== 'ruled out' && (
+                      <span
+                        className="ml-1.5 rounded px-1 py-0.5 text-[0.65rem] bg-emerald-500/15 text-emerald-300"
+                        title="Projection raised on the stored board because a teammate was ruled out — the same promotion the weekly projection run applies"
+                      >
+                        {p.scratch.replace(/ with .*/, '')}
+                      </span>
+                    )}
                     {p.injury_flag && (
                       <span
                         className={`ml-1.5 rounded px-1 py-0.5 text-[0.65rem] ${
@@ -331,6 +340,14 @@ export default function PlayerPoolTable({
                         title="A share of the lineups, 0 to 100. Enter to apply."
                         className="bg-slate-700 border border-slate-600 text-white placeholder-slate-600 rounded px-1.5 py-0.5 text-[0.7rem] w-10 text-center tabular-nums disabled:opacity-30"
                       />
+                      <button
+                        onClick={() => apply({ nickname: p.nickname, rule: 'out' })}
+                        disabled={setRules.isPending}
+                        title="Ruled out after the projections ran: drop him and promote his backups on this board, no projection rerun needed"
+                        className="rounded p-1 text-slate-400 hover:text-amber-300 hover:bg-slate-700 disabled:opacity-30 transition-colors"
+                      >
+                        <UserX size={12} />
+                      </button>
                       <button
                         onClick={() => apply({ nickname: p.nickname, rule: 'exclude' })}
                         disabled={setRules.isPending}
