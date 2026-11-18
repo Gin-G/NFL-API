@@ -362,7 +362,14 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
     # Both paths keep the draft-capital prior: the network needs two games of
     # history, so without it every first-year player would drop off the board
     # until week 3.
-    proj_kwargs = dict(rookie_fallback=True)
+    #
+    # Injuries: the Friday report from nflverse, with ESPN's in-week news on
+    # top. A Sunday inactive (Kenneth Walker, 2026 week 10) is on ESPN and never
+    # on nflverse. The overlay takes only news dated inside the projected week
+    # and falls back to the report alone if ESPN does not answer.
+    # INJURY_SOURCE=nflverse turns it off.
+    proj_kwargs = dict(rookie_fallback=True,
+                       injury_source=os.getenv("INJURY_SOURCE", "nflverse+espn"))
     if use_espn:
         rosters, depth = _espn_frames(db, week)
         if rosters.empty:

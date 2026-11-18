@@ -1693,6 +1693,195 @@ def clear_player_rules(
             "nickname": nickname}
 
 
+# --- injury check: what ESPN knows that the board does not -----------------
+#
+# nflverse carries the Friday designation and nothing after it; Sunday's
+# inactives reach the board only if somebody clicks Out. 2026 week 10: Kenneth
+# Walker, Questionable on Friday, ruled out Sunday, still Questionable on
+# nflverse after the game. ESPN's public feed had him Out. This compares that
+# feed with the board and the slate's own rules and says what changed; it
+# applies nothing.
+
+_ESPN_CACHE = {"at": None, "payload": None}
+_CROSSWALK_CACHE = {"at": None, "map": None}
+ESPN_CACHE_SECONDS = 120
+CROSSWALK_CACHE_SECONDS = 12 * 3600
+
+
+def _espn_frame(refresh: bool = False) -> pd.DataFrame:
+    from nfl_projections import injuries as inj
+
+    now = datetime.utcnow()
+    c = _ESPN_CACHE
+    if refresh or c["at"] is None or (now - c["at"]).total_seconds() > ESPN_CACHE_SECONDS:
+        c["payload"], c["at"] = inj.fetch_espn_payload(), now
+    x = _CROSSWALK_CACHE
+    if x["at"] is None or (now - x["at"]).total_seconds() > CROSSWALK_CACHE_SECONDS:
+        try:
+            x["map"], x["at"] = inj.espn_crosswalk(), now
+        except Exception as exc:          # ids then fall back to name + team
+            logger.warning("ESPN id crosswalk unavailable (%s)", exc)
+            x["map"] = x["map"] or {}
+    return inj.parse_espn_injuries(c["payload"], x["map"])
+
+
+def _schedule_frame(db, season: int) -> pd.DataFrame:
+    rows = db.query(Schedule).filter(Schedule.season == season).all()
+    return pd.DataFrame([{"season": r.season, "week": r.week, "game_type": r.game_type,
+                          "gameday": r.gameday, "gametime": r.gametime,
+                          "home_team": r.home_team, "away_team": r.away_team}
+                         for r in rows])
+
+
+def _started_teams(schedule: pd.DataFrame, season: int, week: int, now=None) -> set:
+    if schedule.empty:
+        return set()
+    g = schedule[(schedule.season == season) & (schedule.week == week)
+                 & (schedule.game_type == "REG")]
+    kick = pd.to_datetime(g.gameday.astype(str) + " " + g.gametime.fillna("00:00").astype(str),
+                          errors="coerce")
+    kick = kick.dt.tz_localize("America/New_York", ambiguous="NaT",
+                               nonexistent="NaT").dt.tz_convert("UTC")
+    now = pd.Timestamp(now or pd.Timestamp.now(tz="UTC"))
+    begun = g[kick.notna() & (kick <= now)]
+    return set(begun.home_team) | set(begun.away_team)
+
+
+def injury_changes(merged: pd.DataFrame, espn: pd.DataFrame, since, until,
+                   ruled_out=(), started=()) -> list:
+    """Each slate player whose ESPN status this week disagrees with the board.
+
+    kinds: ``out`` (ESPN Out/Doubtful, the board still projects him),
+    ``cleared`` (ESPN Active, the board has him at 0 or the slate has him ruled
+    out), ``questionable`` (ESPN Questionable this week, for reading). ``applied``
+    says the slate's Out rule already covers it. ``promotes`` is who moves up if
+    he is ruled out, by the same arithmetic the Out rule uses.
+    """
+    from nfl_projections.names import name_key, team_key
+
+    if merged is None or merged.empty or espn is None or espn.empty:
+        return []
+    fresh = espn[(espn.updated >= since) & (espn.updated < until)]
+    m = merged[merged["Nickname"].notna()].copy()
+    team = m["Team"].map(team_key)
+    by_id = {str(p): i for i, p in m.get("player_id", pd.Series(dtype=object)).items()
+             if isinstance(p, str) and p}
+    by_name = {(name_key(n), t): i for i, n, t in zip(m.index, m["Nickname"], team)}
+    pts = pd.to_numeric(m["fanduel_fantasy_points"], errors="coerce")
+    outs = set(ruled_out)
+    changes = []
+    for _, e in fresh.iterrows():
+        i = by_id.get(e.player_id) if e.player_id else None
+        if i is None:
+            i = by_name.get((name_key(e.player_name), e.team))
+        if i is None:
+            continue
+        nick = str(m.at[i, "Nickname"])
+        board = float(pts[i]) if pts[i] == pts[i] else None
+        applied = nick in outs
+        if e.status in ("OUT", "DOUBTFUL"):
+            if (board or 0) <= 0 and not applied:
+                continue                  # the board already has him out
+            kind = "out"
+        elif e.status == "ACTIVE":
+            if not (applied or board == 0):
+                continue
+            kind = "cleared"
+        else:
+            kind = "questionable"
+        promotes = []
+        if kind == "out":
+            t, p = team[i], str(m.at[i, "Position"]).split("/")[0].upper()
+            mates = m[(team == t) & m["Position"].astype(str).str.upper().str.startswith(p)]
+            before = mates if not applied else _apply_scratches(mates, outs - {nick})[0]
+            after, notes = _apply_scratches(mates, outs | {nick})
+            for j in mates.index:
+                if j == i:
+                    continue
+                a = pd.to_numeric(before.at[j, "fanduel_fantasy_points"], errors="coerce")
+                b = pd.to_numeric(after.at[j, "fanduel_fantasy_points"], errors="coerce")
+                if a == a and b == b and abs(b - a) > 1e-9:
+                    sal = pd.to_numeric(m.at[j, "Salary"], errors="coerce") \
+                        if "Salary" in m else float("nan")
+                    promotes.append({"nickname": str(m.at[j, "Nickname"]),
+                                     "from": round(float(a), 2), "to": round(float(b), 2),
+                                     "salary": int(sal) if sal == sal else None})
+            promotes.sort(key=lambda r: -r["to"])
+        sal = pd.to_numeric(m.at[i, "Salary"], errors="coerce") if "Salary" in m else None
+        changes.append({
+            "nickname": nick, "team": m.at[i, "Team"],
+            "position": str(m.at[i, "Position"]).split("/")[0].upper(),
+            "salary": int(sal) if sal is not None and sal == sal else None,
+            "kind": kind, "espn_status": e.status,
+            "board_points": round(board, 2) if board is not None else None,
+            "injury": e.injury_type, "comment": e.comment or None,
+            "updated": e.updated.isoformat() if e.updated == e.updated else None,
+            "applied": applied, "started": m.at[i, "Team"] in started
+                                           or team[i] in started,
+            "promotes": promotes,
+        })
+    order = {"out": 0, "cleared": 1, "questionable": 2}
+    changes.sort(key=lambda c: (c["started"], c["applied"], order[c["kind"]],
+                                -(c["board_points"] or 0)))
+    return changes
+
+
+@router.get("/injury-check")
+def injury_check(
+    season: Optional[int] = Query(None),
+    week: Optional[int] = Query(None),
+    slate_id: Optional[int] = Query(None),
+    refresh: bool = Query(False, description="Skip the two-minute cache of the feed."),
+    db: Session = Depends(get_db),
+):
+    """What ESPN's injury feed says this week that the board and slate do not.
+
+    Read-only. Rule a player out from the pool (rule ``out``) to act on a
+    change instantly, or refresh projections to rerun the board, which reads
+    the same feed.
+    """
+    from nfl_projections import injuries as inj
+    from nfl_projections import optimizer as opt
+
+    season = season or get_current_nfl_season()
+    if week is None:
+        weeks = [w for (w,) in db.query(FanduelSlate.week).filter(
+            FanduelSlate.season == season).distinct().all() if w is not None]
+        if not weeks:
+            raise HTTPException(404, f"No slate CSV saved for {season}.")
+        week = max(weeks)
+    slate_row = _stored_slate(db, season, week, slate_id)
+    if slate_row is None:
+        raise HTTPException(404, f"No slate CSV saved for {season} week {week}.")
+    schedule = _schedule_frame(db, season)
+    window = inj.week_window(season, week, schedule) if not schedule.empty else None
+    if window is None:
+        raise HTTPException(503, f"No schedule stored for {season} week {week}.")
+    try:
+        espn = _espn_frame(refresh)
+    except Exception as exc:
+        raise HTTPException(502, f"ESPN's injury feed did not answer: {exc}")
+    salaries = _csv_frame(slate_row.content or "", "The saved slate")
+    projections = _projection_frame(db, season, week)
+    if projections.empty:
+        raise HTTPException(404, f"No projections for {season} week {week}.")
+    merged = opt.merge_fanduel_salaries(salaries, projections)
+    changes = injury_changes(merged, espn, *window, ruled_out=_ruled_out(db, slate_row.id),
+                             started=_started_teams(schedule, season, week))
+    fresh = int(((espn.updated >= window[0]) & (espn.updated < window[1])).sum())
+    computed = projections.attrs.get("computed_at")
+    return {
+        "status": "success", "season": season, "week": week,
+        "checked_at": _ESPN_CACHE["at"].isoformat() + "Z" if _ESPN_CACHE["at"] else None,
+        "board_computed_at": computed.isoformat() if computed else None,
+        "window": {"since": window[0].isoformat(), "until": window[1].isoformat()},
+        "feed_rows": int(len(espn)), "fresh_rows": fresh,
+        "pending": sum(1 for c in changes if not c["applied"] and not c["started"]
+                       and c["kind"] != "questionable"),
+        "changes": changes,
+    }
+
+
 @router.get("/slate-coverage")
 def slate_coverage(
     season: Optional[int] = Query(None),

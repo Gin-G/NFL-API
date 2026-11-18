@@ -1430,3 +1430,42 @@ export interface PicksUploadResponse {
   unmatched: string[]
   note: string | null
 }
+
+/** GET /optimizer/injury-check: ESPN's in-week news against the board. */
+export type InjuryChangeKind = 'out' | 'cleared' | 'questionable'
+
+export interface InjuryPromotion {
+  nickname: string
+  from: number
+  to: number
+  salary: number | null
+}
+
+export interface InjuryChange {
+  nickname: string
+  team: string
+  position: string
+  salary: number | null
+  kind: InjuryChangeKind
+  espn_status: string
+  board_points: number | null
+  injury: string | null
+  comment: string | null
+  updated: string | null
+  applied: boolean
+  started: boolean
+  promotes: InjuryPromotion[]
+}
+
+export interface InjuryCheckResponse {
+  status: string
+  season: number
+  week: number
+  checked_at: string | null
+  board_computed_at: string | null
+  window: { since: string; until: string }
+  feed_rows: number
+  fresh_rows: number
+  pending: number
+  changes: InjuryChange[]
+}

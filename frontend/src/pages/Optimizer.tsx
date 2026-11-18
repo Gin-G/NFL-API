@@ -9,6 +9,7 @@ import { getAvailableSeasons, getDefaultSeason, getCurrentNFLWeek } from '../uti
 import PageHeader from '../components/ui/PageHeader'
 import ErrorCard from '../components/ui/ErrorCard'
 import PlayerPoolTable from '../components/PlayerPoolTable'
+import InjuryCheck from '../components/InjuryCheck'
 import ConsistencyChart from '../components/ConsistencyChart'
 
 const SEASONS = getAvailableSeasons()
@@ -373,6 +374,7 @@ export default function Optimizer() {
             share of them — and it is kept with the slate, so every later build
             obeys it without being set again.
           </p>
+          <InjuryCheck season={season} week={week} />
           <PlayerPoolTable season={season} week={week} />
         </div>
       )}

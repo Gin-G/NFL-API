@@ -3,6 +3,7 @@ import { apiClient } from './client'
 import type {
   ConsistencyResponse,
   ExposureResponse,
+  InjuryCheckResponse,
   LineupPerformance,
   LineupResponse,
   PlayerPoolResponse,
@@ -229,6 +230,20 @@ export function useClearPoolRules(season: number, week?: number) {
       return data
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['playerPool'] }),
+  })
+}
+
+/** ESPN's injury news this week against the board: who is out that the board
+ *  still projects, who is back. Fetched on demand (the button), not on load. */
+export function useInjuryCheck(season: number, week?: number) {
+  return useMutation({
+    mutationFn: async (refresh: boolean = false) => {
+      const params: Record<string, number | boolean> = { season, refresh }
+      if (week !== undefined) params.week = week
+      const { data } = await apiClient.get<InjuryCheckResponse>(
+        '/optimizer/injury-check', { params })
+      return data
+    },
   })
 }
 
