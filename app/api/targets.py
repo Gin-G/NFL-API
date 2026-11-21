@@ -25,6 +25,7 @@ board does not.
 """
 import csv
 import io
+import json
 import logging
 from datetime import datetime
 from typing import Optional, Union
@@ -34,7 +35,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from database.models import ExpertPick, PlayerStat, TargetNote
+from database.models import ExpertPick, PlayerStat, TargetLineup, TargetNote
 from database.session import get_db
 from .utils import fanduel_points, get_current_nfl_season
 
@@ -205,6 +206,101 @@ def put_notes(note: NoteBody, db: Session = Depends(get_db)):
 
 
 # --------------------------------------------------------------------------
+# Lineups
+# --------------------------------------------------------------------------
+
+LINEUP_KINDS = ("cash", "gpp")
+MAX_RATIONALE_CHARS = 3_000
+
+
+class LineupPlayerBody(BaseModel):
+    slot: str
+    player: str
+    player_id: Optional[str] = None
+    position: Optional[str] = None
+    team: Optional[str] = None
+    salary: Optional[int] = None
+    projected: Optional[float] = None
+    ceiling: Optional[float] = None
+
+
+class LineupBody(BaseModel):
+    season: Optional[int] = None
+    week: int
+    kind: str
+    title: str = ""
+    rationale: str = ""
+    players: list[LineupPlayerBody] = []
+
+
+def _lineups(db, season, week) -> list[dict]:
+    """The week's stored lineups, each graded once its players have stats.
+
+    A player with no id (a defense) has no stat row here, so a lineup's total
+    is only reported once every player WITH an id has played; `unscored`
+    says how many slots that total leaves out."""
+    rows = db.query(TargetLineup).filter_by(season=season, week=week).all()
+    out = []
+    for r in sorted(rows, key=lambda r: LINEUP_KINDS.index(r.kind)
+                    if r.kind in LINEUP_KINDS else 9):
+        try:
+            players = json.loads(r.players or "[]")
+        except ValueError:
+            players = []
+        ids = [p["player_id"] for p in players if p.get("player_id")]
+        actual = _actuals(db, season, week, ids) if ids else {}
+        for p in players:
+            p["actual"] = actual.get(p.get("player_id"))
+        scored = [p for p in players if p.get("player_id")]
+        done = bool(scored) and all(p["actual"] is not None for p in scored)
+        out.append({
+            "kind": r.kind, "title": r.title, "rationale": r.rationale,
+            "players": players,
+            "salary": sum(p.get("salary") or 0 for p in players),
+            "projected": round(sum(p.get("projected") or 0 for p in players), 1),
+            "ceiling": round(sum(p.get("ceiling") or 0 for p in players), 1),
+            "actual": round(sum(p["actual"] or 0 for p in players), 1) if done else None,
+            "unscored": sum(1 for p in players if p["actual"] is None) if done else None,
+            "updated_at": r.updated_at,
+        })
+    return out
+
+
+@router.put("/lineups")
+def put_lineup(lineup: LineupBody, db: Session = Depends(get_db)):
+    """Set the week's cash or tournament lineup (replaces it). No players clears it.
+
+    Display only: built from the article pool with our board choosing, shown and
+    graded on the page, never fed to the projections or the optimizer."""
+    season = lineup.season or get_current_nfl_season()
+    if lineup.kind not in LINEUP_KINDS:
+        raise HTTPException(400, f"kind must be one of {', '.join(LINEUP_KINDS)}.")
+    if len(lineup.players) > 9:
+        raise HTTPException(400, "A FanDuel lineup is nine players.")
+    if len(lineup.rationale) > MAX_RATIONALE_CHARS:
+        raise HTTPException(413, f"The rationale is capped at {MAX_RATIONALE_CHARS:,} "
+                                 "characters.")
+    row = db.query(TargetLineup).filter_by(season=season, week=lineup.week,
+                                           kind=lineup.kind).one_or_none()
+    if not lineup.players:
+        if row is not None:
+            db.delete(row)
+            db.commit()
+        return {"status": "success", "season": season, "week": lineup.week,
+                "lineups": _lineups(db, season, lineup.week)}
+    if row is None:
+        row = TargetLineup(season=season, week=lineup.week, kind=lineup.kind)
+        db.add(row)
+    row.title = lineup.title.strip()[:120]
+    row.rationale = lineup.rationale.strip()
+    row.players = json.dumps([p.model_dump() for p in lineup.players])
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    return {"status": "success", "season": season, "week": lineup.week,
+            "lineups": _lineups(db, season, lineup.week)}
+
+
+# --------------------------------------------------------------------------
 # The page
 # --------------------------------------------------------------------------
 
@@ -284,7 +380,8 @@ def players_to_target(season: Optional[int] = Query(None), week: int = Query(...
     if not picks:
         return {"status": "success", "season": season, "week": week, "count": 0,
                 "agree": [], "skeptical": [], "no_board": [], "scored": None,
-                "depth": DEPTH, "articles": [], "notes": _note(db, season, week)}
+                "depth": DEPTH, "articles": [], "notes": _note(db, season, week),
+                "lineups": _lineups(db, season, week)}
 
     board = _projection_frame(db, season, week)
     ranked = rank_board(board, _slate_frame(db, season, week, board)) \
@@ -352,6 +449,7 @@ def players_to_target(season: Optional[int] = Query(None), week: int = Query(...
         "scored": scored or None, "depth": DEPTH,
         "articles": sorted({p.article for p in picks}),
         "notes": _note(db, season, week),
+        "lineups": _lineups(db, season, week),
         "rule": ("Agree: inside our top N at the position by projected points or "
                  "by points per $1,000. Skeptical: outside both. N = "
                  + ", ".join(f"{k} {v}" for k, v in DEPTH.items())

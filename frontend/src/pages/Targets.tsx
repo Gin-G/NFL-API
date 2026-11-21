@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
-import { Info, NotebookPen, Upload } from 'lucide-react'
+import { Info, ListChecks, NotebookPen, Upload } from 'lucide-react'
 import { useSaveNotes, useTargets, useUploadPicks } from '../api/targets'
-import type { TargetNotes, TargetPileScore, TargetRow } from '../api/types'
+import type { TargetLineup, TargetNotes, TargetPileScore, TargetRow } from '../api/types'
 import { getAvailableSeasons, getDefaultSeason, getCurrentNFLWeek } from '../utils/nflDate'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
@@ -213,6 +213,77 @@ function NotesCard({ notes, week, season }: { notes: TargetNotes | null; week: n
   )
 }
 
+function LineupCard({ l }: { l: TargetLineup }) {
+  const played = l.actual !== null
+  return (
+    <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 min-w-0">
+      <div className="flex items-baseline justify-between gap-3 mb-1">
+        <h3 className="text-white font-semibold">{l.title || (l.kind === 'cash' ? 'Cash' : 'Tournament')}</h3>
+        <span className="text-slate-500 text-xs uppercase tracking-wide">{l.kind === 'cash' ? 'Cash' : 'GPP'}</span>
+      </div>
+      <div className="text-slate-400 text-xs tabular-nums mb-3">
+        {money(l.salary)} · our proj {l.projected.toFixed(1)} · ceiling {l.ceiling.toFixed(1)}
+        {played && (
+          <span className="text-slate-200">
+            {' '}· scored {l.actual!.toFixed(1)}
+            {l.unscored ? ` (+ DEF)` : ''}
+          </span>
+        )}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-slate-400 text-xs border-b border-slate-700">
+              <th className="text-left font-medium py-1.5 pr-3">Slot</th>
+              <th className="text-left font-medium py-1.5 pr-3">Player</th>
+              <th className="text-right font-medium py-1.5 pr-3">Salary</th>
+              <th className="text-right font-medium py-1.5 pr-3">Proj</th>
+              <th className="text-right font-medium py-1.5 pr-3">Ceiling</th>
+              {played && <th className="text-right font-medium py-1.5">Actual</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {l.players.map((p) => (
+              <tr key={p.slot + p.player} className="border-b border-slate-800">
+                <td className="py-1.5 pr-3 text-slate-400 text-xs whitespace-nowrap">{p.slot}</td>
+                <td className="py-1.5 pr-3">
+                  <span className="text-white">{p.player}</span>
+                  <span className="text-slate-500 text-xs"> · {p.team ?? '—'}</span>
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums text-slate-300">{money(p.salary)}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums text-white">{fmt(p.projected)}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums text-slate-400">{fmt(p.ceiling)}</td>
+                {played && <td className="py-1.5 text-right tabular-nums text-white">{fmt(p.actual)}</td>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {l.rationale && (
+        <div className="mt-3 space-y-1.5">
+          {l.rationale.split('\n').filter((s) => s.trim()).map((s, i) => (
+            <p key={i} className="text-slate-400 text-xs">{s.replace(/^- /, '• ')}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LineupsSection({ lineups, week }: { lineups: TargetLineup[]; week: number }) {
+  if (!lineups.length) return null
+  return (
+    <section className="mb-6">
+      <h2 className="text-white font-semibold mb-3 flex items-center gap-2">
+        <ListChecks size={16} className="text-slate-400" /> Week {week} lineups
+      </h2>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        {lineups.map((l) => <LineupCard key={l.kind} l={l} />)}
+      </div>
+    </section>
+  )
+}
+
 export default function Targets() {
   const defaultSeason = getDefaultSeason()
   const [season, setSeason] = useState(defaultSeason)
@@ -288,6 +359,7 @@ export default function Targets() {
       </div>
 
       {data && <NotesCard notes={data.notes ?? null} week={week} season={season} />}
+      {data && <LineupsSection lineups={data.lineups ?? []} week={week} />}
 
       <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-6 flex gap-3">
         <Info className="text-slate-400 shrink-0 mt-0.5" size={16} />

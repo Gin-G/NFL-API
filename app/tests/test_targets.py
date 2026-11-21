@@ -178,3 +178,58 @@ class TestNotes:
         r = client.put("/targets/notes", json={"season": SEASON, "week": WEEK,
                                                "body": "x" * (targets.MAX_NOTE_CHARS + 1)})
         assert r.status_code == 413
+
+
+def _lineup(kind="cash", players=None):
+    players = players if players is not None else [
+        {"slot": "QB", "player": "Some Passer", "player_id": "qb1", "position": "QB",
+         "team": "DAL", "salary": 8200, "projected": 22.4, "ceiling": 40.1},
+        {"slot": "RB", "player": "James Cook", "player_id": "cook", "position": "RB",
+         "team": "BUF", "salary": 8600, "projected": 17.3, "ceiling": 33.7},
+        {"slot": "DEF", "player": "Chargers", "player_id": None, "position": "D",
+         "team": "LAC", "salary": 3500, "projected": 8.0, "ceiling": None},
+    ]
+    return {"season": SEASON, "week": WEEK, "kind": kind, "title": "Cash",
+            "rationale": "why", "players": players}
+
+
+class TestLineups:
+    @pytest.fixture(autouse=True)
+    def _clear(self, db_session):
+        from database.models import TargetLineup
+        db_session.query(TargetLineup).delete(); db_session.commit()
+
+    def test_round_trip_replaces_and_orders_cash_first(self, client):
+        assert client.put("/targets/lineups", json=_lineup("gpp")).status_code == 200
+        assert client.put("/targets/lineups", json=_lineup("cash")).status_code == 200
+        r = client.put("/targets/lineups", json={**_lineup("cash"), "title": "Cash v2"})
+        got = client.get("/targets/", params={"season": SEASON, "week": WEEK}).json()
+        assert [l["kind"] for l in got["lineups"]] == ["cash", "gpp"]
+        cash = got["lineups"][0]
+        assert cash["title"] == "Cash v2"
+        assert cash["salary"] == 20300 and cash["projected"] == 47.7
+        assert cash["actual"] is None             # nothing played yet
+
+    def test_graded_once_every_player_with_an_id_has_played(self, client, db_session):
+        client.put("/targets/lineups", json=_lineup())
+        for pid in ("qb1", "cook"):
+            db_session.add(PlayerStat(player_id=pid, season=SEASON, week=WEEK,
+                                      player_name=pid, player_display_name=pid,
+                                      position="RB", recent_team="BUF",
+                                      season_type="REG", rushing_yards=50.0))
+            db_session.commit()
+            got = client.get("/targets/", params={"season": SEASON, "week": WEEK}).json()
+            cash = got["lineups"][0]
+            if pid == "qb1":
+                assert cash["actual"] is None      # Cook still to play
+        assert cash["actual"] == 10.0 and cash["unscored"] == 1   # the defense
+        assert [p["actual"] for p in cash["players"]] == [5.0, 5.0, None]
+
+    def test_empty_players_clears_and_bad_kind_refused(self, client):
+        client.put("/targets/lineups", json=_lineup())
+        client.put("/targets/lineups", json=_lineup(players=[]))
+        got = client.get("/targets/", params={"season": SEASON, "week": WEEK}).json()
+        assert got["lineups"] == []
+        assert client.put("/targets/lineups", json=_lineup("showdown")).status_code == 400
+        ten = _lineup()["players"][:1] * 10
+        assert client.put("/targets/lineups", json=_lineup(players=ten)).status_code == 400

@@ -1423,6 +1423,33 @@ export interface TargetsResponse {
   articles: string[]
   rule?: string
   notes: TargetNotes | null
+  lineups?: TargetLineup[]
+}
+
+export interface TargetLineupPlayer {
+  slot: string
+  player: string
+  player_id: string | null
+  position: string | null
+  team: string | null
+  salary: number | null
+  projected: number | null
+  ceiling: number | null
+  actual: number | null
+}
+
+/** A cash or tournament lineup built from the article pool, our board choosing. */
+export interface TargetLineup {
+  kind: 'cash' | 'gpp'
+  title: string
+  rationale: string
+  players: TargetLineupPlayer[]
+  salary: number
+  projected: number
+  ceiling: number
+  actual: number | null
+  unscored: number | null
+  updated_at: string
 }
 
 /** The week's notes: our own summary of the articles. `## ` heads, `- ` bullets. */

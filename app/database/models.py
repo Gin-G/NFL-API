@@ -449,6 +449,32 @@ class TargetNote(Base):
     )
 
 
+class TargetLineup(Base):
+    """A lineup shown on the Players to Target page: one cash, one tournament.
+
+    Built by the optimizer from a pool cut down to the week's article picks,
+    with our board choosing among them. ``players`` is a JSON list of
+    ``{slot, player, player_id, position, team, salary, projected, ceiling}``.
+    ``rationale`` is our own short why. **Display only**: the page grades it
+    against what the players scored, and it never feeds the projections or the
+    optimizer.
+    """
+    __tablename__ = "target_lineups"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    season     = Column(Integer)
+    week       = Column(Integer)
+    kind       = Column(String(8))        # "cash" | "gpp"
+    title      = Column(String(120))
+    rationale  = Column(Text)
+    players    = Column(Text)             # JSON list, see the docstring
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("season", "week", "kind", name="uq_target_lineups_week_kind"),
+    )
+
+
 class ExternalSnapshot(Base):
     """One hand-exported third-party matchup table, kept verbatim.
 
