@@ -31,9 +31,10 @@ from typing import Optional, Union
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from database.models import ExpertPick, PlayerStat
+from database.models import ExpertPick, PlayerStat, TargetNote
 from database.session import get_db
 from .utils import fanduel_points, get_current_nfl_season
 
@@ -46,6 +47,7 @@ POSITIONS = ("QB", "RB", "WR", "TE")
 DEPTH = {"QB": 8, "RB": 16, "WR": 24, "TE": 8}
 TAGS = ("cash", "gpp", "punt", "favorite_cash", "favorite_gpp", "mention")
 MAX_CSV_BYTES = 200_000
+MAX_NOTE_CHARS = 20_000
 
 
 # --------------------------------------------------------------------------
@@ -160,6 +162,49 @@ def delete_picks(season: int = Query(...), week: int = Query(...),
 
 
 # --------------------------------------------------------------------------
+# Notes
+# --------------------------------------------------------------------------
+
+class NoteBody(BaseModel):
+    season: Optional[int] = None
+    week: int
+    body: str
+
+
+def _note(db, season, week) -> Optional[dict]:
+    n = db.query(TargetNote).filter_by(season=season, week=week).one_or_none()
+    if n is None or not (n.body or "").strip():
+        return None
+    return {"body": n.body, "updated_at": n.updated_at}
+
+
+@router.put("/notes")
+def put_notes(note: NoteBody, db: Session = Depends(get_db)):
+    """Set the week's notes (replaces them). An empty body clears them.
+
+    A summary in our own words of what the week's articles agree and disagree
+    on, never their text. Plain text: `## ` heads a section, `- ` a bullet."""
+    season = note.season or get_current_nfl_season()
+    body = note.body.strip()
+    if len(body) > MAX_NOTE_CHARS:
+        raise HTTPException(413, f"Notes are capped at {MAX_NOTE_CHARS:,} characters; "
+                                 "this is a summary, not the articles.")
+    row = db.query(TargetNote).filter_by(season=season, week=note.week).one_or_none()
+    if not body:
+        if row is not None:
+            db.delete(row)
+            db.commit()
+        return {"status": "success", "season": season, "week": note.week, "notes": None}
+    if row is None:
+        row = TargetNote(season=season, week=note.week)
+        db.add(row)
+    row.body, row.updated_at = body, datetime.utcnow()
+    db.commit()
+    return {"status": "success", "season": season, "week": note.week,
+            "notes": _note(db, season, note.week)}
+
+
+# --------------------------------------------------------------------------
 # The page
 # --------------------------------------------------------------------------
 
@@ -239,7 +284,7 @@ def players_to_target(season: Optional[int] = Query(None), week: int = Query(...
     if not picks:
         return {"status": "success", "season": season, "week": week, "count": 0,
                 "agree": [], "skeptical": [], "no_board": [], "scored": None,
-                "depth": DEPTH, "articles": []}
+                "depth": DEPTH, "articles": [], "notes": _note(db, season, week)}
 
     board = _projection_frame(db, season, week)
     ranked = rank_board(board, _slate_frame(db, season, week, board)) \
@@ -306,6 +351,7 @@ def players_to_target(season: Optional[int] = Query(None), week: int = Query(...
         "count": sum(len(v) for v in piles.values()), **piles,
         "scored": scored or None, "depth": DEPTH,
         "articles": sorted({p.article for p in picks}),
+        "notes": _note(db, season, week),
         "rule": ("Agree: inside our top N at the position by projected points or "
                  "by points per $1,000. Skeptical: outside both. N = "
                  + ", ".join(f"{k} {v}" for k, v in DEPTH.items())

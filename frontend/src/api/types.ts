@@ -1422,6 +1422,13 @@ export interface TargetsResponse {
   depth: Record<string, number>
   articles: string[]
   rule?: string
+  notes: TargetNotes | null
+}
+
+/** The week's notes: our own summary of the articles. `## ` heads, `- ` bullets. */
+export interface TargetNotes {
+  body: string
+  updated_at: string
 }
 
 export interface PicksUploadResponse {

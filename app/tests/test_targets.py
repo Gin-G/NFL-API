@@ -149,3 +149,32 @@ class TestThePoolShowsThem:
         assert tags["cook"]["tags"] == ["cash", "gpp", "favorite_cash"]
         assert tags["cook"]["articles"] == ["RB Coach", "Cash Breakdown"]
         assert "nobody" not in str(tags)            # unmatched picks carry no id
+
+
+class TestNotes:
+    def test_notes_round_trip_and_replace(self, client, db_session):
+        from database.models import TargetNote
+        db_session.query(TargetNote).delete(); db_session.commit()
+        r = client.put("/targets/notes", json={"season": SEASON, "week": WEEK,
+                                               "body": "## Games\n- DAL/TEN is the spot"})
+        assert r.status_code == 200
+        got = client.get("/targets/", params={"season": SEASON, "week": WEEK}).json()
+        assert got["notes"]["body"].startswith("## Games")
+        client.put("/targets/notes", json={"season": SEASON, "week": WEEK, "body": "- replaced"})
+        got = client.get("/targets/", params={"season": SEASON, "week": WEEK}).json()
+        assert got["notes"]["body"] == "- replaced"
+        assert db_session.query(TargetNote).filter_by(season=SEASON, week=WEEK).count() == 1
+
+    def test_notes_show_with_picks_and_clear_on_empty(self, client, db_session):
+        _board(db_session)
+        _upload(client)
+        client.put("/targets/notes", json={"season": SEASON, "week": WEEK, "body": "- a note"})
+        got = client.get("/targets/", params={"season": SEASON, "week": WEEK}).json()
+        assert got["count"] > 0 and got["notes"]["body"] == "- a note"
+        client.put("/targets/notes", json={"season": SEASON, "week": WEEK, "body": "   "})
+        assert client.get("/targets/", params={"season": SEASON, "week": WEEK}).json()["notes"] is None
+
+    def test_notes_are_capped(self, client):
+        r = client.put("/targets/notes", json={"season": SEASON, "week": WEEK,
+                                               "body": "x" * (targets.MAX_NOTE_CHARS + 1)})
+        assert r.status_code == 413

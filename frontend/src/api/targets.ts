@@ -30,3 +30,15 @@ export function useUploadPicks(season: number, week: number) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['targets', season, week] }),
   })
 }
+
+/** Replace the week's notes; an empty body clears them. */
+export function useSaveNotes(season: number, week: number) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (body: string) => {
+      const { data } = await apiClient.put('/targets/notes', { season, week, body })
+      return data
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['targets', season, week] }),
+  })
+}

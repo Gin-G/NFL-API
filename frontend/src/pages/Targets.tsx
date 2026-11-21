@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
-import { Info, Upload } from 'lucide-react'
-import { useTargets, useUploadPicks } from '../api/targets'
-import type { TargetPileScore, TargetRow } from '../api/types'
+import { Info, NotebookPen, Upload } from 'lucide-react'
+import { useSaveNotes, useTargets, useUploadPicks } from '../api/targets'
+import type { TargetNotes, TargetPileScore, TargetRow } from '../api/types'
 import { getAvailableSeasons, getDefaultSeason, getCurrentNFLWeek } from '../utils/nflDate'
 import PageHeader from '../components/ui/PageHeader'
 import SkeletonCard from '../components/ui/SkeletonCard'
@@ -119,6 +119,100 @@ function ScoreLine({ label, s }: { label: string; s?: TargetPileScore }) {
   )
 }
 
+/** `## ` lines are headings, `- ` lines bullets, anything else a paragraph. */
+function NotesBody({ body }: { body: string }) {
+  const blocks: { head?: string; items: string[]; paras: string[] }[] = [{ items: [], paras: [] }]
+  for (const raw of body.split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    if (line.startsWith('## ')) blocks.push({ head: line.slice(3), items: [], paras: [] })
+    else if (line.startsWith('- ')) blocks[blocks.length - 1].items.push(line.slice(2))
+    else blocks[blocks.length - 1].paras.push(line)
+  }
+  const shown = blocks.filter((b) => b.head || b.items.length || b.paras.length)
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-4">
+      {shown.map((b, i) => (
+        <div key={i} className="min-w-0">
+          {b.head && <h3 className="text-slate-200 text-sm font-semibold mb-1.5">{b.head}</h3>}
+          {b.paras.map((p, j) => (
+            <p key={j} className="text-slate-300 text-sm mb-1.5">{p}</p>
+          ))}
+          {b.items.length > 0 && (
+            <ul className="space-y-1">
+              {b.items.map((it, j) => (
+                <li key={j} className="text-slate-300 text-sm flex gap-2">
+                  <span className="text-slate-500 select-none">•</span>
+                  <span className="min-w-0">{it}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function NotesCard({ notes, week, season }: { notes: TargetNotes | null; week: number; season: number }) {
+  const save = useSaveNotes(season, week)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  if (!notes && !editing) {
+    return (
+      <button
+        onClick={() => { setDraft(''); setEditing(true) }}
+        className="mb-6 flex items-center gap-2 text-slate-400 hover:text-slate-200 text-sm"
+      >
+        <NotebookPen size={14} /> Add week {week} notes
+      </button>
+    )
+  }
+  return (
+    <section className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <h2 className="text-white font-semibold flex items-center gap-2">
+          <NotebookPen size={16} className="text-slate-400" /> Week {week} notes
+        </h2>
+        {!editing ? (
+          <button
+            onClick={() => { setDraft(notes?.body ?? ''); setEditing(true) }}
+            className="text-slate-400 hover:text-slate-200 text-xs"
+          >
+            Edit
+          </button>
+        ) : (
+          <div className="flex items-center gap-3">
+            <button onClick={() => setEditing(false)} className="text-slate-400 hover:text-slate-200 text-xs">
+              Cancel
+            </button>
+            <button
+              onClick={() => save.mutate(draft, { onSuccess: () => setEditing(false) })}
+              disabled={save.isPending}
+              className="px-3 py-1 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-white text-xs rounded-lg disabled:opacity-50"
+            >
+              {save.isPending ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        )}
+      </div>
+      {editing ? (
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={14}
+          className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-slate-200 text-sm font-mono"
+          placeholder={'## Heading\n- a bullet'}
+          aria-label="Week notes"
+        />
+      ) : (
+        notes && <NotesBody body={notes.body} />
+      )}
+      {save.error && <p className="text-red-400 text-xs mt-2">Could not save the notes.</p>}
+    </section>
+  )
+}
+
 export default function Targets() {
   const defaultSeason = getDefaultSeason()
   const [season, setSeason] = useState(defaultSeason)
@@ -192,6 +286,8 @@ export default function Targets() {
           </span>
         )}
       </div>
+
+      {data && <NotesCard notes={data.notes ?? null} week={week} season={season} />}
 
       <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-6 flex gap-3">
         <Info className="text-slate-400 shrink-0 mt-0.5" size={16} />

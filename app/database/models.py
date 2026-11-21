@@ -426,6 +426,29 @@ class ExpertPick(Base):
     )
 
 
+class TargetNote(Base):
+    """The week's notes for the Players to Target page: one block of text per week.
+
+    A short summary in our own words of the points that come up across the
+    week's articles: the games everyone is attacking, the injury calls, where
+    the writers disagree with each other. **It is a summary, never the
+    articles' text.** Display only, like the picks.
+
+    The body is plain text: ``## `` starts a heading and ``- `` a bullet.
+    """
+    __tablename__ = "target_notes"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    season     = Column(Integer)
+    week       = Column(Integer)
+    body       = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("season", "week", name="uq_target_notes_week"),
+    )
+
+
 class ExternalSnapshot(Base):
     """One hand-exported third-party matchup table, kept verbatim.
 
