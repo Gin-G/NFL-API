@@ -26,6 +26,16 @@
 # Those extra runs are harmless: cached model, minutes each, and Sunday 17:00
 # still refreshes the night games before their kickoff.
 #
+# Wednesday and Thursday too (2026-11-24, ahead of week 12's Thanksgiving
+# slate: GB@LA Wednesday 18:00 MT, three Thursday, one Friday). The Tue/Wed
+# 21:00 job alone left the Wednesday game with nothing after Tuesday night and
+# the Thursday games with nothing after Wednesday night:
+#   Wed 14:00  before sharp-edge's lock (16:00) on a Wednesday game
+#   Wed 17:00  after its inactives (~16:30), for the DFS side
+#   Thu 06:00  before the first Thanksgiving lock (08:30)
+# And 14:00 every listed day: Sun 14:00 sees the late-afternoon inactives.
+# Every run on an ordinary week's Wed/Thu just reuses the cached model.
+#
 # In the CHART rather than in k8s/, where this file sat from 2026-10-28 until
 # 2026-11-10 without ever running: k8s/ waits on a hand `kubectl apply`, and
 # GET /projections/refresh on 2026-11-09 still gave the Wednesday run as the
@@ -47,7 +57,7 @@ metadata:
     app: {{ .Values.webapp.name }}-projections-refresh
     group: {{ .Values.webapp.group }}
 spec:
-  schedule: "0 6,17 * * 0,5,6"
+  schedule: "0 6,14,17 * * 0,3,4,5,6"
   timeZone: "America/Denver"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
