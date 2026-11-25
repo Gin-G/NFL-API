@@ -300,6 +300,51 @@ def _record_run(db, *, job, season: int, week: int, as_of: int, model_version: s
             week, inj.get("report_latest_week"), int(inj.get("ir_players") or 0))
 
 
+def _injury_feeds_down(provenance) -> bool:
+    """True when the run asked for injuries and every feed failed to answer.
+
+    Not the same as an empty report. An unfiled Tuesday report still reads the
+    feed (``report_latest_week`` is last week); a failed read carries
+    ``report_error`` and knows no week at all. 2026 week 12's 14:00 run hit both
+    feeds down at once and published Kenneth Walker, ruled out that morning,
+    back at 18.5.
+    """
+    inj = (provenance or {}).get("injuries") or {}
+    if inj.get("source") in (None, "disabled"):
+        return False
+    nflverse_down = "report_error" in inj
+    espn_down = "espn_error" in inj or inj.get("source") == "nflverse"
+    return nflverse_down and espn_down
+
+
+def _keep_previous_board(db, season: int, week: int, provenance):
+    """A reason to leave the published week alone, or None to publish.
+
+    A run that could not read any injury feed must not replace a board that
+    could: the model is the same all week, so all it would change is to put
+    every player ruled out back in. With no earlier run for the week there is
+    nothing better to keep, and it publishes as before (IR still applies).
+    """
+    if not _injury_feeds_down(provenance):
+        return None
+    from database.models import ProjectionRun
+    try:
+        prior = (db.query(ProjectionRun)
+                 .filter(ProjectionRun.season == season, ProjectionRun.week == week,
+                         ProjectionRun.injury_report_latest_week.isnot(None))
+                 .order_by(ProjectionRun.id.desc()).first())
+    except Exception as exc:
+        logger.warning("Could not look up earlier runs (%s); publishing", exc)
+        return None
+    if prior is None:
+        return None
+    inj = (provenance or {}).get("injuries") or {}
+    return (f"Every injury feed failed (nflverse: {inj.get('report_error')}; "
+            f"ESPN: {inj.get('espn_error', 'not used')}). Kept run {prior.id}'s "
+            f"week {week} board, which had them, rather than publish one with "
+            f"every ruled-out player back in.")
+
+
 def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         seeds: int = None, overwrite_started: bool = False,
         model_cache: str = None, shadow_min_season: int = None) -> None:
@@ -388,6 +433,12 @@ def run(db, season: int, week: int, epochs: int, job, end_week: int = None,
         logger.warning("No projections produced for %d week %d", season, week)
         return
     model_version = getattr(nfl_projections, "__version__", "unknown")
+
+    kept = _keep_previous_board(db, season, week, getattr(svc, "last_provenance", None))
+    if kept:
+        _update_job(db, job, status="failed", error_message=kept)
+        logger.error(kept)
+        return
 
     # Teams already playing (or done) keep the projection they went in with. The
     # Wednesday-night run lands after a Wednesday kickoff (week 12's GB@LA), and a

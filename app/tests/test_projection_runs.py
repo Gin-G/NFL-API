@@ -254,3 +254,51 @@ class TestStampParsing:
         assert compute_projections._as_naive_utc("not a date") is None
         assert compute_projections._as_naive_utc(None) is None
         assert compute_projections._as_naive_utc("") is None
+
+
+class TestKeepPreviousBoard:
+    """2026 week 12, 14:00: nflverse and ESPN both failed inside the job and the
+    run republished every ruled-out player (Walker back at 18.5). A run that
+    could read no injury feed must not replace one that could."""
+
+    DOWN = {"injuries": {"source": "nflverse", "report_latest_week": None,
+                         "report_error": "timed out", "espn_error": "timed out"}}
+
+    def _prior(self, db, latest_week=12):
+        db.add(ProjectionRun(season=2026, week=12, as_of_week=11,
+                             computed_at=datetime(2026, 11, 25, 18),
+                             injury_source="nflverse+espn",
+                             injury_report_latest_week=latest_week))
+        db.commit()
+
+    def test_both_feeds_down_keeps_the_earlier_board(self, db_session):
+        self._prior(db_session)
+        reason = compute_projections._keep_previous_board(db_session, 2026, 12, self.DOWN)
+        assert reason and "Every injury feed failed" in reason
+
+    def test_with_no_earlier_run_it_still_publishes(self, db_session):
+        assert compute_projections._keep_previous_board(db_session, 2026, 12, self.DOWN) is None
+
+    def test_an_earlier_run_that_was_also_blind_is_nothing_to_keep(self, db_session):
+        self._prior(db_session, latest_week=None)
+        assert compute_projections._keep_previous_board(db_session, 2026, 12, self.DOWN) is None
+
+    def test_an_unfiled_report_is_not_a_failure(self, db_session):
+        """Tuesday: the feed answered, nobody had filed. That board publishes."""
+        self._prior(db_session)
+        prov = {"injuries": {"source": "nflverse+espn", "report_latest_week": 11,
+                             "report_available": False}}
+        assert compute_projections._keep_previous_board(db_session, 2026, 12, prov) is None
+
+    def test_one_feed_answering_is_enough(self, db_session):
+        self._prior(db_session)
+        espn_only = {"injuries": {"source": "nflverse+espn", "report_error": "timed out"}}
+        nflverse_only = {"injuries": {"source": "nflverse", "report_latest_week": 12,
+                                      "espn_error": "timed out"}}
+        for prov in (espn_only, nflverse_only):
+            assert compute_projections._keep_previous_board(db_session, 2026, 12, prov) is None
+
+    def test_injuries_disabled_or_unknown_never_blocks(self, db_session):
+        self._prior(db_session)
+        for prov in (None, {}, {"injuries": {"source": "disabled", "report_error": "x"}}):
+            assert compute_projections._keep_previous_board(db_session, 2026, 12, prov) is None
